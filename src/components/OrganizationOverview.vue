@@ -1,6 +1,22 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { ClueRecord, OrganizationSnapshot, PersonRecord, RelationshipRecord, TimelineRecord } from '../services/vault'
+import { computed, ref } from 'vue'
+import type {
+  ClueRecord,
+  OrganizationCluePointSuggestion,
+  OrganizationPersonSuggestion,
+  OrganizationRelationshipSuggestion,
+  OrganizationSnapshot,
+  OrganizationTimelineSuggestion,
+  PersonRecord,
+  RelationshipRecord,
+  TimelineRecord,
+} from '../services/vault'
+
+type Suggestion =
+  | { kind: 'people'; item: OrganizationPersonSuggestion }
+  | { kind: 'relationships'; item: OrganizationRelationshipSuggestion }
+  | { kind: 'timeline'; item: OrganizationTimelineSuggestion }
+  | { kind: 'cluePoints'; item: OrganizationCluePointSuggestion }
 
 const props = defineProps<{
   clues: ClueRecord[]
@@ -21,61 +37,105 @@ const emit = defineEmits<{
   acceptTimeline: [id: string]
   acceptCluePoint: [id: string]
 }>()
-const cluePointCount = computed(() => new Set((props.organization?.cluePoints || []).map(item => item.sourceNo)).size)
-const pendingCount = computed(() => {
+const activeFilter = ref('all')
+const allSuggestions = computed<Suggestion[]>(() => {
   const result = props.organization
-  return result ? result.people.length + result.relationships.length + result.timeline.length + result.cluePoints.length : 0
+  if (!result) return []
+  return [
+    ...result.people.map(item => ({ kind: 'people' as const, item })),
+    ...result.relationships.map(item => ({ kind: 'relationships' as const, item })),
+    ...result.timeline.map(item => ({ kind: 'timeline' as const, item })),
+    ...result.cluePoints.map(item => ({ kind: 'cluePoints' as const, item })),
+  ]
 })
-const clueFor = (sourceNo: number) => props.clues.find(clue => clue.number === sourceNo)
+const pendingCount = computed(() => allSuggestions.value.length)
+const cluePointCount = computed(() => new Set((props.organization?.cluePoints || []).map(item => item.sourceNo)).size)
+const filters = computed(() => [
+  { id: 'all', label: '全部', count: pendingCount.value },
+  { id: 'people', label: '人物', count: props.organization?.people.length || 0 },
+  { id: 'relationships', label: '关系', count: props.organization?.relationships.length || 0 },
+  { id: 'timeline', label: '时间', count: props.organization?.timeline.length || 0 },
+  { id: 'cluePoints', label: '线索点', count: props.organization?.cluePoints.length || 0 },
+])
+const visibleSuggestions = computed(() => activeFilter.value === 'all'
+  ? allSuggestions.value
+  : allSuggestions.value.filter(item => item.kind === activeFilter.value))
 const dateLabel = (value: string) => {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date)
+}
+const kindLabel = (kind: Suggestion['kind']) => ({ people: '人物', relationships: '关系', timeline: '时间', cluePoints: '线索点' })[kind]
+const sourceNo = (item: Suggestion['item']) => item.sourceNo
+const quote = (item: Suggestion['item']) => item.quote
+const title = (suggestion: Suggestion) => {
+  if (suggestion.kind === 'people') return `${suggestion.item.name}${suggestion.item.aliases.length ? ` · 又名 ${suggestion.item.aliases.join('、')}` : ''}`
+  if (suggestion.kind === 'relationships') return `${suggestion.item.from}  ·  ${suggestion.item.label}  ·  ${suggestion.item.to}`
+  if (suggestion.kind === 'timeline') return `${dateLabel(suggestion.item.startsAt)}  ·  ${suggestion.item.title}`
+  return `${suggestion.item.title}${suggestion.item.category ? `  ·  ${suggestion.item.category}` : ''}`
+}
+const actionLabel = (kind: Suggestion['kind']) => ({ people: '加入人物', relationships: '确认关系', timeline: '确认时间', cluePoints: '应用到线索' })[kind]
+function accept(suggestion: Suggestion) {
+  if (suggestion.kind === 'people') emit('acceptPerson', suggestion.item.id)
+  else if (suggestion.kind === 'relationships') emit('acceptRelationship', suggestion.item.id)
+  else if (suggestion.kind === 'timeline') emit('acceptTimeline', suggestion.item.id)
+  else emit('acceptCluePoint', suggestion.item.id)
 }
 </script>
 
 <template>
   <section class="page organization-page">
-    <header class="page-header">
-      <div><h1>整理总览</h1><p>人物、关系、时间和线索主题集中在这里，每项都能回到原始线索。</p></div>
-      <button class="primary-button" :disabled="busy || !clues.some(item => item.ocrText.trim())" @click="emit('analyze')">{{ busy ? '正在整理…' : '整理全部线索' }}</button>
+    <header class="organize-header">
+      <div><span class="organize-kicker">当前剧本</span><h1>整理线索</h1><p>把线索分成人物、关系、时间和线索点，逐条核对原文。</p></div>
+      <button v-if="apiConfigured" class="primary-button" :disabled="busy || !clues.some(item => item.ocrText.trim())" @click="emit('analyze')">{{ busy ? '正在整理…' : '整理线索' }}</button>
+      <button v-else class="primary-button" @click="emit('navigate', 'settings')">配置 AI 整理</button>
     </header>
 
-    <div class="organize-hero">
-      <div><span class="organize-eyebrow">当前剧本</span><h2>{{ clues.length }} 条线索，{{ pendingCount }} 条待确认建议</h2><p v-if="!apiConfigured">先在「剧本管理」保存 DeepSeek API Key，再开始整理。</p><p v-else-if="autoOrganize">新录入线索会自动整理；你也可以随时重新整理全部线索。</p><p v-else>点击“整理全部线索”，从 OCR 文字中提取人物、关系、时间和线索主题。</p></div>
-      <button v-if="!apiConfigured" class="secondary-button" @click="emit('navigate', 'settings')">配置 API Key</button>
-      <button v-else class="secondary-button" :disabled="busy || !clues.length" @click="emit('analyze')">{{ busy ? '整理中' : '立即整理' }}</button>
+    <div class="organize-strip">
+      <button @click="emit('navigate', 'clues')"><strong>{{ clues.length }}</strong><span>条线索</span></button>
+      <i></i><button @click="emit('navigate', 'people')"><strong>{{ people.length }}</strong><span>个人物</span></button>
+      <i></i><button @click="emit('navigate', 'people')"><strong>{{ relationships.length }}</strong><span>条已确认关系</span></button>
+      <i></i><button @click="emit('navigate', 'timeline')"><strong>{{ events.filter(item => item.confirmed).length }}</strong><span>个已确认时间</span></button>
+      <i></i><button @click="emit('navigate', 'clues')"><strong>{{ cluePointCount }}</strong><span>个线索点</span></button>
     </div>
 
-    <div class="organize-stats">
-      <button class="organize-stat" @click="emit('navigate', 'people')"><span>人物</span><strong>{{ people.length }}</strong><small>人物档案</small></button>
-      <button class="organize-stat" @click="emit('navigate', 'people')"><span>人物关系</span><strong>{{ relationships.length }}</strong><small>已确认关系</small></button>
-      <button class="organize-stat" @click="emit('navigate', 'timeline')"><span>时间线</span><strong>{{ events.filter(item => item.confirmed).length }}</strong><small>{{ events.filter(item => !item.confirmed).length }} 个时间待核对</small></button>
-      <button class="organize-stat" @click="emit('navigate', 'clues')"><span>线索主题</span><strong>{{ cluePointCount }}</strong><small>来自 OCR 文字</small></button>
+    <div class="organize-status" :class="{ ready: apiConfigured }">
+      <span class="status-dot"></span>
+      <span v-if="!apiConfigured">AI 整理未配置。照片和 OCR 仍保存在本机。</span>
+      <span v-else-if="autoOrganize">新增线索会自动整理，OCR 文字将发送到 DeepSeek。</span>
+      <span v-else>手动整理。仅发送 OCR 文字和线索编号，照片留在本机。</span>
+      <button @click="emit('navigate', 'settings')">{{ autoOrganize ? '管理设置' : '设置' }}</button>
     </div>
 
-    <div class="organize-tools">
-      <button @click="emit('navigate', 'people')"><span>人物档案</span><small>人物名单与手动关系图</small></button>
-      <button @click="emit('navigate', 'timeline')"><span>事件时间线</span><small>查看已确认事件和原始线索</small></button>
-      <button @click="emit('navigate', 'board')"><span>自由整理板</span><small>手动连接线索与人物</small></button>
-      <button @click="emit('navigate', 'notes')"><span>笔记</span><small>记录自己的观察</small></button>
-      <button @click="emit('navigate', 'compare')"><span>线索对照</span><small>并排查看原图和 OCR</small></button>
-    </div>
+    <nav class="organize-shortcuts" aria-label="整理工具">
+      <button @click="emit('navigate', 'people')">人物档案 <span>›</span></button>
+      <button @click="emit('navigate', 'timeline')">时间线 <span>›</span></button>
+      <button @click="emit('navigate', 'board')">整理板 <span>›</span></button>
+      <button @click="emit('navigate', 'notes')">笔记 <span>›</span></button>
+      <button @click="emit('navigate', 'compare')">线索对照 <span>›</span></button>
+    </nav>
 
-    <section class="organization-results">
-      <header class="organization-results-head"><div><h2>待确认建议</h2><p>确认后才会加入人物档案、关系图或正式时间线。</p></div><span v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</span></header>
-      <div v-if="!organization" class="organization-empty"><strong>还没有整理结果</strong><span>整理结果只基于本剧本的 OCR 文字；照片不会发送。</span></div>
-      <div v-else-if="!pendingCount" class="organization-empty"><strong>目前没有待确认建议</strong><span>如果新录入了线索，可以重新整理。</span></div>
-      <div v-else class="suggestion-groups">
-        <section v-if="organization.people.length" class="suggestion-group"><h3>人物 <small>{{ organization.people.length }}</small></h3><article v-for="item in organization.people" :key="item.id" class="suggestion-card"><div class="suggestion-copy"><strong>{{ item.name }}<small v-if="item.aliases.length">又名 {{ item.aliases.join('、') }}</small></strong><blockquote>{{ item.quote }}</blockquote><button class="source-link" @click="emit('openClue', item.sourceNo)">查看线索 #{{ String(item.sourceNo).padStart(3, '0') }}</button></div><button class="suggestion-accept" @click="emit('acceptPerson', item.id)">加入人物档案</button></article></section>
-        <section v-if="organization.relationships.length" class="suggestion-group"><h3>人物关系 <small>{{ organization.relationships.length }}</small></h3><article v-for="item in organization.relationships" :key="item.id" class="suggestion-card"><div class="suggestion-copy"><strong>{{ item.from }} <span>{{ item.label }}</span> {{ item.to }}</strong><blockquote>{{ item.quote }}</blockquote><button class="source-link" @click="emit('openClue', item.sourceNo)">查看线索 #{{ String(item.sourceNo).padStart(3, '0') }}</button></div><button class="suggestion-accept" @click="emit('acceptRelationship', item.id)">确认关系</button></article></section>
-        <section v-if="organization.timeline.length" class="suggestion-group"><h3>时间节点 <small>{{ organization.timeline.length }}</small></h3><article v-for="item in organization.timeline" :key="item.id" class="suggestion-card"><div class="suggestion-copy"><strong>{{ dateLabel(item.startsAt) }} · {{ item.title }}</strong><blockquote>{{ item.quote }}</blockquote><button class="source-link" @click="emit('openClue', item.sourceNo)">查看线索 #{{ String(item.sourceNo).padStart(3, '0') }}</button></div><button class="suggestion-accept" @click="emit('acceptTimeline', item.id)">确认时间节点</button></article></section>
-        <section v-if="organization.cluePoints.length" class="suggestion-group"><h3>线索主题 <small>{{ organization.cluePoints.length }}</small></h3><article v-for="item in organization.cluePoints" :key="item.id" class="suggestion-card"><div class="suggestion-copy"><strong>{{ item.title }}<small>{{ [item.category, ...item.tags].filter(Boolean).join(' · ') }}</small></strong><blockquote>{{ item.quote }}</blockquote><button class="source-link" @click="emit('openClue', item.sourceNo)">查看线索 #{{ String(item.sourceNo).padStart(3, '0') }}</button></div><button class="suggestion-accept" @click="emit('acceptCluePoint', item.id)">应用到线索</button></article></section>
+    <section class="review-section">
+      <header class="review-heading"><div><h2>待确认 <span>{{ pendingCount }}</span></h2><p>每条建议都附有原文出处，确认后才会写入档案。</p></div><time v-if="organization">{{ dateLabel(organization.updatedAt) }}</time></header>
+      <nav class="review-filters" aria-label="筛选整理建议">
+        <button v-for="filter in filters" :key="filter.id" :class="{ active: activeFilter === filter.id }" @click="activeFilter = filter.id">{{ filter.label }} <span>{{ filter.count }}</span></button>
+      </nav>
+      <div v-if="!organization" class="review-empty"><strong>还没有整理结果</strong><p>录入线索后，点击“整理线索”生成可核对的建议。</p></div>
+      <div v-else-if="!visibleSuggestions.length" class="review-empty"><strong>{{ pendingCount ? '这个分类暂时没有建议' : '没有待确认的建议' }}</strong><p>{{ pendingCount ? '切换上方分类查看其他建议。' : '可以重新整理新录入的线索。' }}</p></div>
+      <div v-else class="suggestion-list">
+        <article v-for="suggestion in visibleSuggestions" :key="suggestion.item.id" class="suggestion-row">
+          <div class="suggestion-main">
+            <div class="suggestion-title"><span class="kind-pill" :class="`kind-${suggestion.kind}`">{{ kindLabel(suggestion.kind) }}</span><strong>{{ title(suggestion) }}</strong></div>
+            <p class="evidence-quote">{{ quote(suggestion.item) }}</p>
+            <button class="source-link" @click="emit('openClue', sourceNo(suggestion.item))">查看线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button>
+          </div>
+          <button class="suggestion-action" @click="accept(suggestion)">{{ actionLabel(suggestion.kind) }}</button>
+        </article>
       </div>
     </section>
-    <p class="organize-disclosure">AI 结果可能识别错误。人物关系和时间节点需你确认；系统不会推断因果、动机或案件答案。发送到 DeepSeek 的内容只有 OCR 文字与线索编号。</p>
+    <p class="organize-footnote">整理结果由模型生成，可能有误。人物关系和时间节点需你确认；不会分析动机、因果或案件答案。</p>
   </section>
 </template>
 
 <style scoped>
-.organization-page{gap:18px}.organization-page .page-header{margin-bottom:0}.organize-hero{display:flex;align-items:center;justify-content:space-between;gap:20px;border:1px solid #e8e8df;border-radius:13px;padding:20px 23px;background:linear-gradient(110deg,#f8f7f1,#fcf8f3)}.organize-eyebrow{font-size:10px;color:#a45e42;font-weight:700;letter-spacing:.08em}.organize-hero h2{margin:6px 0;font-size:18px;color:#39443b}.organize-hero p{margin:0;color:#869086;font-size:11px;line-height:1.6}.organize-hero>.secondary-button{white-space:nowrap}.organize-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px}.organize-stat{display:flex;flex-direction:column;align-items:flex-start;gap:6px;text-align:left;border:1px solid #e9ece7;border-radius:10px;background:#fff;padding:15px 17px;color:#89928a}.organize-stat span{font-size:10px}.organize-stat strong{font-size:24px;line-height:1.1;color:#3b483e}.organize-stat small{font-size:10px;color:#a1a9a0}.organize-stat:hover,.organize-tools button:hover{border-color:#d3b29c;background:#fdfaf7}.organize-tools{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px}.organize-tools button{display:flex;flex-direction:column;align-items:flex-start;gap:6px;text-align:left;border:1px solid #e9ece7;border-radius:9px;background:#fff;padding:13px 14px;color:#59655b}.organize-tools button span{font-size:11px;font-weight:700}.organize-tools button small{font-size:9px;line-height:1.5;color:#98a198}.organization-results{border:1px solid #e8ebe6;border-radius:12px;background:#fff;overflow:hidden}.organization-results-head{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;padding:17px 19px;border-bottom:1px solid #eff1ed}.organization-results-head h2{font-size:14px;margin:0 0 5px;color:#414b42}.organization-results-head p,.organization-results-head>span{font-size:10px;color:#9aa39a;margin:0}.suggestion-groups{padding:0 18px}.suggestion-group{padding:15px 0;border-bottom:1px solid #eff1ed}.suggestion-group:last-child{border-bottom:0}.suggestion-group h3{font-size:11px;color:#a45e42;margin:0 0 9px}.suggestion-group h3 small{font-size:9px;color:#a4aba4;margin-left:5px}.suggestion-card{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:10px 0;border-top:1px solid #f3f4f1}.suggestion-copy{min-width:0}.suggestion-copy>strong{display:block;color:#4c574e;font-size:11px;line-height:1.5}.suggestion-copy>strong small{display:block;font-weight:400;color:#8f998f;font-size:9px;margin-top:3px}.suggestion-copy blockquote{margin:5px 0;color:#7e897f;font-size:10px;line-height:1.6;white-space:pre-wrap}.suggestion-copy blockquote:before{content:'“';color:#c49a7d}.suggestion-copy blockquote:after{content:'”';color:#c49a7d}.source-link{background:none;color:#a25d41;padding:0;font-size:9px}.suggestion-accept{border:1px solid #ead8cb;background:#fffaf5;color:#99583e;border-radius:6px;padding:7px 10px;font-size:10px;white-space:nowrap}.suggestion-accept:hover{background:#f8ede4}.organization-empty{min-height:112px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:#566259}.organization-empty strong{font-size:12px}.organization-empty span,.organize-disclosure{font-size:10px;color:#9aa39a;line-height:1.65}.organize-disclosure{margin:0;padding:0 2px}@media(max-width:900px){.organize-tools{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:620px){.organization-page{gap:13px}.organize-hero{align-items:flex-start;flex-direction:column;padding:16px}.organize-hero h2{font-size:16px}.organize-stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.organize-stat{padding:12px}.organize-tools{grid-template-columns:repeat(2,minmax(0,1fr))}.organization-results-head{align-items:flex-start;flex-direction:column;padding:15px}.suggestion-groups{padding:0 13px}.suggestion-card{align-items:flex-start;flex-direction:column;gap:8px}.suggestion-accept{align-self:flex-end}.suggestion-copy blockquote{font-size:10px}}
+.organization-page{gap:20px}.organize-header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px}.organize-kicker{font-size:11px;color:#728078;letter-spacing:.04em}.organize-header h1{font-size:30px;margin:5px 0 6px;color:#26362f;letter-spacing:-.025em}.organize-header p{font-size:14px;color:#76817a;margin:0;line-height:1.5}.organize-header .primary-button{height:44px;padding:0 19px;font-size:13px;white-space:nowrap}.organize-strip{display:flex;align-items:center;justify-content:space-between;min-height:75px;padding:12px 18px;background:#fff;border:1px solid #e6e9e4;border-radius:12px}.organize-strip button{display:flex;align-items:baseline;gap:7px;background:none;color:#657168;padding:6px;text-align:left}.organize-strip strong{font-size:22px;line-height:1;color:#32473c;font-weight:650}.organize-strip span{font-size:12px;color:#78837a}.organize-strip i{height:30px;width:1px;background:#e8ebe6}.organize-status{display:flex;align-items:center;gap:9px;min-height:40px;padding:8px 12px;border-radius:8px;background:#f2f3ef;color:#6f7c72;font-size:12px}.organize-status.ready{background:#f0f5f1;color:#486557}.status-dot{width:7px;height:7px;border-radius:50%;background:#a4aaa3;flex:0 0 auto}.organize-status.ready .status-dot{background:#5e8b70}.organize-status button{margin-left:auto;padding:4px 2px;background:none;color:#406957;font-size:12px;font-weight:650;white-space:nowrap}.organize-shortcuts{display:flex;align-items:center;gap:8px;overflow-x:auto;padding:1px 0 5px}.organize-shortcuts button{display:flex;align-items:center;gap:14px;min-height:38px;padding:0 13px;background:#fff;border:1px solid #e5e9e4;border-radius:7px;color:#536258;font-size:12px;white-space:nowrap}.organize-shortcuts button span{color:#9aa49c;font-size:16px}.organize-shortcuts button:hover{border-color:#b9c8be;background:#fafcf9}.review-section{background:#fff;border:1px solid #e5e9e4;border-radius:12px;overflow:hidden}.review-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:19px 21px 15px}.review-heading h2{margin:0 0 5px;color:#2f3e35;font-size:18px}.review-heading h2 span{display:inline-grid;place-items:center;min-width:21px;height:21px;margin-left:5px;padding:0 5px;border-radius:11px;background:#edf2ee;color:#53715e;font-size:11px;vertical-align:2px}.review-heading p{margin:0;color:#808b82;font-size:12px}.review-heading time{color:#9ba49b;font-size:11px;white-space:nowrap}.review-filters{display:flex;align-items:center;gap:4px;padding:0 20px;border-bottom:1px solid #edf0eb;overflow-x:auto}.review-filters button{position:relative;display:flex;align-items:center;gap:6px;min-height:42px;padding:0 10px;background:none;color:#768179;font-size:12px;white-space:nowrap}.review-filters button.active{color:#315c48;font-weight:650}.review-filters button.active:after{position:absolute;content:'';height:2px;left:8px;right:8px;bottom:0;background:#4f765f;border-radius:2px}.review-filters button span{color:#a0a9a0;font-size:10px}.suggestion-list{padding:0 20px}.suggestion-row{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 0;border-bottom:1px solid #eef0ec}.suggestion-row:last-child{border-bottom:0}.suggestion-main{min-width:0}.suggestion-title{display:flex;align-items:center;gap:9px}.suggestion-title strong{font-size:14px;line-height:1.45;color:#344239;font-weight:650}.kind-pill{display:inline-flex;align-items:center;justify-content:center;min-width:39px;height:22px;padding:0 7px;border-radius:5px;background:#f0f3ef;color:#607468;font-size:10px;white-space:nowrap}.kind-relationships{background:#f4f0eb;color:#8a6a4a}.kind-timeline{background:#edf2f5;color:#59758a}.kind-cluePoints{background:#f6f0e7;color:#977343}.evidence-quote{max-width:760px;margin:7px 0 6px;color:#69756c;font-size:13px;line-height:1.55;overflow-wrap:anywhere}.evidence-quote:before{content:'“';color:#a8b0a8}.evidence-quote:after{content:'”';color:#a8b0a8}.source-link{display:inline-flex;align-items:center;gap:4px;padding:0;background:none;color:#547561;font-size:11px}.source-link span{font-size:16px;line-height:10px}.suggestion-action{flex:0 0 auto;min-height:36px;padding:0 12px;border:1px solid #d8e2da;border-radius:7px;background:#f7faf7;color:#41634d;font-size:12px;white-space:nowrap}.suggestion-action:hover{background:#edf4ee;border-color:#b7caba}.review-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:160px;text-align:center}.review-empty strong{color:#415047;font-size:14px}.review-empty p{margin:7px 0 0;color:#909990;font-size:12px}.organize-footnote{margin:-7px 0 0;color:#929c93;font-size:11px;line-height:1.5}@media(max-width:850px){.organization-page{gap:15px}.organize-header h1{font-size:27px}.organize-strip{min-height:68px;padding:10px 12px}.organize-strip button{flex-direction:column;align-items:center;gap:4px;text-align:center}.organize-strip strong{font-size:19px}.organize-strip span{font-size:10px}.organize-shortcuts{gap:6px}.organize-shortcuts button{gap:8px;padding:0 10px;font-size:11px}.review-heading{padding:15px}.review-filters{padding:0 12px}.suggestion-list{padding:0 14px}.suggestion-row{gap:10px}.suggestion-title strong{font-size:13px}.evidence-quote{font-size:12px}}@media(max-width:520px){.organize-header{align-items:flex-start}.organize-header h1{font-size:24px}.organize-header p{font-size:12px;max-width:280px}.organize-header .primary-button{height:39px;padding:0 11px;font-size:11px}.organize-strip{overflow-x:auto;justify-content:flex-start;gap:7px}.organize-strip button{min-width:64px}.organize-strip i{flex:0 0 1px}.organize-status{font-size:11px}.review-heading{align-items:flex-start;flex-direction:column;gap:5px}.suggestion-row{align-items:flex-start;flex-direction:column}.suggestion-action{align-self:flex-end}.suggestion-title{align-items:flex-start}.suggestion-title strong{font-size:13px}}
 </style>

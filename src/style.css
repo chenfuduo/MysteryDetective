@@ -70,3 +70,17 @@ button,input,select,textarea,a{-webkit-tap-highlight-color:transparent}button{to
 .active-clue-filters>button svg{flex-shrink:0}
 .active-clue-filters>.clear-all-filters{background:transparent;border-color:transparent;color:#87977b}
 @media(max-width:600px){.workspace-search-trigger,.workspace-guide-trigger{min-width:34px;width:34px;min-height:40px;padding:0}.topbar-export{display:none}.active-clue-filters>button{min-height:40px}.topbar-actions .topbar-capture{font-size:0;width:34px;min-width:34px;padding:0;justify-content:center}}
+
+/* Batch maintenance stays in the clue library rather than adding dashboard panels. */
+.clue-result-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap}
+.clue-sort-control select{min-height:40px;max-width:128px;padding:0 10px;border:1px solid #dfe8d9;border-radius:9px;background:#fafcf7;color:#5a7350;font-size:12px}
+.clue-sort-control .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.clue-select-trigger{min-height:40px;padding:0 13px;border:1px solid #d8e4d1;border-radius:9px;background:#f2f7ec;color:#557348;font-size:12px;font-weight:600}
+.clue-selection-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 0 16px;padding:13px 16px;border:1px solid #cbdcbe;border-radius:12px;background:#f2f7ec}
+.clue-selection-bar>div:first-child{display:flex;flex-direction:column;gap:5px;min-width:0}.clue-selection-bar strong{color:#426235;font-size:13px}.clue-selection-bar span{font-size:11px;color:#879a79;line-height:1.5}.clue-selection-bar>div:last-child{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.clue-selection-bar button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:42px;padding:0 12px;border:1px solid #d5e2cb;border-radius:9px;background:#fff;color:#617b52;font-size:12px}.clue-selection-bar .clue-batch-primary{background:#385f45;color:#fff;border-color:#385f45}
+.clue-selection-bar button:disabled,.clue-select-trigger:disabled{opacity:.45;cursor:default}
+.clue-card{position:relative}.clue-card.clue-card-selected{border-color:#8eaf7b;box-shadow:0 0 0 2px #b7cfa14a;background:#fcfef8}
+.clue-selection-check{position:absolute;z-index:3;left:9px;top:9px;display:grid;place-items:center;width:36px;height:36px;border:2px solid #d1dfc7;border-radius:10px;background:#fffffff2;color:#fff;box-shadow:0 2px 8px #203d2010}
+.clue-selection-check[aria-checked=true]{border-color:#527d43;background:#527d43}
+.clue-card-meta .clue-tag-chip{min-height:28px;max-width:150px;padding:3px 7px;border-radius:5px;background:#f0f5e9;color:#789264;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:760px){.result-bar{align-items:flex-start;gap:8px}.clue-result-actions{gap:5px}.clue-result-actions .view-toggle{margin-left:0}.clue-sort-control select{max-width:108px}.clue-selection-bar{flex-direction:column;align-items:stretch;padding:12px}.clue-selection-bar>div:last-child{justify-content:space-between}.clue-selection-bar button{min-height:44px;padding:0 9px}.clue-selection-check{width:40px;height:40px}.clue-card-meta .clue-tag-chip{min-height:32px}.clue-card-meta{flex-wrap:wrap}}

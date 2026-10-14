@@ -638,28 +638,77 @@ export async function saveAnnotation(clueId: string, strokes: unknown[]): Promis
 }
 
 const archiveTables: Table[] = ['clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations', 'organization']
-export async function exportScript(id: string): Promise<void> {
+export type ArchiveStatus = { generatedAt: string; fileName: string; clueCount: number; personCount: number; eventCount: number; noteCount: number; changed: boolean }
+type SavedArchiveStatus = Omit<ArchiveStatus, 'changed'> & { fingerprint: string }
+type ArchiveSource = { script: ScriptRecord; records: Record<string, unknown[]> }
+
+async function archiveSource(id: string): Promise<ArchiveSource> {
   const script = await getRecord<ScriptRecord>('scripts', id)
   if (!script) throw new Error('剧本不存在')
   const records: Record<string, unknown[]> = {}
   for (const table of archiveTables) records[table] = await listRecords(table, id)
+  return { script, records }
+}
+function archiveCanonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(archiveCanonical)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, archiveCanonical((value as Record<string, unknown>)[key])]))
+  return value
+}
+async function archiveDigest(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+async function archiveFingerprint(source: ArchiveSource, zip?: JSZip): Promise<string> {
+  const { script, records } = source
+  const paths = [...new Set([script.coverPath, ...(records.clues as ClueRecord[]).flatMap(item => [item.imagePath, item.displayImagePath]), ...(records.people as PersonRecord[]).flatMap(item => [item.photoPath, ...(item.photoPaths || [])])].filter(Boolean))].sort()
+  const attachments: { path: string; length: number; digest: string }[] = []
+  for (const path of paths) {
+    // Hash the exact attachment data being archived; replacing a file at the same path is still a change.
+    const data = await readImage(path)
+    if (!data) throw new Error('图片暂时无法读取，请稍后重试')
+    if (zip) zip.file(path, data, { base64: true })
+    attachments.push({ path, length: data.length, digest: await archiveDigest(data) })
+  }
+  const orderedRecords = Object.fromEntries(archiveTables.map(table => [table, [...records[table]].sort((left, right) => {
+    const a = String((left as Stored).id), b = String((right as Stored).id)
+    return a < b ? -1 : a > b ? 1 : 0
+  })]))
+  return archiveDigest(JSON.stringify(archiveCanonical({ script, records: orderedRecords, attachments })))
+}
+export async function getArchiveStatus(scriptId: string): Promise<ArchiveStatus | null> {
+  const saved = await getLocalState<SavedArchiveStatus>(scriptId, 'archive-status')
+  if (!saved) return null
+  const source = await archiveSource(scriptId)
+  const fingerprint = await archiveFingerprint(source)
+  const { fingerprint: previousFingerprint, ...status } = saved
+  return { ...status, changed: previousFingerprint !== fingerprint }
+}
+export async function exportScript(id: string): Promise<void> {
+  const source = await archiveSource(id)
+  const { script, records } = source
   const zip = new JSZip()
   zip.file('manifest.json', JSON.stringify({ format: 'clue-vault', version: 1, script, records }))
-  const paths = [script.coverPath, ...(records.clues as ClueRecord[]).flatMap((item) => [item.imagePath, item.displayImagePath]), ...(records.people as PersonRecord[]).flatMap((item) => [item.photoPath, ...(item.photoPaths || [])])].filter(Boolean)
-  for (const path of paths) zip.file(path, await readImage(path), { base64: true })
+  const fingerprint = await archiveFingerprint(source, zip)
   const archive = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
+  const fileName = native
+    ? `${script.name.replace(/[\\/:*?"<>|]/g, '_') || '剧本'}-${Date.now()}.zip`
+    : `${script.name || '剧本'}-档案.zip`
+  const completed: SavedArchiveStatus = { generatedAt: now(), fileName, clueCount: records.clues.length, personCount: records.people.length, eventCount: records.timeline.length, noteCount: records.notes.length, fingerprint }
   if (native) {
-    const path = `exports/${script.name.replace(/[\\/:*?"<>|]/g, '_') || '剧本'}-${Date.now()}.zip`
-    const result = await Filesystem.writeFile({ path, data: archive, directory: Directory.Documents, recursive: true })
+    const result = await Filesystem.writeFile({ path: `exports/${fileName}`, data: archive, directory: Directory.Documents, recursive: true })
+    // Share completion does not confirm that the user saved the archive outside this app.
+    await saveLocalState(id, 'archive-status', completed)
     await Share.share({ title: `${script.name}档案`, files: [result.uri] })
   } else {
     const blob = new Blob([base64ToBytes(archive)], { type: 'application/zip' })
     const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${script.name || '剧本'}-档案.zip`
-    link.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    try {
+      await saveLocalState(id, 'archive-status', completed)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = fileName
+      link.click()
+    } finally { setTimeout(() => URL.revokeObjectURL(url), 1000) }
   }
 }
 export async function importScript(): Promise<ScriptRecord | null> {

@@ -38,6 +38,7 @@ const emit = defineEmits<{
   acceptCluePoint: [id: string]
 }>()
 const activeFilter = ref('all')
+const expandedIds = ref<string[]>([])
 const allSuggestions = computed<Suggestion[]>(() => {
   const result = props.organization
   if (!result) return []
@@ -69,11 +70,15 @@ const sourceNo = (item: Suggestion['item']) => item.sourceNo
 const quote = (item: Suggestion['item']) => item.quote
 const title = (suggestion: Suggestion) => {
   if (suggestion.kind === 'people') return `${suggestion.item.name}${suggestion.item.aliases.length ? ` · 又名 ${suggestion.item.aliases.join('、')}` : ''}`
-  if (suggestion.kind === 'relationships') return `${suggestion.item.from}  ·  ${suggestion.item.label}  ·  ${suggestion.item.to}`
-  if (suggestion.kind === 'timeline') return `${dateLabel(suggestion.item.startsAt)}  ·  ${suggestion.item.title}`
-  return `${suggestion.item.title}${suggestion.item.category ? `  ·  ${suggestion.item.category}` : ''}`
+  if (suggestion.kind === 'relationships') return `${suggestion.item.from} · ${suggestion.item.label} · ${suggestion.item.to}`
+  if (suggestion.kind === 'timeline') return `${dateLabel(suggestion.item.startsAt)} · ${suggestion.item.title}`
+  return `${suggestion.item.title}${suggestion.item.category ? ` · ${suggestion.item.category}` : ''}`
 }
-const actionLabel = (kind: Suggestion['kind']) => ({ people: '加入人物', relationships: '确认关系', timeline: '确认时间', cluePoints: '应用到线索' })[kind]
+const actionLabel = (kind: Suggestion['kind']) => ({ people: '加入人物', relationships: '确认关系', timeline: '加入时间线', cluePoints: '应用到线索' })[kind]
+const isLongQuote = (item: Suggestion['item']) => item.quote.length > 115
+function toggleQuote(id: string) {
+  expandedIds.value = expandedIds.value.includes(id) ? expandedIds.value.filter(value => value !== id) : [...expandedIds.value, id]
+}
 function accept(suggestion: Suggestion) {
   if (suggestion.kind === 'people') emit('acceptPerson', suggestion.item.id)
   else if (suggestion.kind === 'relationships') emit('acceptRelationship', suggestion.item.id)
@@ -85,57 +90,59 @@ function accept(suggestion: Suggestion) {
 <template>
   <section class="page organization-page">
     <header class="organize-header">
-      <div><span class="organize-kicker">当前剧本</span><h1>整理线索</h1><p>把线索分成人物、关系、时间和线索点，逐条核对原文。</p></div>
-      <button v-if="apiConfigured" class="primary-button" :disabled="busy || !clues.some(item => item.ocrText.trim())" @click="emit('analyze')">{{ busy ? '正在整理…' : '整理线索' }}</button>
-      <button v-else class="primary-button" @click="emit('navigate', 'settings')">配置 AI 整理</button>
+      <div><h1>整理线索</h1><p>人物、关系、时间和线索点都在这里核对。</p></div>
+      <button v-if="apiConfigured" class="primary-button" :disabled="busy || !clues.some(item => item.ocrText.trim())" @click="emit('analyze')">{{ busy ? '整理中…' : '整理线索' }}</button>
+      <button v-else class="primary-button" @click="emit('navigate', 'settings')">配置 AI</button>
     </header>
 
-    <div class="organize-strip">
+    <div class="organize-summary">
       <button @click="emit('navigate', 'clues')"><strong>{{ clues.length }}</strong><span>条线索</span></button>
-      <i></i><button @click="emit('navigate', 'people')"><strong>{{ people.length }}</strong><span>个人物</span></button>
-      <i></i><button @click="emit('navigate', 'people')"><strong>{{ relationships.length }}</strong><span>条已确认关系</span></button>
-      <i></i><button @click="emit('navigate', 'timeline')"><strong>{{ events.filter(item => item.confirmed).length }}</strong><span>个已确认时间</span></button>
-      <i></i><button @click="emit('navigate', 'clues')"><strong>{{ cluePointCount }}</strong><span>个线索点</span></button>
+      <div><strong>{{ pendingCount }}</strong><span>条待确认</span></div>
+      <button @click="emit('navigate', 'people')"><strong>{{ people.length }}</strong><span>个人物</span></button>
+      <button @click="emit('navigate', 'people')"><strong>{{ relationships.length }}</strong><span>条关系</span></button>
+      <button @click="emit('navigate', 'timeline')"><strong>{{ events.filter(item => item.confirmed).length }}</strong><span>个时间节点</span></button>
+      <button @click="emit('navigate', 'clues')"><strong>{{ cluePointCount }}</strong><span>个线索点</span></button>
     </div>
 
     <div class="organize-status" :class="{ ready: apiConfigured }">
       <span class="status-dot"></span>
-      <span v-if="!apiConfigured">AI 整理未配置。照片和 OCR 仍保存在本机。</span>
-      <span v-else-if="autoOrganize">新增线索会自动整理，OCR 文字将发送到 DeepSeek。</span>
-      <span v-else>手动整理。仅发送 OCR 文字和线索编号，照片留在本机。</span>
-      <button @click="emit('navigate', 'settings')">{{ autoOrganize ? '管理设置' : '设置' }}</button>
+      <span v-if="!apiConfigured">照片和 OCR 保存在本机；AI 整理尚未配置。</span>
+      <span v-else-if="autoOrganize">自动整理已开启 · 只发送 OCR 文字，照片留在 iPad。</span>
+      <span v-else>手动整理 · 只发送 OCR 文字，照片留在 iPad。</span>
+      <button @click="emit('navigate', 'settings')">设置</button>
     </div>
 
     <nav class="organize-shortcuts" aria-label="整理工具">
-      <button @click="emit('navigate', 'people')">人物档案 <span>›</span></button>
-      <button @click="emit('navigate', 'timeline')">时间线 <span>›</span></button>
-      <button @click="emit('navigate', 'board')">整理板 <span>›</span></button>
-      <button @click="emit('navigate', 'notes')">笔记 <span>›</span></button>
-      <button @click="emit('navigate', 'compare')">线索对照 <span>›</span></button>
+      <span>整理工具</span>
+      <button @click="emit('navigate', 'people')">人物档案</button><i></i>
+      <button @click="emit('navigate', 'timeline')">时间线</button><i></i>
+      <button @click="emit('navigate', 'board')">整理板</button><i></i>
+      <button @click="emit('navigate', 'notes')">笔记</button><i></i>
+      <button @click="emit('navigate', 'compare')">线索对照</button>
     </nav>
 
     <section class="review-section">
-      <header class="review-heading"><div><h2>待确认 <span>{{ pendingCount }}</span></h2><p>每条建议都附有原文出处，确认后才会写入档案。</p></div><time v-if="organization">{{ dateLabel(organization.updatedAt) }}</time></header>
+      <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time></header>
       <nav class="review-filters" aria-label="筛选整理建议">
         <button v-for="filter in filters" :key="filter.id" :class="{ active: activeFilter === filter.id }" @click="activeFilter = filter.id">{{ filter.label }} <span>{{ filter.count }}</span></button>
       </nav>
-      <div v-if="!organization" class="review-empty"><strong>还没有整理结果</strong><p>录入线索后，点击“整理线索”生成可核对的建议。</p></div>
-      <div v-else-if="!visibleSuggestions.length" class="review-empty"><strong>{{ pendingCount ? '这个分类暂时没有建议' : '没有待确认的建议' }}</strong><p>{{ pendingCount ? '切换上方分类查看其他建议。' : '可以重新整理新录入的线索。' }}</p></div>
+      <div v-if="!organization" class="review-empty"><strong>还没有整理结果</strong><p>点击右上角“整理线索”生成待核对建议。</p></div>
+      <div v-else-if="!visibleSuggestions.length" class="review-empty"><strong>{{ pendingCount ? '这个分类暂时没有建议' : '没有待确认的建议' }}</strong><p>{{ pendingCount ? '切换分类查看其他建议。' : '录入新线索后可以再次整理。' }}</p></div>
       <div v-else class="suggestion-list">
         <article v-for="suggestion in visibleSuggestions" :key="suggestion.item.id" class="suggestion-row">
           <div class="suggestion-main">
             <div class="suggestion-title"><span class="kind-pill" :class="`kind-${suggestion.kind}`">{{ kindLabel(suggestion.kind) }}</span><strong>{{ title(suggestion) }}</strong></div>
-            <p class="evidence-quote">{{ quote(suggestion.item) }}</p>
-            <button class="source-link" @click="emit('openClue', sourceNo(suggestion.item))">查看线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button>
+            <p :class="['evidence-quote', { expanded: expandedIds.includes(suggestion.item.id) }]">{{ quote(suggestion.item) }}</p>
+            <div class="suggestion-meta"><button class="source-link" @click="emit('openClue', sourceNo(suggestion.item))">原线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button><button v-if="isLongQuote(suggestion.item)" class="quote-toggle" @click="toggleQuote(suggestion.item.id)">{{ expandedIds.includes(suggestion.item.id) ? '收起摘录' : '展开摘录' }}</button></div>
           </div>
           <button class="suggestion-action" @click="accept(suggestion)">{{ actionLabel(suggestion.kind) }}</button>
         </article>
       </div>
+      <footer class="review-footnote">AI 结果可能有误；关系和时间需人工确认，不推断动机、因果或答案。</footer>
     </section>
-    <p class="organize-footnote">整理结果由模型生成，可能有误。人物关系和时间节点需你确认；不会分析动机、因果或案件答案。</p>
   </section>
 </template>
 
 <style scoped>
-.organization-page{gap:20px}.organize-header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px}.organize-kicker{font-size:11px;color:#728078;letter-spacing:.04em}.organize-header h1{font-size:30px;margin:5px 0 6px;color:#26362f;letter-spacing:-.025em}.organize-header p{font-size:14px;color:#76817a;margin:0;line-height:1.5}.organize-header .primary-button{height:44px;padding:0 19px;font-size:13px;white-space:nowrap}.organize-strip{display:flex;align-items:center;justify-content:space-between;min-height:75px;padding:12px 18px;background:#fff;border:1px solid #e6e9e4;border-radius:12px}.organize-strip button{display:flex;align-items:baseline;gap:7px;background:none;color:#657168;padding:6px;text-align:left}.organize-strip strong{font-size:22px;line-height:1;color:#32473c;font-weight:650}.organize-strip span{font-size:12px;color:#78837a}.organize-strip i{height:30px;width:1px;background:#e8ebe6}.organize-status{display:flex;align-items:center;gap:9px;min-height:40px;padding:8px 12px;border-radius:8px;background:#f2f3ef;color:#6f7c72;font-size:12px}.organize-status.ready{background:#f0f5f1;color:#486557}.status-dot{width:7px;height:7px;border-radius:50%;background:#a4aaa3;flex:0 0 auto}.organize-status.ready .status-dot{background:#5e8b70}.organize-status button{margin-left:auto;padding:4px 2px;background:none;color:#406957;font-size:12px;font-weight:650;white-space:nowrap}.organize-shortcuts{display:flex;align-items:center;gap:8px;overflow-x:auto;padding:1px 0 5px}.organize-shortcuts button{display:flex;align-items:center;gap:14px;min-height:38px;padding:0 13px;background:#fff;border:1px solid #e5e9e4;border-radius:7px;color:#536258;font-size:12px;white-space:nowrap}.organize-shortcuts button span{color:#9aa49c;font-size:16px}.organize-shortcuts button:hover{border-color:#b9c8be;background:#fafcf9}.review-section{background:#fff;border:1px solid #e5e9e4;border-radius:12px;overflow:hidden}.review-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:19px 21px 15px}.review-heading h2{margin:0 0 5px;color:#2f3e35;font-size:18px}.review-heading h2 span{display:inline-grid;place-items:center;min-width:21px;height:21px;margin-left:5px;padding:0 5px;border-radius:11px;background:#edf2ee;color:#53715e;font-size:11px;vertical-align:2px}.review-heading p{margin:0;color:#808b82;font-size:12px}.review-heading time{color:#9ba49b;font-size:11px;white-space:nowrap}.review-filters{display:flex;align-items:center;gap:4px;padding:0 20px;border-bottom:1px solid #edf0eb;overflow-x:auto}.review-filters button{position:relative;display:flex;align-items:center;gap:6px;min-height:42px;padding:0 10px;background:none;color:#768179;font-size:12px;white-space:nowrap}.review-filters button.active{color:#315c48;font-weight:650}.review-filters button.active:after{position:absolute;content:'';height:2px;left:8px;right:8px;bottom:0;background:#4f765f;border-radius:2px}.review-filters button span{color:#a0a9a0;font-size:10px}.suggestion-list{padding:0 20px}.suggestion-row{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 0;border-bottom:1px solid #eef0ec}.suggestion-row:last-child{border-bottom:0}.suggestion-main{min-width:0}.suggestion-title{display:flex;align-items:center;gap:9px}.suggestion-title strong{font-size:14px;line-height:1.45;color:#344239;font-weight:650}.kind-pill{display:inline-flex;align-items:center;justify-content:center;min-width:39px;height:22px;padding:0 7px;border-radius:5px;background:#f0f3ef;color:#607468;font-size:10px;white-space:nowrap}.kind-relationships{background:#f4f0eb;color:#8a6a4a}.kind-timeline{background:#edf2f5;color:#59758a}.kind-cluePoints{background:#f6f0e7;color:#977343}.evidence-quote{max-width:760px;margin:7px 0 6px;color:#69756c;font-size:13px;line-height:1.55;overflow-wrap:anywhere}.evidence-quote:before{content:'“';color:#a8b0a8}.evidence-quote:after{content:'”';color:#a8b0a8}.source-link{display:inline-flex;align-items:center;gap:4px;padding:0;background:none;color:#547561;font-size:11px}.source-link span{font-size:16px;line-height:10px}.suggestion-action{flex:0 0 auto;min-height:36px;padding:0 12px;border:1px solid #d8e2da;border-radius:7px;background:#f7faf7;color:#41634d;font-size:12px;white-space:nowrap}.suggestion-action:hover{background:#edf4ee;border-color:#b7caba}.review-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:160px;text-align:center}.review-empty strong{color:#415047;font-size:14px}.review-empty p{margin:7px 0 0;color:#909990;font-size:12px}.organize-footnote{margin:-7px 0 0;color:#929c93;font-size:11px;line-height:1.5}@media(max-width:850px){.organization-page{gap:15px}.organize-header h1{font-size:27px}.organize-strip{min-height:68px;padding:10px 12px}.organize-strip button{flex-direction:column;align-items:center;gap:4px;text-align:center}.organize-strip strong{font-size:19px}.organize-strip span{font-size:10px}.organize-shortcuts{gap:6px}.organize-shortcuts button{gap:8px;padding:0 10px;font-size:11px}.review-heading{padding:15px}.review-filters{padding:0 12px}.suggestion-list{padding:0 14px}.suggestion-row{gap:10px}.suggestion-title strong{font-size:13px}.evidence-quote{font-size:12px}}@media(max-width:520px){.organize-header{align-items:flex-start}.organize-header h1{font-size:24px}.organize-header p{font-size:12px;max-width:280px}.organize-header .primary-button{height:39px;padding:0 11px;font-size:11px}.organize-strip{overflow-x:auto;justify-content:flex-start;gap:7px}.organize-strip button{min-width:64px}.organize-strip i{flex:0 0 1px}.organize-status{font-size:11px}.review-heading{align-items:flex-start;flex-direction:column;gap:5px}.suggestion-row{align-items:flex-start;flex-direction:column}.suggestion-action{align-self:flex-end}.suggestion-title{align-items:flex-start}.suggestion-title strong{font-size:13px}}
+.organization-page{gap:15px;min-height:calc(100dvh - 145px);box-sizing:border-box}.organize-header{display:flex;align-items:center;justify-content:space-between;gap:20px}.organize-header h1{font-size:29px;margin:0 0 5px;color:#263a30;letter-spacing:-.025em}.organize-header p{font-size:13px;color:#69776e;margin:0;line-height:1.5}.organize-header .primary-button{height:43px;padding:0 18px;font-size:13px;white-space:nowrap}.organize-summary{display:flex;align-items:center;justify-content:space-between;min-height:54px;padding:0 4px;border-top:1px solid #e5e9e4;border-bottom:1px solid #e5e9e4}.organize-summary>button,.organize-summary>div{display:flex;align-items:baseline;gap:6px;padding:8px 4px;background:none;color:#748078;white-space:nowrap}.organize-summary strong{font-size:17px;line-height:1;color:#314b3d;font-weight:650}.organize-summary span{font-size:11px;color:#738077}.organize-summary>:nth-child(2)>strong{color:#b06b3f}.organize-status{display:flex;align-items:center;gap:8px;min-height:34px;padding:0 10px;border-radius:6px;background:#f0f3ef;color:#5f6e63;font-size:11px}.organize-status.ready{background:#edf4ef;color:#3f6650}.status-dot{width:7px;height:7px;border-radius:50%;background:#a2aaa3;flex:0 0 auto}.organize-status.ready .status-dot{background:#568466}.organize-status button{margin-left:auto;padding:4px 2px;background:none;color:#385f47;font-size:11px;font-weight:650}.organize-shortcuts{display:flex;align-items:center;gap:10px;overflow-x:auto;min-height:27px;padding:0 2px}.organize-shortcuts>span{margin-right:3px;color:#929d94;font-size:10px;white-space:nowrap}.organize-shortcuts button{padding:4px 0;background:none;color:#52675a;font-size:11px;white-space:nowrap}.organize-shortcuts button:hover{color:#244d36}.organize-shortcuts i{width:1px;height:12px;background:#dce2dc;flex:0 0 auto}.review-section{display:flex;flex:1;min-height:365px;flex-direction:column;overflow:hidden;border:1px solid #e0e6e0;border-radius:10px;background:#fff}.review-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:15px 18px 12px}.review-heading h2{margin:0 0 4px;color:#2f4136;font-size:17px}.review-heading h2 span{display:inline-grid;place-items:center;min-width:19px;height:19px;margin-left:5px;padding:0 5px;border-radius:11px;background:#edf3ee;color:#456d52;font-size:10px;vertical-align:2px}.review-heading p{margin:0;color:#7f8a81;font-size:11px}.review-heading time{color:#8e9a91;font-size:10px;white-space:nowrap}.review-filters{display:flex;align-items:center;gap:3px;padding:0 17px;border-bottom:1px solid #e8ede8;overflow-x:auto}.review-filters button{position:relative;display:flex;align-items:center;gap:5px;min-height:38px;padding:0 9px;background:none;color:#65736a;font-size:11px;white-space:nowrap}.review-filters button.active{color:#315b43;font-weight:700}.review-filters button.active:after{position:absolute;content:'';height:2px;left:7px;right:7px;bottom:0;background:#477653;border-radius:2px}.review-filters button span{color:#89958c;font-size:10px}.suggestion-list{display:flex;flex:1;flex-direction:column;padding:0 17px}.suggestion-row{display:flex;flex:1;align-items:center;justify-content:space-between;gap:15px;min-height:108px;padding:13px 2px;border-bottom:1px solid #edf0ec}.suggestion-row:last-child{border-bottom:0}.suggestion-main{min-width:0;flex:1}.suggestion-title{display:flex;align-items:center;gap:8px}.suggestion-title strong{font-size:13px;line-height:1.4;color:#34453a;font-weight:650}.kind-pill{display:inline-flex;align-items:center;justify-content:center;min-width:39px;height:20px;padding:0 6px;border-radius:4px;background:#edf3ee;color:#4e6d56;font-size:10px;white-space:nowrap}.kind-relationships{background:#f2eee8;color:#846644}.kind-timeline{background:#edf2f5;color:#587288}.kind-cluePoints{background:#f4efe6;color:#8f7445}.evidence-quote{display:-webkit-box;max-width:820px;margin:6px 0 5px;color:#59685e;font-size:12px;line-height:1.55;overflow:hidden;overflow-wrap:anywhere;-webkit-box-orient:vertical;-webkit-line-clamp:2}.evidence-quote:before{content:'“';color:#99a69b}.evidence-quote:after{content:'”';color:#99a69b}.evidence-quote.expanded{display:block;overflow:visible}.suggestion-meta{display:flex;align-items:center;gap:12px}.source-link,.quote-toggle{display:inline-flex;align-items:center;gap:4px;padding:0;background:none;color:#426b4e;font-size:10px}.source-link span{font-size:15px;line-height:10px}.quote-toggle{color:#7e8c81}.suggestion-action{flex:0 0 auto;min-height:34px;padding:0 11px;border:1px solid #315c48;border-radius:6px;background:#315c48;color:#fff;font-size:11px;white-space:nowrap}.suggestion-action:hover{background:#284d3b}.review-empty{display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;min-height:155px;text-align:center}.review-empty strong{color:#3d4d41;font-size:14px}.review-empty p{margin:7px 0 0;color:#7d897f;font-size:11px}.review-footnote{padding:9px 17px;border-top:1px solid #edf0ec;color:#7f8b81;font-size:10px;line-height:1.45;background:#fbfcfa}@media(max-width:850px){.organization-page{gap:12px;min-height:calc(100dvh - 132px)}.organize-header h1{font-size:25px}.organize-header p{font-size:12px}.organize-header .primary-button{height:40px;padding:0 13px;font-size:12px}.organize-summary{overflow-x:auto;justify-content:flex-start;gap:16px;min-height:47px}.organize-summary>button,.organize-summary>div{gap:4px}.organize-summary strong{font-size:16px}.organize-summary span{font-size:10px}.organize-shortcuts{gap:8px}.review-section{min-height:360px}.review-heading{padding:13px 14px 10px}.review-filters{padding:0 11px}.suggestion-list{padding:0 12px}.suggestion-row{min-height:100px;gap:10px}.evidence-quote{font-size:11px}.suggestion-action{padding:0 9px;font-size:10px}}@media(max-width:520px){.organization-page{gap:10px;min-height:calc(100dvh - 122px)}.organize-header{align-items:flex-start}.organize-header h1{font-size:23px}.organize-header p{max-width:225px;font-size:11px}.organize-header .primary-button{height:37px;padding:0 9px;font-size:10px}.organize-summary{gap:11px}.organize-summary>button,.organize-summary>div{flex-direction:column;align-items:center;gap:3px}.organize-status{font-size:10px}.organize-shortcuts{gap:7px}.organize-shortcuts>span{font-size:9px}.organize-shortcuts button{font-size:10px}.review-section{min-height:350px}.review-heading{align-items:flex-start;flex-direction:column;gap:4px}.review-heading time{display:none}.review-filters{padding:0 7px}.review-filters button{min-height:36px;padding:0 8px;font-size:10px}.suggestion-row{align-items:flex-start;min-height:114px;flex-direction:column;gap:8px;padding:12px 1px}.suggestion-title{align-items:flex-start}.suggestion-title strong{font-size:12px}.evidence-quote{font-size:11px}.suggestion-action{align-self:flex-end;min-height:31px;font-size:10px}.review-footnote{font-size:9px}}
 </style>

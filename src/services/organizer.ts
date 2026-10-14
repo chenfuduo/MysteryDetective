@@ -147,59 +147,82 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
 
 function extractExplicitTimeline(clues: ClueRecord[]): OrganizationSnapshot['timeline'] {
   const suggestions: OrganizationSnapshot['timeline'] = []
-  const datePattern = /(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日/g
-  const clockPattern = /^[\s，,、:：]*(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|晚)?\s*(\d{1,2})\s*(点|时|[:：])\s*(\d{1,2})?\s*分?/
+  const datePattern = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)|(?<!\d)(\d{1,2})[-/.](\d{1,2})(?!\d)/g
+  const clockPattern = /(?:(凌晨|清晨|早晨|早上|上午|中午|下午|傍晚|晚上|夜里|夜间|深夜|半夜|晚)\s*)?(?<!\d)(\d{1,2})\s*(点(?:钟)?|时|[:：])(?:\s*(\d{1,2})\s*分?|\s*(半))?(?!\d)/g
 
   for (const clue of clues) {
-    if (!clue.ocrText.trim()) continue
+    const sourceText = clue.ocrText
+    if (!sourceText.trim()) continue
+    const dates: { index: number; end: number; startsAt: string }[] = []
     datePattern.lastIndex = 0
-    let match: RegExpExecArray | null
-    while ((match = datePattern.exec(clue.ocrText)) !== null) {
-      const [, year, monthText, dayText] = match
-      const month = Number(monthText)
-      const day = Number(dayText)
-      const maxDay = new Date(Date.UTC(2000, month, 0)).getUTCDate()
+    let dateMatch: RegExpExecArray | null
+    while ((dateMatch = datePattern.exec(sourceText)) !== null) {
+      const [, chineseYear, chineseMonth, chineseDay, numericYear, numericMonth, numericDay, shortMonth, shortDay] = dateMatch
+      const year = chineseYear || numericYear || ''
+      const month = Number(chineseMonth || numericMonth || shortMonth)
+      const day = Number(chineseDay || numericDay || shortDay)
+      const maxDay = new Date(Date.UTC(year ? Number(year) : 2000, month, 0)).getUTCDate()
       if (month < 1 || month > 12 || day < 1 || day > maxDay) continue
+      const monthDay = `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+      dates.push({ index: dateMatch.index, end: datePattern.lastIndex, startsAt: year ? `${year}-${monthDay}` : `--${monthDay}` })
+    }
 
-      const afterDate = clue.ocrText.slice(datePattern.lastIndex, datePattern.lastIndex + 32)
-      const clock = afterDate.match(clockPattern)
-      let time = ''
-      if (clock) {
-        let hour = Number(clock[2])
-        const minute = clock[4] === undefined ? '' : String(Number(clock[4])).padStart(2, '0')
-        if (hour <= 23 && (!minute || Number(minute) <= 59)) {
-          if (['下午', '傍晚', '晚上', '晚', '中午'].includes(clock[1]) && hour < 12) hour += 12
-          if (['凌晨', '清晨'].includes(clock[1]) && hour === 12) hour = 0
-          time = `T${String(hour).padStart(2, '0')}${minute ? `:${minute}` : ''}`
-        }
+    const clocks: { index: number; end: number; value: string }[] = []
+    clockPattern.lastIndex = 0
+    let clockMatch: RegExpExecArray | null
+    while ((clockMatch = clockPattern.exec(sourceText)) !== null) {
+      const period = clockMatch[1] || ''
+      let hour = Number(clockMatch[2])
+      const minuteText = clockMatch[4] === undefined ? (clockMatch[5] ? '30' : '') : clockMatch[4]
+      const minute = minuteText ? Number(minuteText) : null
+      if (hour > 23 || (minute !== null && minute > 59)) continue
+      if (['下午', '傍晚', '晚上', '夜里', '夜间', '深夜', '晚', '中午'].includes(period) && hour > 0 && hour < 12) hour += 12
+      if (['凌晨', '清晨', '早晨'].includes(period) && hour === 12) hour = 0
+      if (['半夜'].includes(period) && hour === 12) hour = 0
+      clocks.push({ index: clockMatch.index, end: clockPattern.lastIndex, value: `T${String(hour).padStart(2, '0')}${minute === null ? '' : `:${String(minute).padStart(2, '0')}`}` })
+    }
+
+    const clocksByDate = new Map<number, typeof clocks>()
+    for (const clock of clocks) {
+      const previous = [...dates].reverse().find(date => date.end <= clock.index)
+      const next = dates.find(date => date.index >= clock.end)
+      const previousDistance = previous ? clock.index - previous.end : Infinity
+      const nextDistance = next ? next.index - clock.end : Infinity
+      const relatedDate = previousDistance <= 180 ? previous : nextDistance <= 180 ? next : undefined
+      if (!relatedDate) continue
+      const relatedClocks = clocksByDate.get(relatedDate.index) || []
+      relatedClocks.push(clock)
+      clocksByDate.set(relatedDate.index, relatedClocks)
+    }
+
+    for (const date of dates) {
+      const matchedClocks = clocksByDate.get(date.index) || []
+      const entries = matchedClocks.length ? matchedClocks.map(clock => ({ startsAt: `${date.startsAt}${clock.value}`, clock })) : [{ startsAt: date.startsAt, clock: undefined }]
+      for (const entry of entries) {
+        const anchorStart = entry.clock ? Math.min(date.index, entry.clock.index) : date.index
+        const anchorEnd = entry.clock ? Math.max(date.end, entry.clock.end) : date.end
+        const quote = sourceText.slice(Math.max(0, anchorStart - 36), Math.min(sourceText.length, anchorEnd + 90)).trim().slice(0, 600)
+        suggestions.push({
+          id: `ocr-time-${crypto.randomUUID()}`,
+          title: '待补充事件',
+          startsAt: entry.startsAt,
+          people: [],
+          sourceNo: clue.number,
+          quote,
+          requiresTitle: true,
+        })
       }
-
-      const yearValue = year || ''
-      const startAt = `${yearValue || '--'}${yearValue ? '-' : ''}${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}${time}`
-      const index = match.index
-      const end = datePattern.lastIndex + (clock?.[0].length || 0)
-      const quote = clue.ocrText.slice(Math.max(0, index - 36), Math.min(clue.ocrText.length, end + 90)).trim()
-      suggestions.push({
-        id: `ocr-time-${crypto.randomUUID()}`,
-        title: '待补充事件',
-        startsAt: startAt,
-        people: [],
-        sourceNo: clue.number,
-        quote,
-        requiresTitle: true,
-      })
     }
   }
   return suggestions
 }
-
 export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSnapshot> {
   const apiKey = await readApiKey()
   const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText.trim() }))
   if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
 
   const system = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
-时间信息优先保证完整、精确。处理每条线索时，先从头到尾扫描全部原文，逐个找出明确写出的日期和时刻，再整理人物、关系、事件和线索主题。时间扫描不能因找到第一处时间就停止。
+时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索都要从头扫描到尾，不能找到第一处时间就停止。
 
 时间线规则：
 1. 原文中的每个明确日期都要检查同一事件或同一句中是否写有时刻。只要原文明确写了几点几分，startsAt 就必须保留到分钟，绝不能只输出日期。例如“6月17日凌晨3时04分”写成“--06-17T03:04”，“2025年6月17日 15:08”写成“2025-06-17T15:08”。

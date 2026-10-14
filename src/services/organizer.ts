@@ -198,9 +198,20 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
   const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText.trim() }))
   if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
 
-  const system = `你是剧本杀线索的文字整理工具。只整理用户给出的 OCR 原文，不搜索外部资料，不推理剧情。
-只输出 JSON，格式为：{"people":[{"name":"原文明确出现的人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说的关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确写出的事件短句","startsAt":"YYYY-MM-DD 或 YYYY-MM-DDTHH:mm；原文未写年份时用 --MM-DD 或 --MM-DDTHH:mm","people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"这条线索的简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
-约束：逐条扫描全部 OCR 原文，不得漏掉同一条线索中的多个时间；每个明确出现的日期时间都单独输出一项 timeline，不得合并。人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；日期时间和事件必须在对应原文中明确出现；原文只写月日时，保留为 --MM-DD 格式，不得补年份；原文明确写出几点几分时，startsAt 必须保留到 HH:mm；没有明确写出的时分不得补齐。线索主题只能简要归纳该原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
+  const system = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
+时间信息优先保证完整、精确。处理每条线索时，先从头到尾扫描全部原文，逐个找出明确写出的日期和时刻，再整理人物、关系、事件和线索主题。时间扫描不能因找到第一处时间就停止。
+
+时间线规则：
+1. 原文中的每个明确日期都要检查同一事件或同一句中是否写有时刻。只要原文明确写了几点几分，startsAt 就必须保留到分钟，绝不能只输出日期。例如“6月17日凌晨3时04分”写成“--06-17T03:04”，“2025年6月17日 15:08”写成“2025-06-17T15:08”。
+2. 原文未写年份时使用 --MM-DD；有明确时刻时使用 --MM-DDTHH:mm。原文有年份时使用 YYYY-MM-DD 或 YYYY-MM-DDTHH:mm。不得补年份、时刻或分钟；原文只写到小时就只保留小时。
+3. 同一条线索可能包含多项日期和时刻。每个明确的日期时间都单独输出一项，按原文出现顺序逐项检查，不得漏项、合并或只保留一个代表时间。对同一事件同时识别出日期和时刻时，只输出包含时刻的完整时间，不要再为该事件重复输出一个仅有日期的项目。
+4. 只在原文明示关联时才把日期和时刻组合。若无法确定某个时刻属于哪个日期，不要猜测关联；仍保留原文明确、彼此独立的时间信息。
+5. 事件标题只简述原文明确写出的动作或事实，不概括动机、因果或真相。原文有明确时间但事件标题无法简洁提取时，仍输出时间建议，标题可写“待补充事件”。
+6. 每条时间建议的 quote 必须是对应 OCR 原文中的逐字连续摘录，并且尽可能同时包含该日期、时刻和事件描述，便于核对原图。source 必须是该摘录所属线索的编号。
+
+输出格式为纯 JSON，不要 Markdown 或额外说明：{"people":[{"name":"原文明确出现的人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说的关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确写出的事件短句","startsAt":"YYYY-MM-DD、YYYY-MM-DDTHH:mm、--MM-DD 或 --MM-DDTHH:mm","people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"这条线索的简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
+
+其他约束：人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；事件日期和时间必须能在对应原文中找到；原文明确写出上午、下午、晚上等时段时，按其明确含义换算为 24 小时制；没有时段标记时不得擅自改变小时。线索主题只能简要归纳原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
   const data = {
     model: 'deepseek-chat',
     stream: false,
@@ -209,7 +220,7 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: system },
-      { role: 'user', content: `请整理以下一个剧本的 OCR 线索。返回 JSON。\n${JSON.stringify(sourceClues)}` },
+      { role: 'user', content: `请按系统规则完整整理以下单个剧本的 OCR 线索。逐条扫描每份原文直至末尾，优先确保时间线里的日期和具体时分都被完整保留；每条建议都要能凭 source 和 quote 回到原始线索。只返回符合格式的 JSON。\n${JSON.stringify(sourceClues)}` },
     ],
   }
 

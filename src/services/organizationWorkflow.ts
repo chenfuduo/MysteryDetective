@@ -125,7 +125,7 @@ export async function organizeIncrementally(
   const people = input.people.filter(person => person.scriptId === scriptId)
   const nameById = new Map(people.map(person => [person.id, organizationTextKey(person.name)]))
   const canonicalNames = new Map<string, string>()
-  for (const person of people) for (const name of [person.name, ...person.aliases]) canonicalNames.set(organizationTextKey(name), organizationTextKey(person.name))
+  for (const person of people) for (const name of [person.name, ...person.aliases, ...(person.ocrNames || [])]) canonicalNames.set(organizationTextKey(name), organizationTextKey(person.name))
   const canonicalName = (name: string): string => canonicalNames.get(organizationTextKey(name)) || organizationTextKey(name)
   const eventKey = (title: string, startsAt: string, names: string[]): string => JSON.stringify([organizationTextKey(title), startsAt, [...new Set(names)].sort()])
   const timelineKey = (item: OrganizationTimelineSuggestion): string => eventKey(item.title, item.startsAt, item.people.map(canonicalName))

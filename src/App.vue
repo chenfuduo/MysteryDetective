@@ -19,12 +19,15 @@ import WorkspaceSearch from './components/WorkspaceSearch.vue'
 import WorkspaceGuide from './components/WorkspaceGuide.vue'
 import ClueBatchEditor from './components/ClueBatchEditor.vue'
 import ReviewWorkbench from './components/ReviewWorkbench.vue'
+import OperationHistory from './components/OperationHistory.vue'
+import PersonNameCorrections from './components/PersonNameCorrections.vue'
+import ArchiveImportDialog from './components/ArchiveImportDialog.vue'
 import ArchiveStatus from './components/ArchiveStatus.vue'
 import { updateCluesInBatch, type BatchCluePatch } from './services/clueBatch'
 import { getDraft, saveDraft, removeDraft, flushDrafts } from './services/drafts'
 import { mergePeople } from './services/personMerge'
 import { organizeIncrementally, getOrganizationTaskStates, type OrganizationTaskState } from './services/organizationWorkflow'
-import { reviewSuggestions, timelineEvidence, recordUndo, loadLastUndo, mergeConfirmedEvents, type ReviewSelection, type ReviewUndo } from './services/reviewActions'
+import { reviewSuggestions, timelineEvidence, recordUndo, loadLastUndo, loadLastRedo, mergeConfirmedEvents, type ReviewSelection, type ReviewUndo } from './services/reviewActions'
 import * as organizer from './services/organizer'
 import { aiRoute, initializeAiRouting, providerLabel, type AiProvider } from './services/aiProvider'
 import * as vault from './services/vault'
@@ -60,6 +63,11 @@ const workspaceGuideOpen = ref(false)
 const personMergeSourceId = ref('')
 const comparisonEventIds = ref<string[]>([])
 const reviewUndo = ref<ReviewUndo | null>(null)
+const reviewRedo = ref<ReviewUndo | null>(null)
+const operationHistoryOpen = ref(false)
+const correctionPersonId = ref('')
+const importPreview = ref<vault.ArchiveImportPreview | null>(null)
+const importDialogOpen = ref(false)
 const personWorkspaceId = ref('')
 const sourceExcerpt = ref('')
 const aiStatusOpen = ref(false)
@@ -224,7 +232,7 @@ const visibleClues = computed(() => clues.value.filter(item => {
   if (favoriteOnly.value && !item.favorite) return false
   if (filterPerson.value) {
     const person = people.value.find(value => value.id === filterPerson.value)
-    if (person && ![person.name, ...person.aliases].some(name => name && `${item.title} ${item.ocrText} ${item.notes}`.includes(name))) return false
+    if (person && ![person.name, ...person.aliases, ...(person.ocrNames || [])].some(name => name && `${item.title} ${item.ocrText} ${item.notes}`.includes(name))) return false
   }
   return true
 }).sort((a, b) => clueSort.value === 'number' ? a.number - b.number : clueSort.value === 'title' ? a.title.localeCompare(b.title, 'zh-CN', { numeric: true }) || a.number - b.number : (clueSort.value === 'oldest' ? a.createdAt.localeCompare(b.createdAt) || a.number - b.number : b.createdAt.localeCompare(a.createdAt) || b.number - a.number)))
@@ -345,12 +353,12 @@ function navigateFromGuide(next: typeof view.value, section?: 'profiles' | 'rela
 function handleWorkspaceShortcut(event: KeyboardEvent) {
   if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k' || event.altKey || event.shiftKey) return
   if (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return
-  if (clueDialog.value || noteDialog.value || personDialog.value || eventDialog.value || relationshipDialog.value || scriptDialog.value || boardDialog.value || boardLinkDialog.value || recoveryOpen.value || personMergeSourceId.value || clueBatchOpen.value || reviewWorkbenchOpen.value) return
+  if (clueDialog.value || noteDialog.value || personDialog.value || eventDialog.value || relationshipDialog.value || scriptDialog.value || boardDialog.value || boardLinkDialog.value || recoveryOpen.value || personMergeSourceId.value || clueBatchOpen.value || reviewWorkbenchOpen.value || operationHistoryOpen.value || correctionPersonId.value || importDialogOpen.value) return
   if (!activeScriptId.value) return
   event.preventDefault()
   openWorkspaceSearch()
 }
-const personClueCount = (person: PersonRecord) => clues.value.filter(clue => [person.name, ...person.aliases].some(name => name && `${clue.title} ${clue.ocrText}`.includes(name))).length
+const personClueCount = (person: PersonRecord) => clues.value.filter(clue => [person.name, ...person.aliases, ...(person.ocrNames || [])].some(name => name && `${clue.title} ${clue.ocrText}`.includes(name))).length
 const boardNodes = computed<Node[]>(() => boardItems.value.map(item => ({
   id: item.id,
   type: 'default',
@@ -448,17 +456,17 @@ async function loadWorkspace() {
   if (!id) {
     loadedWorkspaceScriptId = ''
     clues.value = []; people.value = []; relationships.value = []; events.value = []
-    boardItems.value = []; boardLinks.value = []; notes.value = []; organization.value = null; compareIds.value = []; comparisonEventIds.value = []; taskStates.value = []; reviewUndo.value = null
+    boardItems.value = []; boardLinks.value = []; notes.value = []; organization.value = null; compareIds.value = []; comparisonEventIds.value = []; taskStates.value = []; reviewUndo.value = null; reviewRedo.value = null
     return
   }
   if (id !== loadedWorkspaceScriptId) {
     loadedWorkspaceScriptId = id
     clues.value = []; people.value = []; relationships.value = []; events.value = []
-    boardItems.value = []; boardLinks.value = []; notes.value = []; organization.value = null; compareIds.value = []; comparisonEventIds.value = []; taskStates.value = []; reviewUndo.value = null
+    boardItems.value = []; boardLinks.value = []; notes.value = []; organization.value = null; compareIds.value = []; comparisonEventIds.value = []; taskStates.value = []; reviewUndo.value = null; reviewRedo.value = null
   }
-  const [nextClues, nextPeople, nextRelationships, nextEvents, nextBoardItems, nextBoardLinks, nextNotes, nextOrganization, nextUndo, nextCaptureRound] = await Promise.all([
+  const [nextClues, nextPeople, nextRelationships, nextEvents, nextBoardItems, nextBoardLinks, nextNotes, nextOrganization, nextUndo, nextRedo, nextCaptureRound] = await Promise.all([
     vault.listClues(id), vault.listPeople(id), vault.listRelationships(id), vault.listTimelineEvents(id),
-    vault.listBoardItems(id), vault.listBoardLinks(id), vault.listNotes(id), vault.getOrganization(id), loadLastUndo(id), vault.getLocalState<string>(id, 'capture-round'),
+    vault.listBoardItems(id), vault.listBoardLinks(id), vault.listNotes(id), vault.getOrganization(id), loadLastUndo(id), loadLastRedo(id), vault.getLocalState<string>(id, 'capture-round'),
   ])
   if (id !== activeScriptId.value) return
   const scopedClues = nextClues.filter(item => item.scriptId === id)
@@ -473,6 +481,7 @@ async function loadWorkspace() {
   notes.value = nextNotes.filter(item => item.scriptId === id)
   organization.value = nextOrganization?.scriptId === id ? nextOrganization : null
   reviewUndo.value = nextUndo?.scriptId === id ? nextUndo : null
+  reviewRedo.value = nextRedo?.scriptId === id ? nextRedo : null
   captureRoundHydrating = true
   captureRound.value = nextCaptureRound?.trim() || '1'
   captureRoundHydrating = false
@@ -735,6 +744,21 @@ async function undoLastChange() {
     await undo.run()
     await loadWorkspace()
   }, '已撤销上一步')
+}
+async function redoLastChange() {
+  const redo = reviewRedo.value
+  if (!redo || redo.scriptId !== activeScriptId.value) return
+  await action(async () => { await redo.run(); await loadWorkspace() }, '已重做上一步')
+}
+function openNameCorrections(personId: string) {
+  if (!people.value.some(person => person.id === personId && person.scriptId === activeScriptId.value)) return
+  personWorkspaceId.value = ''
+  personDialog.value = false
+  correctionPersonId.value = personId
+}
+async function nameCorrectionChanged(undo: ReviewUndo) {
+  if (undo.scriptId !== activeScriptId.value) return
+  await action(async () => { reviewUndo.value = undo; await loadWorkspace() }, '姓名识别纠错规则已保存')
 }
 function clearOrganizationSuggestions() {
   const current = organization.value
@@ -1074,11 +1098,29 @@ async function exportArchive() {
 }
 async function importArchive() {
   await action(async () => {
-    const imported = await vault.importScript()
-    if (!imported) return
+    const preview = await vault.previewScriptImport()
+    if (!preview) return
+    if (importPreview.value) vault.discardScriptImportPreview(importPreview.value.token)
+    importPreview.value = preview
+    importDialogOpen.value = true
+  })
+}
+function closeImportPreview() {
+  if (busy.value) return
+  if (importPreview.value) vault.discardScriptImportPreview(importPreview.value.token)
+  importPreview.value = null
+  importDialogOpen.value = false
+}
+async function confirmArchiveImport() {
+  const preview = importPreview.value
+  if (!preview) return
+  await action(async () => {
+    const imported = await vault.importPreparedScript(preview.token)
+    importPreview.value = null
+    importDialogOpen.value = false
     activeScriptId.value = imported.id
     await loadScripts(); await loadWorkspace()
-  }, '档案已导入')
+  }, '档案已导入为独立剧本')
 }
 function flushEditorDrafts() { void flushDrafts().catch(() => notify('草稿尚未保存成功，请保留当前页面后重试')) }
 function refreshAiRoutingOnVisibility() {
@@ -1088,7 +1130,7 @@ function refreshAiRoutingOnVisibility() {
 function refreshAiRoutingOnNetwork() {
   void initializeAiRouting()
 }
-watch(activeScriptId, () => { captureRoundReady.value = false; flushEditorDrafts(); ++clueDraftSequence; ++noteDraftSequence; clueDialog.value = false; noteDialog.value = false; clueDraftContext = null; noteDraftContext = null; personWorkspaceId.value = ''; personMergeSourceId.value = ''; recoveryOpen.value = false; reviewUndo.value = null; taskStates.value = []; organizationProgress.value = ''; aiStatusOpen.value = false; workspaceSearchOpen.value = false; workspaceGuideOpen.value = false; clueSelectionMode.value = false; selectedClueIds.value = []; clueBatchOpen.value = false; reviewWorkbenchOpen.value = false; sourceLocationCount.value = 0; organizationPaused.value = false; cluePageSize.value = 60; if (activeScriptId.value) { restoreWorkspaceLocation(activeScriptId.value); try { localStorage.setItem('clue-vault:last-script', activeScriptId.value) } catch {} } }, { flush: 'sync' })
+watch(activeScriptId, () => { captureRoundReady.value = false; flushEditorDrafts(); ++clueDraftSequence; ++noteDraftSequence; clueDialog.value = false; noteDialog.value = false; clueDraftContext = null; noteDraftContext = null; personWorkspaceId.value = ''; personMergeSourceId.value = ''; recoveryOpen.value = false; reviewUndo.value = null; reviewRedo.value = null; operationHistoryOpen.value = false; correctionPersonId.value = ''; taskStates.value = []; organizationProgress.value = ''; aiStatusOpen.value = false; workspaceSearchOpen.value = false; workspaceGuideOpen.value = false; clueSelectionMode.value = false; selectedClueIds.value = []; clueBatchOpen.value = false; reviewWorkbenchOpen.value = false; sourceLocationCount.value = 0; organizationPaused.value = false; cluePageSize.value = 60; if (activeScriptId.value) { restoreWorkspaceLocation(activeScriptId.value); try { localStorage.setItem('clue-vault:last-script', activeScriptId.value) } catch {} } }, { flush: 'sync' })
 watch(captureRound, (value, previous) => {
   if (captureRoundHydrating || !activeScriptId.value) return
   const round = value.trim() || '1', scriptId = activeScriptId.value
@@ -1150,7 +1192,7 @@ onMounted(async () => {
   timelineOrientationQuery.addEventListener('change', updateTimelineOrientation)
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
 })
-onUnmounted(() => { if (organizationElapsedTimer) clearInterval(organizationElapsedTimer); organizationPauseRequested.value = true; document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
+onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(importPreview.value.token); if (organizationElapsedTimer) clearInterval(organizationElapsedTimer); organizationPauseRequested.value = true; document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -1167,7 +1209,7 @@ onUnmounted(() => { if (organizationElapsedTimer) clearInterval(organizationElap
         <div class="sidebar-bottom"><div class="offline-chip"><span class="offline-dot"></span>本机保存 · AI 可选</div><button class="sidebar-small-button" @click="openScriptDialog()"><UiIcon name="plus" :size="16" />新建剧本</button></div>
       </aside>
       <main class="main-panel">
-        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><button v-if="activeScript" class="icon-button workspace-search-trigger" title="搜索当前剧本（⌘ / Ctrl + K）" aria-label="搜索当前剧本的线索、人物、事件和笔记" @click="openWorkspaceSearch"><UiIcon name="search" :size="20" /></button><button v-if="activeScript" class="icon-button workspace-guide-trigger" title="使用指南" aria-label="打开使用指南" @click="workspaceGuideOpen = true; aiStatusOpen = false"><UiIcon name="info" :size="19" /></button><div class="ai-service-menu"><button class="ai-route-indicator" :class="aiStatusTone" :title="aiStatusTitle" :aria-expanded="aiStatusOpen" @click="openAiStatus"><span class="ai-route-dot" aria-hidden="true"></span><span aria-live="polite">{{ aiStatusLabel }}</span></button><section v-if="aiStatusOpen" class="ai-service-popover" aria-label="AI 服务状态"><header><strong>AI 服务状态</strong><button aria-label="关闭服务状态" @click="aiStatusOpen = false"><UiIcon name="close" :size="17" /></button></header><dl><dt>当前选择</dt><dd>{{ selectedProviderLabel }} · {{ aiRoute.countryCode || '地区待检测' }}</dd><dt>整理状态</dt><dd>{{ organizer.organizationRun.message || aiRoute.message }}</dd></dl><p v-if="organizer.organizationRun.lastError" class="service-error">{{ organizer.organizationRun.lastError }}</p><p v-if="organization?.analysis?.provider === 'local'">{{ organization.analysis.localReason === 'quota' ? 'API 额度不足，本次使用本地整理。' : '网络不可用，本次使用本地整理。' }}</p><div><button :disabled="busy || aiRoute.phase === 'checking'" @click="retryAiService">重新检测</button><button :disabled="busy || !clues.length" @click="aiStatusOpen = false; runOrganization()">继续整理</button><button @click="aiStatusOpen = false; switchView('settings')">管理密钥</button></div></section></div><button v-if="reviewUndo && reviewUndo.scriptId === activeScriptId" class="secondary-button topbar-undo" :disabled="busy" :title="`撤销${reviewUndo.label}`" @click="undoLastChange"><UiIcon name="rotate" :size="17" />撤销</button><button v-if="organizationActive" class="organization-pause-button" :disabled="organizationPauseRequested" @click="requestOrganizationPause">{{ organizationPauseRequested ? '正在暂停' : '暂停整理' }}</button><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
+        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><button v-if="activeScript" class="icon-button workspace-search-trigger" title="搜索当前剧本（⌘ / Ctrl + K）" aria-label="搜索当前剧本的线索、人物、事件和笔记" @click="openWorkspaceSearch"><UiIcon name="search" :size="20" /></button><button v-if="activeScript" class="icon-button workspace-guide-trigger" title="使用指南" aria-label="打开使用指南" @click="workspaceGuideOpen = true; aiStatusOpen = false"><UiIcon name="info" :size="19" /></button><div class="ai-service-menu"><button class="ai-route-indicator" :class="aiStatusTone" :title="aiStatusTitle" :aria-expanded="aiStatusOpen" @click="openAiStatus"><span class="ai-route-dot" aria-hidden="true"></span><span aria-live="polite">{{ aiStatusLabel }}</span></button><section v-if="aiStatusOpen" class="ai-service-popover" aria-label="AI 服务状态"><header><strong>AI 服务状态</strong><button aria-label="关闭服务状态" @click="aiStatusOpen = false"><UiIcon name="close" :size="17" /></button></header><dl><dt>当前选择</dt><dd>{{ selectedProviderLabel }} · {{ aiRoute.countryCode || '地区待检测' }}</dd><dt>整理状态</dt><dd>{{ organizer.organizationRun.message || aiRoute.message }}</dd></dl><p v-if="organizer.organizationRun.lastError" class="service-error">{{ organizer.organizationRun.lastError }}</p><p v-if="organization?.analysis?.provider === 'local'">{{ organization.analysis.localReason === 'quota' ? 'API 额度不足，本次使用本地整理。' : '网络不可用，本次使用本地整理。' }}</p><div><button :disabled="busy || aiRoute.phase === 'checking'" @click="retryAiService">重新检测</button><button :disabled="busy || !clues.length" @click="aiStatusOpen = false; runOrganization()">继续整理</button><button @click="aiStatusOpen = false; switchView('settings')">管理密钥</button></div></section></div><button v-if="reviewUndo && reviewUndo.scriptId === activeScriptId" class="secondary-button topbar-undo" :disabled="busy" :title="`撤销${reviewUndo.label}`" @click="undoLastChange"><UiIcon name="rotate" :size="17" />撤销</button><button v-if="organizationActive" class="organization-pause-button" :disabled="organizationPauseRequested" @click="requestOrganizationPause">{{ organizationPauseRequested ? '正在暂停' : '暂停整理' }}</button><button v-if="reviewRedo && reviewRedo.scriptId === activeScriptId" class="secondary-button topbar-undo" :disabled="busy" :title="`重做${reviewRedo.label}`" @click="redoLastChange"><UiIcon name="rotate" :size="17" class="redo-icon" />重做</button><button v-if="activeScript" class="icon-button topbar-history" title="操作历史" aria-label="打开操作历史，逐步撤销或重做" @click="operationHistoryOpen = true"><UiIcon name="clock" :size="19" /></button><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
         <div v-if="!activeScript" class="empty-home"><div class="empty-art"><div class="art-paper art-paper-one"></div><div class="art-paper art-paper-two"></div><div class="art-paper art-paper-three"><UiIcon name="search" :size="38" /></div></div><h1>从一个剧本开始</h1><p>拍下线索，OCR 文字在本机识别。需要时可选择 AI 整理。</p><div class="empty-home-actions"><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button><button class="secondary-button" @click="importArchive"><UiIcon name="upload" :size="18" />导入档案</button></div></div>
         <template v-else>
           <section v-if="view === 'clues'" class="page page-clues">
@@ -1206,18 +1248,21 @@ onUnmounted(() => { if (organizationElapsedTimer) clearInterval(organizationElap
         </template>
       </main>
       <nav class="mobile-nav" aria-label="底部导航"><button v-for="item in nav" :key="item.id" :class="{ active: activeNavId === item.id }" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="21" /><span>{{ item.label }}</span></button></nav>
-      <PersonWorkspace v-if="personWorkspaceId" :person-id="personWorkspaceId" :script-id="activeScriptId" :people="people" :relationships="relationships" :events="events" :clues="clues" :image-urls="imageUrls" @close="personWorkspaceId = ''" @open-clue="openTimelineClue" @focus-event="focusWorkspaceEvent" @open-person="openPersonWorkspace" @edit-person="openGraphPerson" @merge-person="openPersonMerge" @compare-event="compareWorkspaceEvent" />
+      <PersonWorkspace v-if="personWorkspaceId" :person-id="personWorkspaceId" :script-id="activeScriptId" :people="people" :relationships="relationships" :events="events" :clues="clues" :image-urls="imageUrls" @close="personWorkspaceId = ''" @open-clue="openTimelineClue" @focus-event="focusWorkspaceEvent" @open-person="openPersonWorkspace" @edit-person="openGraphPerson" @merge-person="openPersonMerge" @compare-event="compareWorkspaceEvent" @correct-name="openNameCorrections" />
       <PersonMergeDialog v-if="personMergeSourceId" :script-id="activeScriptId" :source-id="personMergeSourceId" :people="people" :busy="busy" @close="personMergeSourceId = ''" @confirm="confirmPersonMerge" />
       <RecoveryPanel v-if="recoveryOpen" :script-id="activeScriptId" @close="recoveryOpen = false" @restored="loadWorkspace" />
     <Teleport to="body">
       <div v-if="toast" class="toast" role="status">{{ toast }}</div>
+      <OperationHistory v-if="operationHistoryOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :revision-key="archiveRevision" :busy="busy" @close="operationHistoryOpen = false" @undo="undoLastChange" @redo="redoLastChange" />
+      <PersonNameCorrections v-if="correctionPersonId && activeScript" :key="`${activeScriptId}:${correctionPersonId}`" :script-id="activeScriptId" :person-id="correctionPersonId" :people="people" :clues="clues" :busy="busy" @close="correctionPersonId = ''" @changed="nameCorrectionChanged" />
+      <ArchiveImportDialog v-if="importDialogOpen && importPreview" :preview="importPreview" :busy="busy" @close="closeImportPreview" @confirm="confirmArchiveImport" />
       <ReviewWorkbench v-if="reviewWorkbenchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :clues="clues" :organization="organization" :image-urls="imageUrls" :busy="busy" @request-image="requestClueImage" @close="reviewWorkbenchOpen = false" @open-clue="openTimelineClue" @accept="acceptWorkbenchSuggestion" @ignore="applyReviewSelection([$event], 'ignore')" @locate-clue="locateClueSource" />
       <ClueBatchEditor v-if="clueBatchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :clues="selectedBatchClues" :rounds="captureRoundOptions" :categories="categories" :busy="busy" @close="clueBatchOpen = false" @apply="applyClueBatch" />
       <WorkspaceSearch v-if="workspaceSearchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :script-name="activeScript.name" :clues="clues" :people="people" :events="events" :notes="notes" @close="workspaceSearchOpen = false" @open-clue="openSearchClue" @open-person="openSearchPerson" @open-event="openSearchEvent" @open-note="openSearchNote" />
       <WorkspaceGuide v-if="workspaceGuideOpen && activeScript" :key="activeScriptId" :script-name="activeScript.name" @close="workspaceGuideOpen = false" @navigate="navigateFromGuide" @open-search="openWorkspaceSearch" />
       <div v-if="scriptDialog" class="modal-backdrop" @click.self="scriptDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ editingScriptId ? '编辑剧本' : '新建剧本' }}</h2><button title="关闭" @click="scriptDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>剧本名称<input v-model="scriptForm.name" maxlength="80" placeholder="输入剧本名称" /></label><label>游玩日期<input v-model="scriptForm.playDate" type="date" /></label><div class="image-picker-row"><div class="image-picker-preview" :style="scriptForm.coverPath ? { backgroundImage: `url(${scriptForm.coverPath.startsWith('data:') ? scriptForm.coverPath : imageUrls[scriptForm.coverPath] || ''})` } : {}"><UiIcon v-if="!scriptForm.coverPath" name="image" :size="22" /></div><button class="secondary-button" @click="chooseCover">选择封面照片</button></div></div><div class="modal-actions"><button class="secondary-button" @click="scriptDialog = false">取消</button><button class="primary-button" :disabled="busy" @click="saveScript">保存剧本</button></div></div></div>
       <div v-if="clueDialog && selectedClue" class="modal-backdrop clue-backdrop" @click.self="clueDialog = false"><div class="modal clue-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">线索 #{{ String(selectedClue.number).padStart(3, '0') }}</span><h2>{{ selectedClue.title }}</h2></div><button title="关闭" @click="clueDialog = false"><UiIcon name="close" :size="20" /></button></div><div class="clue-detail-layout"><div class="clue-photo-panel"><CluePhotoViewer v-if="imageUrls[selectedClue.imagePath]" v-model:zoom="photoZoom" :src="imageUrls[selectedClue.imagePath]" :alt="selectedClue.title" :rotation="selectedClue.rotation" :regions="selectedClue.ocrImagePath === selectedClue.imagePath ? selectedClue.ocrRegions || [] : []" :focus-text="sourceExcerpt" @location="sourceLocationCount = $event" /><div v-else class="photo-stage"><UiIcon name="image" :size="40" /></div><div class="photo-tools"><span>原始照片</span><button @click="capture"><UiIcon name="camera" :size="18" />继续拍摄</button><button title="放大或缩小" @click="photoZoom = !photoZoom"><UiIcon name="zoomIn" :size="18" />{{ photoZoom ? '缩小' : '放大' }}</button><button @click="rotatePhoto(selectedClue)"><UiIcon name="rotate" :size="18" />旋转</button><button @click="openCrop"><UiIcon name="image" :size="18" />裁剪</button><button @click="annotationOpen = true"><UiIcon name="edit" :size="18" />标注</button></div></div><div class="clue-editor" :inert="busy || undefined"><div class="editor-draft-status" role="status"><span>{{ clueDraftStatus }}</span><button class="text-button" :disabled="busy" @click="discardClueDraft">丢弃草稿</button><p v-if="clueDraftConflict">正式记录已发生变化；当前恢复的是旧草稿，请核对后再保存。</p></div><section v-if="sourceExcerpt" class="source-excerpt"><header><strong>对应原文</strong><button aria-label="收起出处摘录" @click="sourceExcerpt = ''"><UiIcon name="close" :size="16" /></button></header><p>{{ sourceExcerpt }}</p><div class="source-location-actions"><span role="status">{{ sourceLocationCount ? `原图已框出 ${sourceLocationCount} 行对应文字` : selectedClue.ocrRegions?.length ? '当前摘录未匹配到原图位置' : '这条线索尚无原图文字定位' }}</span><button v-if="!sourceLocationCount" class="text-button" :disabled="busy" @click="locateClueSource(selectedClue.id)">{{ selectedClue.ocrRegions?.length ? '重建定位' : '补充定位' }}</button></div></section><div class="editor-section"><span class="section-label">基础信息</span><label>标题<input v-model="clueForm.title" /></label><div class="two-fields"><label>搜证轮次<input v-model="clueForm.round" placeholder="如：第一轮" /></label><label>分类<input v-model="clueForm.category" placeholder="如：物证" /></label></div><label>标签<input v-model="clueForm.tags" placeholder="用逗号分隔" /></label></div><div class="editor-section"><span class="section-label">OCR 识别文字 <small>可直接修正错误</small></span><textarea v-model="clueForm.ocrText" rows="8" placeholder="照片中暂未识别出文字"></textarea></div><div class="editor-section"><span class="section-label">备注</span><textarea v-model="clueForm.notes" rows="3" placeholder="写下你的观察"></textarea></div><div class="clue-editor-bottom"><button class="danger-text" @click="removeClue(selectedClue)"><UiIcon name="trash" :size="17" />删除线索</button><div><button class="secondary-button" @click="toggleCompare(selectedClue.id)"><UiIcon name="compare" :size="17" />{{ compareIds.includes(selectedClue.id) ? '移出对照' : '加入对照' }}</button><button class="primary-button" :disabled="busy" @click="saveClue">保存修改</button></div></div></div></div></div></div>
-      <div v-if="personDialog" class="modal-backdrop" @click.self="personDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ editingPersonId ? '编辑人物' : '添加人物' }}</h2><button title="关闭" @click="personDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>姓名<input v-model="personForm.name" placeholder="人物姓名" /></label><div class="image-picker-row"><div class="image-picker-preview round" :style="personForm.photoPath ? { backgroundImage: `url(${personForm.photoPath.startsWith('data:') ? personForm.photoPath : imageUrls[personForm.photoPath] || ''})` } : {}"><UiIcon v-if="!personForm.photoPath" name="person" :size="22" /></div><button class="secondary-button" @click="choosePersonPhoto">选择人物照片</button></div><label>别名<input v-model="personForm.aliases" placeholder="多个别名用逗号分隔" /></label><label>备注<textarea v-model="personForm.notes" rows="4" placeholder="人物档案备注"></textarea></label></div><div class="modal-actions"><button v-if="editingPersonId && people.length > 1" class="secondary-button" :disabled="busy" @click="openPersonMerge(editingPersonId)">合并人物</button><button class="secondary-button" @click="personDialog = false">取消</button><button class="primary-button" @click="savePerson">保存人物</button></div></div></div>
+      <div v-if="personDialog" class="modal-backdrop" @click.self="personDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ editingPersonId ? '编辑人物' : '添加人物' }}</h2><button title="关闭" @click="personDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>姓名<input v-model="personForm.name" placeholder="人物姓名" /></label><div class="image-picker-row"><div class="image-picker-preview round" :style="personForm.photoPath ? { backgroundImage: `url(${personForm.photoPath.startsWith('data:') ? personForm.photoPath : imageUrls[personForm.photoPath] || ''})` } : {}"><UiIcon v-if="!personForm.photoPath" name="person" :size="22" /></div><button class="secondary-button" @click="choosePersonPhoto">选择人物照片</button></div><label>别名<input v-model="personForm.aliases" placeholder="多个别名用逗号分隔" /></label><label>备注<textarea v-model="personForm.notes" rows="4" placeholder="人物档案备注"></textarea></label></div><div class="modal-actions"><button v-if="editingPersonId" class="secondary-button" :disabled="busy" @click="openNameCorrections(editingPersonId)">姓名识别纠错</button><button v-if="editingPersonId && people.length > 1" class="secondary-button" :disabled="busy" @click="openPersonMerge(editingPersonId)">合并人物</button><button class="secondary-button" @click="personDialog = false">取消</button><button class="primary-button" @click="savePerson">保存人物</button></div></div></div>
       <div v-if="relationshipDialog" class="modal-backdrop" @click.self="relationshipDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ relationFromGraph ? '请输入他们的关系' : '添加人物关系' }}</h2><button title="关闭" @click="relationshipDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><p v-if="relationFromGraph">{{ people.find(person => person.id === relationForm.fromId)?.name }} 与 {{ people.find(person => person.id === relationForm.toId)?.name }}</p><template v-else><label>人物 A<select v-model="relationForm.fromId"><option value="">选择人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><label>人物 B<select v-model="relationForm.toId"><option value="">选择人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label></template><label>关系描述<input ref="relationLabelInput" v-model="relationForm.label" :placeholder="relationFromGraph ? '如：同事、兄妹、朋友' : '如：同事'" @keydown.enter.prevent="saveRelationship" /></label><p class="form-help">这条关系完全由你确认，系统不会推断。</p></div><div class="modal-actions"><button class="secondary-button" @click="relationshipDialog = false">取消</button><button class="primary-button" @click="saveRelationship">{{ relationFromGraph ? '确认连线' : '添加关系' }}</button></div></div></div>
       <div v-if="eventDialog" class="modal-backdrop" @click.self="eventDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ pendingTimelineSuggestionId ? '确认时间线建议' : editingEventId ? '编辑时间节点' : '添加时间节点' }}</h2><button title="关闭" @click="eventDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>事件<input v-model="eventForm.title" placeholder="已确认的事件" /></label><div class="event-time-field"><label v-if="eventForm.yearless">时间（无年份）<input v-model="eventForm.startsAt" type="text" placeholder="--06-17T03:04" /></label><label v-else>时间<input v-model="eventForm.startsAt" type="datetime-local" /></label><button type="button" class="secondary-button time-mode-button" @click="toggleEventYearless">{{ eventForm.yearless ? '切换为有年份' : '录入无年份时间' }}</button></div><label>原始线索<select v-model="eventForm.clueId"><option value="">暂不关联</option><option v-for="clue in clues" :key="clue.id" :value="clue.id">#{{ clue.number }} {{ clue.title }}</option></select></label><label>涉及人物<select v-model="eventForm.personIds" multiple size="4"><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><p class="form-help">只添加线索中明确出现且由你确认的事件。无年份时间按 --月-日T时:分 填写，保存后可单独忽略“无年份”标记。</p></div><section v-if="mergeTargets.length" class="event-merge-section"><strong>合并重复事件</strong><p>仅列出同一时间的记录。选择后保留目标标题，并合并人物和全部出处。</p><select v-model="mergeTargetId" aria-label="选择要合并到的事件"><option value="">选择目标事件</option><option v-for="candidate in mergeTargets" :key="candidate.id" :value="candidate.id">{{ candidate.title }}</option></select><button class="secondary-button" :disabled="busy || !mergeTargetId" @click="mergeEvent">确认合并到此事件</button></section><div class="modal-actions"><button class="secondary-button" @click="eventDialog = false; pendingTimelineSuggestionId = ''">取消</button><button class="primary-button" @click="saveEvent">保存节点</button></div></div></div>
       <div v-if="noteDialog" class="modal-backdrop" @click.self="noteDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ noteId ? '编辑笔记' : '新建笔记' }}</h2><button title="关闭" @click="noteDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack" :inert="busy || undefined"><div class="editor-draft-status" role="status"><span>{{ noteDraftStatus }}</span><button class="text-button" :disabled="busy" @click="discardNoteDraft">丢弃草稿</button><p v-if="noteDraftConflict">正式笔记或关联资料已发生变化，请核对恢复的草稿再保存。</p></div><label>笔记内容<textarea v-model="noteForm.text" rows="8" placeholder="写下观察、疑问或讨论内容"></textarea></label><label>关联线索<select v-model="noteForm.clueId" @change="noteForm.personId = ''"><option value="">不关联线索</option><option v-for="clue in clues" :key="clue.id" :value="clue.id">#{{ clue.number }} {{ clue.title }}</option></select></label><label>关联人物<select v-model="noteForm.personId" @change="noteForm.clueId = ''"><option value="">不关联人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label></div><div class="modal-actions"><button class="secondary-button" @click="noteDialog = false">取消</button><button class="primary-button" @click="saveNote">保存笔记</button></div></div></div>

@@ -11,7 +11,7 @@ export type { OcrRegion } from './ocrLocation'
 export type ScriptRecord = { id: string; name: string; playDate: string; coverPath: string; createdAt: string }
 export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; ocrRegions?: OcrRegion[]; ocrImagePath?: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
 export type CluePhotoImportResult = { clues: ClueRecord[]; skippedDuplicates: number }
-export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string; photoPaths?: string[] }
+export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string; photoPaths?: string[]; ocrNames?: string[] }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
 export type OrganizationEvidence = { clueId: string; sourceNo: number; quote: string }
 export type TimelineRecord = { id: string; scriptId: string; title: string; startsAt: string; personIds: string[]; clueId: string; confirmed: boolean; yearlessMarkerIgnored?: boolean; evidence?: OrganizationEvidence[]; precision?: 'date' | 'hour' | 'minute'; approximate?: boolean }
@@ -682,7 +682,7 @@ async function archiveDigest(value: string): Promise<string> {
 }
 async function archiveFingerprint(source: ArchiveSource, zip?: JSZip): Promise<string> {
   const { script, records } = source
-  const paths = [...new Set([script.coverPath, ...(records.clues as ClueRecord[]).flatMap(item => [item.imagePath, item.displayImagePath]), ...(records.people as PersonRecord[]).flatMap(item => [item.photoPath, ...(item.photoPaths || [])])].filter(Boolean))].sort()
+  const paths = [...new Set([script.coverPath, ...(records.clues as ClueRecord[]).flatMap(item => [item.imagePath, item.displayImagePath, item.ocrImagePath || '']), ...(records.people as PersonRecord[]).flatMap(item => [item.photoPath, ...(item.photoPaths || [])]), ...(records.board_items as BoardItemRecord[]).filter(item => item.kind === 'photo').map(item => item.refId)].filter(Boolean))].sort()
   const attachments: { path: string; length: number; digest: string }[] = []
   for (const path of paths) {
     // Hash the exact attachment data being archived; replacing a file at the same path is still a change.
@@ -733,41 +733,270 @@ export async function exportScript(id: string): Promise<void> {
     } finally { setTimeout(() => URL.revokeObjectURL(url), 1000) }
   }
 }
-export async function importScript(): Promise<ScriptRecord | null> {
+export type ArchiveImportPreview = {
+  token: string; fileName: string; scriptName: string; playDate: string
+  counts: { clues: number; people: number; relationships: number; events: number; notes: number; boardItems: number; annotations: number; suggestions: number; images: number }
+  issues: string[]; warnings: string[]; canImport: boolean
+}
+type ArchiveManifest = { format: 'clue-vault'; version: 1; script: ScriptRecord; records: Record<string, any[]> }
+type PreparedArchive = { manifestText: string; images: Map<string, Uint8Array> }
+const preparedArchives = new Map<string, PreparedArchive>()
+const archiveLimits = { bytes: 512 * 1024 * 1024, expanded: 1024 * 1024 * 1024, entry: 64 * 1024 * 1024, manifest: 32 * 1024 * 1024, files: 5000, records: 50000 }
+const archiveObject = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value)
+const safeArchivePath = (path: string) => !!path && !path.includes('\\') && !path.includes('\0') && !path.startsWith('/') && !/^[a-z]:/i.test(path) && !path.split('/').some(part => part === '..' || part === '.')
+
+// Inspect the public ZIP directory before decompression, without relying on JSZip private fields.
+function archiveDirectory(bytes: Uint8Array): Map<string, number> {
+  if (bytes.length > archiveLimits.bytes) throw new Error('档案超过导入容量上限：ZIP 文件最大 512 MiB')
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let end = -1
+  for (let offset = bytes.length - 22; offset >= Math.max(0, bytes.length - 65557); offset--) {
+    if (view.getUint32(offset, true) === 0x06054b50 && offset + 22 + view.getUint16(offset + 20, true) === bytes.length) { end = offset; break }
+  }
+  if (end < 0) throw new Error('档案不是完整的 ZIP 文件')
+  const count = view.getUint16(end + 10, true), directoryBytes = view.getUint32(end + 12, true)
+  let offset = view.getUint32(end + 16, true), expanded = 0
+  if (view.getUint16(end + 4, true) || view.getUint16(end + 6, true) || count !== view.getUint16(end + 8, true) || count === 65535 || offset === 0xffffffff || directoryBytes === 0xffffffff) throw new Error('暂不支持分卷或 ZIP64 档案')
+  if (count > archiveLimits.files) throw new Error('档案超过导入数量上限：最多 5000 个文件')
+  if (offset + directoryBytes !== end) throw new Error('档案目录不完整')
+  const entries = new Map<string, number>()
+  for (let index = 0; index < count; index++) {
+    if (offset + 46 > end || view.getUint32(offset, true) !== 0x02014b50) throw new Error('档案目录损坏')
+    const size = view.getUint32(offset + 24, true), nameLength = view.getUint16(offset + 28, true), extraLength = view.getUint16(offset + 30, true), commentLength = view.getUint16(offset + 32, true)
+    const next = offset + 46 + nameLength + extraLength + commentLength
+    if (next > end || view.getUint16(offset + 8, true) & 1) throw new Error('档案目录损坏或使用了不支持的加密格式')
+    const path = new TextDecoder().decode(bytes.subarray(offset + 46, offset + 46 + nameLength))
+    if (!safeArchivePath(path) || entries.has(path)) throw new Error('档案包含不安全或重复的文件路径')
+    if (size > archiveLimits.entry || (expanded += size) > archiveLimits.expanded) throw new Error('档案超过导入容量上限：解压后总计最大 1 GiB，单张图片最大 64 MiB')
+    entries.set(path, size); offset = next
+  }
+  if (offset !== end) throw new Error('档案目录不完整')
+  return entries
+}
+
+function validateArchiveManifest(value: unknown, imagePaths: Set<string>): { manifest: ArchiveManifest | null; issues: string[] } {
+  const issues: string[] = []
+  const issue = (message: string) => { if (issues.length < 30 && !issues.includes(message)) issues.push(message) }
+  if (!archiveObject(value) || value.format !== 'clue-vault' || value.version !== 1) return { manifest: null, issues: ['不支持的档案格式或版本'] }
+  const script = value.script
+  const records = archiveObject(value.records) ? { ...value.records } : null
+  if (!archiveObject(script) || !['id', 'name', 'playDate', 'coverPath', 'createdAt'].every(key => typeof script[key] === 'string') || !script.id || !script.name.trim()) return { manifest: null, issues: ['剧本资料不完整'] }
+  if (!records || !Array.isArray(records.clues)) return { manifest: null, issues: ['档案缺少必需的线索列表'] }
+  for (const table of archiveTables) {
+    if (records[table] === undefined) records[table] = []
+    else if (!Array.isArray(records[table])) return { manifest: null, issues: ['档案资料列表格式不正确'] }
+  }
+  if (archiveTables.reduce((count, table) => count + records[table].length, 0) > archiveLimits.records) return { manifest: null, issues: ['档案超过导入数量上限：最多 50000 条资料'] }
+  const identities = new Set<string>([script.id]), ids = new Map<string, Set<string>>()
+  for (const table of archiveTables) {
+    const tableIds = new Set<string>(); ids.set(table, tableIds)
+    for (const record of records[table]) {
+      if (!archiveObject(record) || typeof record.id !== 'string' || !record.id || record.scriptId !== script.id) { issue(`${table} 包含无效或跨剧本的资料`); continue }
+      if (identities.has(record.id)) issue('档案存在重复资料编号')
+      identities.add(record.id); tableIds.add(record.id)
+    }
+  }
+  if (issues.length) return { manifest: null, issues }
+  const strings = (record: Record<string, any>, keys: string[], label: string) => { if (!keys.every(key => typeof record[key] === 'string')) issue(`${label}字段格式不正确`) }
+  const stringArray = (record: Record<string, any>, key: string, optional: boolean, label: string) => { if (!(optional && record[key] === undefined) && (!Array.isArray(record[key]) || !record[key].every((item: unknown) => typeof item === 'string'))) issue(`${label}字段格式不正确`) }
+  const image = (path: unknown, required: boolean, label: string) => {
+    if (typeof path !== 'string' || (required && !path)) { issue(`${label}缺少图片路径`); return }
+    if (path && (!safeArchivePath(path) || !imagePaths.has(path))) issue(`${label}缺少图片：${path.slice(0, 100)}`)
+  }
+  const ref = (value: unknown, table: string, optional: boolean, label: string) => { if (!(optional && value === '') && (typeof value !== 'string' || !ids.get(table)?.has(value))) issue(`${label}引用的资料不存在`) }
+  const clues = new Map<string, any>(records.clues.map((item: any) => [item.id, item]))
+  const numbers = new Map<number, any>()
+  const evidence = (sources: unknown, label: string) => {
+    if (!Array.isArray(sources)) { issue(`${label}出处格式不正确`); return }
+    for (const source of sources) if (!archiveObject(source) || typeof source.quote !== 'string' || !clues.has(source.clueId) || clues.get(source.clueId).number !== source.sourceNo) issue(`${label}出处指向缺失或不一致的线索`)
+  }
+  image(script.coverPath, false, '剧本封面')
+  for (const record of records.clues) {
+    strings(record, ['title', 'imagePath', 'displayImagePath', 'ocrText', 'category', 'notes', 'createdAt'], '线索')
+    stringArray(record, 'tags', false, '标签')
+    if (!Number.isInteger(record.number) || record.number < 1 || numbers.has(record.number)) issue('线索编号无效或重复')
+    numbers.set(record.number, record)
+    if (!Number.isInteger(record.round) || record.round < 1 || !Number.isFinite(record.rotation) || typeof record.favorite !== 'boolean') issue('线索轮次、旋转或收藏格式不正确')
+    if (record.ocrStatus !== undefined && !['pending', 'complete', 'failed'].includes(record.ocrStatus)) issue('OCR 状态格式不正确')
+    image(record.imagePath, true, '线索原图'); image(record.displayImagePath, false, '线索展示图')
+    if (record.ocrImagePath !== undefined) image(record.ocrImagePath, false, 'OCR 定位原图')
+    if (record.ocrRegions !== undefined && (!Array.isArray(record.ocrRegions) || !record.ocrRegions.every((region: any) => archiveObject(region) && typeof region.text === 'string' && [region.x, region.y, region.width, region.height].every(Number.isFinite) && region.x >= 0 && region.y >= 0 && region.width > 0 && region.height > 0 && region.x + region.width <= 1.000001 && region.y + region.height <= 1.000001))) issue('OCR 图片定位数据不正确')
+  }
+  for (const record of records.people) {
+    strings(record, ['name', 'photoPath', 'notes'], '人物'); stringArray(record, 'aliases', false, '人物别名'); stringArray(record, 'photoPaths', true, '人物照片'); stringArray(record, 'ocrNames', true, 'OCR 错名映射')
+    image(record.photoPath, false, '人物照片')
+    if (Array.isArray(record.photoPaths)) record.photoPaths.forEach((path: unknown) => image(path, false, '人物照片'))
+  }
+  for (const record of records.relationships) { strings(record, ['label'], '人物关系'); ref(record.fromId, 'people', false, '人物关系'); ref(record.toId, 'people', false, '人物关系') }
+  for (const record of records.timeline) {
+    strings(record, ['title', 'startsAt'], '时间事件'); stringArray(record, 'personIds', false, '事件人物')
+    if (typeof record.confirmed !== 'boolean') issue('事件确认状态格式不正确')
+    if (Array.isArray(record.personIds)) record.personIds.forEach((id: unknown) => ref(id, 'people', false, '时间事件'))
+    ref(record.clueId, 'clues', true, '时间事件')
+    if (record.evidence !== undefined) evidence(record.evidence, '时间事件')
+  }
+  for (const record of records.board_items) {
+    strings(record, ['refId', 'text', 'color', 'group'], '整理板卡片')
+    if (!['clue', 'person', 'note', 'photo'].includes(record.kind) || !Number.isFinite(record.x) || !Number.isFinite(record.y)) issue('整理板卡片格式不正确')
+    if (record.kind === 'clue') ref(record.refId, 'clues', false, '线索卡片')
+    if (record.kind === 'person') ref(record.refId, 'people', false, '人物卡片')
+    if (record.kind === 'note') ref(record.refId, 'notes', true, '笔记卡片')
+    if (record.kind === 'photo') image(record.refId, true, '照片卡片')
+  }
+  for (const record of records.board_links) { strings(record, ['label'], '卡片连线'); ref(record.fromId, 'board_items', false, '卡片连线'); ref(record.toId, 'board_items', false, '卡片连线') }
+  for (const record of records.notes) { strings(record, ['text', 'createdAt'], '笔记'); ref(record.clueId, 'clues', true, '笔记'); ref(record.personId, 'people', true, '笔记') }
+  for (const record of records.annotations) { ref(record.clueId, 'clues', false, '标注'); if (!Array.isArray(record.strokes)) issue('手写标注格式不正确') }
+  if (records.organization.length > 1) issue('一个剧本只能包含一份整理建议')
+  for (const organization of records.organization) {
+    strings(organization, ['updatedAt'], '整理建议')
+    const suggestionIds = new Set<string>()
+    for (const kind of ['people', 'relationships', 'timeline', 'cluePoints']) {
+      if (!Array.isArray(organization[kind])) { issue('整理建议列表格式不正确'); continue }
+      for (const item of organization[kind]) {
+        if (!archiveObject(item)) { issue('整理建议格式不正确'); continue }
+        strings(item, ['id', 'quote'], '整理建议')
+        if (!item.id || suggestionIds.has(item.id)) issue('整理建议编号无效或重复')
+        suggestionIds.add(item.id)
+        if (!numbers.has(item.sourceNo)) issue('整理建议引用的原始线索不存在')
+        if (kind === 'people') { strings(item, ['name'], '人物建议'); stringArray(item, 'aliases', false, '人物建议') }
+        if (kind === 'relationships') strings(item, ['from', 'to', 'label'], '关系建议')
+        if (kind === 'timeline') { strings(item, ['title', 'startsAt'], '时间建议'); stringArray(item, 'people', false, '时间建议'); if (item.evidence !== undefined) evidence(item.evidence, '时间建议') }
+        if (kind === 'cluePoints') { strings(item, ['title', 'category'], '线索点建议'); stringArray(item, 'tags', false, '线索点建议') }
+      }
+    }
+    if (organization.processedClues !== undefined && (!archiveObject(organization.processedClues) || !Object.entries(organization.processedClues).every(([id, fingerprint]) => clues.has(id) && typeof fingerprint === 'string'))) issue('整理进度引用的线索不存在或格式不正确')
+    stringArray(organization, 'resolvedKeys', true, '已处理建议')
+    if (organization.timelineAudit !== undefined && (!Array.isArray(organization.timelineAudit) || !organization.timelineAudit.every((item: any) => archiveObject(item) && numbers.has(item.sourceNo) && Number.isInteger(item.clocks) && Number.isInteger(item.covered) && ['complete', 'review'].includes(item.status) && typeof item.message === 'string'))) issue('时间核对记录格式不正确')
+  }
+  return { manifest: { ...value, records } as ArchiveManifest, issues }
+}
+
+export function discardScriptImportPreview(token: string): void { preparedArchives.delete(token) }
+
+export async function previewScriptImport(): Promise<ArchiveImportPreview | null> {
   const picked = await CapgoFilePicker.pickFiles({ types: ['application/zip'], limit: 1, readData: true })
   const file = picked.files[0]
   if (!file) return null
-  const data = file.data || (file.path ? await sourceBase64(file.path) : '')
-  if (!data) throw new Error('无法读取档案')
-  const zip = await JSZip.loadAsync(cleanBase64(data), { base64: true })
-  const manifestFile = zip.file('manifest.json')
-  if (!manifestFile) throw new Error('档案缺少清单')
-  const manifest = JSON.parse(await manifestFile.async('string')) as { format: string; version: number; script: ScriptRecord; records: Record<string, any[]> }
-  if (manifest.format !== 'clue-vault' || manifest.version !== 1) throw new Error('不支持的档案格式')
-  const oldScriptId = manifest.script.id
-  const newScriptId = uid()
-  const idMap = new Map<string, string>([[oldScriptId, newScriptId]])
-  for (const table of archiveTables) for (const record of manifest.records[table] || []) idMap.set(record.id, uid())
+  preparedArchives.clear()
+  const preview: ArchiveImportPreview = { token: uid(), fileName: file.name || '剧本档案.zip', scriptName: '', playDate: '', counts: { clues: 0, people: 0, relationships: 0, events: 0, notes: 0, boardItems: 0, annotations: 0, suggestions: 0, images: 0 }, issues: [], warnings: [], canImport: false }
+  try {
+    if (file.size > archiveLimits.bytes) throw new Error('档案超过导入容量上限：ZIP 文件最大 512 MiB')
+    const data = cleanBase64(file.data || (file.path ? await sourceBase64(file.path) : ''))
+    if (!data) throw new Error('无法读取档案')
+    if (data.length > Math.ceil(archiveLimits.bytes / 3) * 4) throw new Error('档案超过导入容量上限：ZIP 文件最大 512 MiB')
+    const bytes = base64ToBytes(data), directory = archiveDirectory(bytes)
+    const manifestSize = directory.get('manifest.json')
+    if (manifestSize === undefined) throw new Error('档案缺少清单')
+    if (manifestSize > archiveLimits.manifest) throw new Error('档案清单超过导入容量上限：清单最大 32 MiB')
+    const zip = await JSZip.loadAsync(bytes)
+    const manifestBytes = await zip.file('manifest.json')!.async('uint8array')
+    if (manifestBytes.length !== manifestSize) throw new Error('档案清单大小与目录不一致')
+    const rawManifestText = new TextDecoder().decode(manifestBytes), parsed: unknown = JSON.parse(rawManifestText)
+    const validated = validateArchiveManifest(parsed, new Set(directory.keys()))
+    preview.issues.push(...validated.issues)
+    if (archiveObject(parsed) && archiveObject(parsed.script)) { preview.scriptName = typeof parsed.script.name === 'string' ? parsed.script.name : ''; preview.playDate = typeof parsed.script.playDate === 'string' ? parsed.script.playDate : '' }
+    const manifest = validated.manifest
+    if (!manifest || preview.issues.length) return preview
+    const { records, script } = manifest
+    const paths = [...new Set([script.coverPath, ...records.clues.flatMap(item => [item.imagePath, item.displayImagePath, item.ocrImagePath || '']), ...records.people.flatMap(item => [item.photoPath, ...(item.photoPaths || [])]), ...records.board_items.filter(item => item.kind === 'photo').map(item => item.refId)].filter(Boolean))] as string[]
+    const images = new Map<string, Uint8Array>()
+    let actualSize = manifestBytes.length
+    for (const path of paths) {
+      const image = await zip.file(path)?.async('uint8array')
+      if (!image?.length || image.length !== directory.get(path)) throw new Error(`图片内容不完整：${path.slice(0, 100)}`)
+      if ((actualSize += image.length) > archiveLimits.expanded) throw new Error('档案超过导入容量上限：解压后总计最大 1 GiB')
+      images.set(path, image)
+    }
+    preview.counts = { clues: records.clues.length, people: records.people.length, relationships: records.relationships.length, events: records.timeline.length, notes: records.notes.length, boardItems: records.board_items.length, annotations: records.annotations.length, suggestions: records.organization.reduce((total, item) => total + item.people.length + item.relationships.length + item.timeline.length + item.cluePoints.length, 0), images: images.size }
+    preview.warnings.push('此版本档案没有文件哈希清单；已检查资料格式、关联及图片是否存在且可解压，无法核验图片是否曾被替换。')
+    if (archiveObject(parsed) && archiveObject(parsed.records) && archiveTables.some(table => parsed.records[table] === undefined)) preview.warnings.push('旧档案未包含的资料列表将恢复为空；所有已有资料的关联仍须通过预检。')
+    if ((await listScripts()).some(existing => existing.name.trim() === script.name.trim())) preview.warnings.push('本机已有同名剧本。导入后会创建独立副本，不覆盖或混合已有资料。')
+    preview.canImport = true
+    preparedArchives.set(preview.token, { manifestText: JSON.stringify(manifest), images })
+    return preview
+  } catch (error) {
+    preview.issues.push(error instanceof Error && !(error instanceof SyntaxError) ? error.message : '档案清单无法读取，请选择完整的导出档案')
+    return preview
+  }
+}
+
+export async function importPreparedScript(token: string): Promise<ScriptRecord> {
+  const prepared = preparedArchives.get(token)
+  if (!prepared) throw new Error('导入预览已失效，请重新选择档案')
+  const validation = validateArchiveManifest(JSON.parse(prepared.manifestText), new Set(prepared.images.keys()))
+  if (!validation.manifest || validation.issues.length) throw new Error(validation.issues[0] || '档案预检未通过')
+  const manifest = validation.manifest, newScriptId = uid(), idMap = new Map<string, string>([[manifest.script.id, newScriptId]])
+  for (const table of archiveTables) for (const record of manifest.records[table]) idMap.set(record.id, table === 'organization' ? `organization-${newScriptId}` : uid())
+  const savedImages = new Map<string, string>(), createdPaths: string[] = []
+  const remap = (id: string) => { if (!id) return ''; const mapped = idMap.get(id); if (!mapped) throw new Error('档案存在无法恢复的关联'); return mapped }
+  const remapEvidence = (sources: OrganizationEvidence[]) => sources.map(source => ({ ...source, clueId: remap(source.clueId) }))
   async function importedImage(path: string): Promise<string> {
     if (!path) return ''
-    const entry = zip.file(path)
-    if (!entry) throw new Error(`档案缺少图片：${path}`)
-    const imageData = await entry.async('base64')
-    return saveImage(newScriptId, imageData, mimeForPath(path))
+    if (savedImages.has(path)) return savedImages.get(path)!
+    const bytes = prepared!.images.get(path)
+    if (!bytes?.length) throw new Error('档案缺少图片')
+    // Track the target path before writing, so a partial native write can also be removed.
+    const target = `scripts/${newScriptId}/images/${uid()}.${extensionForMime(mimeForPath(path))}`
+    createdPaths.push(target)
+    const data = bytesToBase64(bytes)
+    if (native) await Filesystem.writeFile({ path: target, data, directory: Directory.Data, recursive: true })
+    else await webImagePut(target, data)
+    savedImages.set(path, target); return target
   }
-  const script: ScriptRecord = { ...manifest.script, id: newScriptId, coverPath: await importedImage(manifest.script.coverPath), createdAt: now() }
-  await putRecord('scripts', script)
-  for (const table of archiveTables) {
-    for (const raw of manifest.records[table] || []) {
-      const record = { ...raw, id: idMap.get(raw.id), scriptId: newScriptId }
-      for (const key of ['clueId', 'personId', 'fromId', 'toId', 'refId']) if (record[key]) record[key] = idMap.get(record[key]) || ''
-      if (Array.isArray(record.personIds)) record.personIds = record.personIds.map((id: string) => idMap.get(id) || '').filter(Boolean)
-      if (table === 'clues') { record.imagePath = await importedImage(raw.imagePath); record.displayImagePath = await importedImage(raw.displayImagePath); record.ocrImagePath = raw.ocrImagePath === raw.imagePath ? record.imagePath : ''; if (!record.ocrImagePath) record.ocrRegions = [] }
-      if (table === 'people') { record.photoPath = await importedImage(raw.photoPath); if (Array.isArray(raw.photoPaths)) record.photoPaths = await Promise.all(raw.photoPaths.map(importedImage)) }
-      await putRecord(table, record)
+  let script: ScriptRecord | null = null
+  try {
+    script = { ...manifest.script, id: newScriptId, coverPath: await importedImage(manifest.script.coverPath), createdAt: now() }
+    const changes: VaultRecordChange[] = []
+    for (const table of archiveTables) for (const raw of manifest.records[table]) {
+      const record = { ...raw, id: remap(raw.id), scriptId: newScriptId }
+      if (table === 'clues') {
+        record.imagePath = await importedImage(raw.imagePath); record.displayImagePath = await importedImage(raw.displayImagePath)
+        if (raw.ocrImagePath !== undefined) record.ocrImagePath = await importedImage(raw.ocrImagePath)
+      }
+      if (table === 'people') { record.photoPath = await importedImage(raw.photoPath); if (raw.photoPaths) record.photoPaths = await Promise.all(raw.photoPaths.map(importedImage)) }
+      if (table === 'relationships' || table === 'board_links') { record.fromId = remap(raw.fromId); record.toId = remap(raw.toId) }
+      if (table === 'timeline') { record.personIds = raw.personIds.map(remap); record.clueId = remap(raw.clueId); if (raw.evidence) record.evidence = remapEvidence(raw.evidence) }
+      if (table === 'notes') { record.clueId = remap(raw.clueId); record.personId = remap(raw.personId) }
+      if (table === 'annotations') record.clueId = remap(raw.clueId)
+      if (table === 'board_items') record.refId = raw.kind === 'photo' ? await importedImage(raw.refId) : remap(raw.refId)
+      if (table === 'organization') {
+        for (const kind of ['people', 'relationships', 'timeline', 'cluePoints']) record[kind] = raw[kind].map((item: any) => ({ ...item, id: uid(), ...(item.evidence ? { evidence: remapEvidence(item.evidence) } : {}) }))
+        if (raw.processedClues) record.processedClues = Object.fromEntries(Object.entries(raw.processedClues).map(([id, value]) => [remap(id), value]))
+      }
+      changes.push({ kind: table as VaultRecordKind, id: record.id, before: null, after: record })
     }
+    await applyRecordChanges(newScriptId, changes)
+    // Publish the script after every attachment and linked record has been persisted.
+    await putRecord('scripts', script)
+    preparedArchives.delete(token)
+    return script
+  } catch (error) {
+    const cleanupErrors: unknown[] = []
+    for (const table of [...archiveTables, 'scripts'] as Table[]) {
+      try {
+        if (native) await database.run(`DELETE FROM ${table} WHERE script_id = ?`, [newScriptId])
+        else localStorage.setItem(webKey(table), JSON.stringify(webRecords<Stored>(table).filter(record => table === 'scripts' ? record.id !== newScriptId : record.scriptId !== newScriptId)))
+      } catch (failure) { cleanupErrors.push(failure) }
+    }
+    if (native && ftsReady) { try { await database.run('DELETE FROM clue_fts WHERE script_id = ?', [newScriptId]) } catch (failure) { cleanupErrors.push(failure) } }
+    for (const path of createdPaths) {
+      try {
+        if (native) await Filesystem.deleteFile({ path, directory: Directory.Data })
+        else await webImageDelete(path)
+      } catch { /* A failed write may not have created the target file. */ }
+    }
+    if (native) { try { await Filesystem.rmdir({ path: `scripts/${newScriptId}`, directory: Directory.Data, recursive: true }) } catch { /* No directory was created. */ } }
+    if (cleanupErrors.length) throw new Error('导入未完成，清理本次副本时发生错误；已有剧本未被修改，请先关闭应用后重试')
+    throw error
   }
-  return script
+}
+
+// Kept for callers outside the review UI; the app uses preview + explicit confirmation.
+export async function importScript(): Promise<ScriptRecord | null> {
+  const preview = await previewScriptImport()
+  if (!preview) return null
+  if (!preview.canImport) { discardScriptImportPreview(preview.token); throw new Error(preview.issues.join('；')) }
+  return importPreparedScript(preview.token)
 }
 
 export async function pickLocalImage(): Promise<string> {

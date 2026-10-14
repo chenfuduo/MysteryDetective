@@ -28,16 +28,16 @@ function eventTime(event: TimelineRecord): string {
 const entries = computed<SearchEntry[]>(() => {
   if (!props.scriptId) return []
   return [
-    ...currentClues.value.map(clue => ({ id: clue.id, kind: 'clues' as const, title: clue.title || `线索 #${String(clue.number).padStart(3, '0')}`, detail: `线索 #${String(clue.number).padStart(3, '0')} · 第 ${clue.round} 轮${clue.category ? ` · ${clue.category}` : ''}`, fields: [clue.title, clue.ocrText, clue.notes, ...clue.tags, `#${String(clue.number).padStart(3, '0')}`, String(clue.number)], quoteText: clue.ocrText })),
-    ...currentPeople.value.map(person => ({ id: person.id, kind: 'people' as const, title: person.name, detail: person.aliases.length ? `别名：${person.aliases.join('、')}` : '人物档案', fields: [person.name, ...person.aliases, person.notes] })),
+    ...currentClues.value.map(clue => ({ id: clue.id, kind: 'clues' as const, title: clue.title || `线索 #${String(clue.number).padStart(3, '0')}`, detail: `线索 #${String(clue.number).padStart(3, '0')} · 第 ${clue.round} 轮${clue.category ? ` · ${clue.category}` : ''}`, fields: [clue.title, clue.ocrText, clue.notes, ...clue.tags, ...currentPeople.value.filter(person => (person.ocrNames || []).some(name => clue.ocrText.includes(name))).flatMap(person => [person.name, ...person.aliases]), `#${String(clue.number).padStart(3, '0')}`, String(clue.number)], quoteText: clue.ocrText })),
+    ...currentPeople.value.map(person => ({ id: person.id, kind: 'people' as const, title: person.name, detail: person.aliases.length ? `别名：${person.aliases.join('、')}` : '人物档案', fields: [person.name, ...person.aliases, ...(person.ocrNames || []), person.notes] })),
     ...props.events.filter(event => event.scriptId === props.scriptId && event.confirmed).map(event => {
-      const names = event.personIds.map(id => peopleById.value.get(id)).filter((person): person is PersonRecord => Boolean(person)).flatMap(person => [person.name, ...person.aliases])
+      const names = event.personIds.map(id => peopleById.value.get(id)).filter((person): person is PersonRecord => Boolean(person)).flatMap(person => [person.name, ...person.aliases, ...(person.ocrNames || [])])
       const time = eventTime(event)
       return { id: event.id, kind: 'events' as const, title: event.title || '未命名事件', detail: time, fields: [event.title, time, event.startsAt, ...names] }
     }),
     ...props.notes.filter(note => note.scriptId === props.scriptId).map(note => {
       const person = peopleById.value.get(note.personId), clue = cluesById.value.get(note.clueId)
-      return { id: note.id, kind: 'notes' as const, title: note.text.split('\n').find(line => line.trim())?.slice(0, 52) || '未命名笔记', detail: [person?.name, clue ? `线索 #${String(clue.number).padStart(3, '0')}` : ''].filter(Boolean).join(' · ') || '文字笔记', fields: [note.text, person?.name || '', ...(person?.aliases || []), clue?.title || ''] }
+      return { id: note.id, kind: 'notes' as const, title: note.text.split('\n').find(line => line.trim())?.slice(0, 52) || '未命名笔记', detail: [person?.name, clue ? `线索 #${String(clue.number).padStart(3, '0')}` : ''].filter(Boolean).join(' · ') || '文字笔记', fields: [note.text, person?.name || '', ...(person?.aliases || []), ...(person?.ocrNames || []), clue?.title || ''] }
     }),
   ]
 })

@@ -4,11 +4,130 @@ import type { ClueRecord, OrganizationSnapshot, OrganizationTimelineSuggestion, 
 export type ReviewSelection = { kind: 'people' | 'relationships' | 'timeline' | 'cluePoints'; id: string }
 export type ReviewUndo = { scriptId: string; label: string; run: () => Promise<void> }
 type Change = vault.VaultRecordChange
-type PersistedUndo = { version: 1; id: string; scriptId: string; label: string; before: OrganizationSnapshot | null; after: OrganizationSnapshot | null; changes: Change[] }
-const undoKey = 'review:last-undo'
+type PersistedUndo = { version: 1; id: string; scriptId: string; label: string; createdAt: string; before: OrganizationSnapshot | null; after: OrganizationSnapshot | null; changes: Change[] }
+type PersistedHistory = { version: 2; scriptId: string; undo: PersistedUndo[]; redo: PersistedUndo[] }
+export type OperationHistoryEntry = { id: string; label: string; createdAt: string }
+export type OperationHistoryState = { undo: OperationHistoryEntry[]; redo: OperationHistoryEntry[] }
+const legacyUndoKey = 'review:last-undo'
+const historyKey = 'review:operation-history'
+const historyLimit = 20
+const historyQueues = new Map<string, Promise<unknown>>()
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const normalized = (value: string) => value.trim().replace(/\s+/g, '').toLocaleLowerCase()
+
+function inHistoryQueue<T>(scriptId: string, action: () => Promise<T>): Promise<T> {
+  const previous = historyQueues.get(scriptId) || Promise.resolve()
+  const current = previous.catch(() => undefined).then(action)
+  historyQueues.set(scriptId, current)
+  void current.finally(() => { if (historyQueues.get(scriptId) === current) historyQueues.delete(scriptId) }).catch(() => undefined)
+  return current
+}
+
+async function readHistory(scriptId: string): Promise<PersistedHistory> {
+  const history = await vault.getLocalState<PersistedHistory>(scriptId, historyKey)
+  if (history?.version === 2 && history.scriptId === scriptId) return history
+  const legacy = await vault.getLocalState<PersistedUndo>(scriptId, legacyUndoKey)
+  const migrated: PersistedHistory = { version: 2, scriptId, undo: legacy?.version === 1 && legacy.scriptId === scriptId ? [{ ...legacy, createdAt: legacy.createdAt || '' }] : [], redo: [] }
+  await vault.applyRecordChanges(scriptId, [], { save: [{ key: historyKey, value: migrated }], remove: [legacyUndoKey] })
+  return migrated
+}
+
+function appendHistory(history: PersistedHistory, entry: PersistedUndo): PersistedHistory {
+  return { ...history, undo: [...history.undo, entry].slice(-historyLimit), redo: [] }
+}
+function entryChanges(entry: PersistedUndo): Change[] {
+  const changes = copy(entry.changes)
+  if (!same(entry.before, entry.after) && !changes.some(change => change.kind === 'organization')) changes.push({ kind: 'organization', id: (entry.after || entry.before)!.id, before: entry.before, after: entry.after })
+  return changes
+}
+
+async function protectAssociations(scriptId: string, changes: Change[]): Promise<void> {
+  const [people, clues, relationships, events, notes, board] = await Promise.all([
+    vault.listPeople(scriptId), vault.listClues(scriptId), vault.listRelationships(scriptId), vault.listTimelineEvents(scriptId), vault.listNotes(scriptId), vault.listBoardItems(scriptId),
+  ])
+  const changed = new Map(changes.map(change => [`${change.kind}:${change.id}`, change]))
+  const finalValue = <T extends { id: string }>(kind: Change['kind'], item: T): T | null => {
+    const change = changed.get(`${kind}:${item.id}`)
+    return change ? change.after as T | null : item
+  }
+  const idsAfter = (kind: Change['kind'], values: { id: string }[]) => {
+    const ids = new Set(values.map(item => item.id))
+    for (const change of changes.filter(change => change.kind === kind)) { if (change.after) ids.add(change.id); else ids.delete(change.id) }
+    return ids
+  }
+  const personIds = idsAfter('people', people), clueIds = idsAfter('clues', clues), noteIds = idsAfter('notes', notes)
+  const removedPeople = new Set(changes.filter(change => change.kind === 'people' && !change.after).map(change => change.id))
+  const removedClues = new Set(changes.filter(change => change.kind === 'clues' && !change.after).map(change => change.id))
+  const removedNotes = new Set(changes.filter(change => change.kind === 'notes' && !change.after).map(change => change.id))
+  const liveRelationships = relationships.flatMap(item => { const value = finalValue('relationships', item); return value ? [value] : [] })
+  const liveEvents = events.flatMap(item => { const value = finalValue('timeline', item); return value ? [value] : [] })
+  const liveNotes = notes.flatMap(item => { const value = finalValue('notes', item); return value ? [value] : [] })
+  const liveBoard = board.flatMap(item => { const value = finalValue('board_items', item); return value ? [value] : [] })
+  if (liveRelationships.some(item => removedPeople.has(item.fromId) || removedPeople.has(item.toId)) || liveEvents.some(item => item.personIds.some(id => removedPeople.has(id))) || liveNotes.some(item => removedPeople.has(item.personId)) || liveBoard.some(item => item.kind === 'person' && removedPeople.has(item.refId))) throw new Error('人物已有新的关联，请先保留当前内容后再撤销或重做')
+  if (liveEvents.some(item => removedClues.has(item.clueId) || item.evidence?.some(source => removedClues.has(source.clueId))) || liveNotes.some(item => removedClues.has(item.clueId)) || liveBoard.some(item => item.kind === 'clue' && removedClues.has(item.refId))) throw new Error('线索已有新的关联，请先保留当前内容后再撤销或重做')
+  if (liveBoard.some(item => item.kind === 'note' && removedNotes.has(item.refId))) throw new Error('笔记已有新的关联，请先保留当前内容后再撤销或重做')
+  for (const change of changes) {
+    if (!change.after) continue
+    if (change.kind === 'relationships') {
+      const item = change.after as RelationshipRecord
+      if (!personIds.has(item.fromId) || !personIds.has(item.toId)) throw new Error('关系对应的人物已不存在，请先恢复人物')
+    } else if (change.kind === 'timeline') {
+      const item = change.after as TimelineRecord
+      if (item.personIds.some(id => !personIds.has(id)) || item.clueId && !clueIds.has(item.clueId) || item.evidence?.some(source => source.clueId && !clueIds.has(source.clueId))) throw new Error('事件对应的人物或原始线索已不存在，请先恢复关联资料')
+    } else if (change.kind === 'notes') {
+      const item = change.after as vault.NoteRecord
+      if (item.personId && !personIds.has(item.personId) || item.clueId && !clueIds.has(item.clueId)) throw new Error('笔记关联资料已不存在，请先恢复关联资料')
+    } else if (change.kind === 'board_items') {
+      const item = change.after as vault.BoardItemRecord
+      if (item.kind === 'person' && !personIds.has(item.refId) || item.kind === 'clue' && !clueIds.has(item.refId) || item.kind === 'note' && item.refId && !noteIds.has(item.refId)) throw new Error('整理板卡片的原始资料已不存在，请先恢复关联资料')
+    }
+  }
+}
+
+function actionFromState(entry: PersistedUndo, direction: 'undo' | 'redo'): ReviewUndo {
+  return { scriptId: entry.scriptId, label: entry.label, run: () => inHistoryQueue(entry.scriptId, async () => {
+    const history = await readHistory(entry.scriptId)
+    if (history[direction].at(-1)?.id !== entry.id) throw new Error('操作历史已有变化，请重新选择最近的一步')
+    const changes = direction === 'undo' ? entryChanges(entry).reverse().map(change => ({ ...change, before: change.after, after: change.before })) : entryChanges(entry)
+    await protectAssociations(entry.scriptId, changes)
+    const next = copy(history)
+    next[direction].pop()
+    next[direction === 'undo' ? 'redo' : 'undo'].push(entry)
+    await vault.applyRecordChanges(entry.scriptId, changes, { save: [{ key: historyKey, value: next }] })
+  }) }
+}
+
+async function makeUndo(scriptId: string, label: string, before: OrganizationSnapshot | null, after: OrganizationSnapshot | null, changes: Change[]): Promise<ReviewUndo> {
+  return inHistoryQueue(scriptId, async () => {
+    const entry: PersistedUndo = copy({ version: 1, id: crypto.randomUUID(), scriptId, label, createdAt: new Date().toISOString(), before, after, changes })
+    const history = appendHistory(await readHistory(scriptId), entry)
+    await vault.applyRecordChanges(scriptId, [], { save: [{ key: historyKey, value: history }] })
+    return actionFromState(entry, 'undo')
+  })
+}
+export async function loadLastUndo(scriptId: string): Promise<ReviewUndo | null> {
+  return inHistoryQueue(scriptId, async () => { const entry = (await readHistory(scriptId)).undo.at(-1); return entry ? actionFromState(entry, 'undo') : null })
+}
+export async function loadLastRedo(scriptId: string): Promise<ReviewUndo | null> {
+  return inHistoryQueue(scriptId, async () => { const entry = (await readHistory(scriptId)).redo.at(-1); return entry ? actionFromState(entry, 'redo') : null })
+}
+export async function getOperationHistory(scriptId: string): Promise<OperationHistoryState> {
+  return inHistoryQueue(scriptId, async () => {
+    const history = await readHistory(scriptId)
+    const describe = (entry: PersistedUndo): OperationHistoryEntry => ({ id: entry.id, label: entry.label, createdAt: entry.createdAt })
+    return { undo: [...history.undo].reverse().map(describe), redo: [...history.redo].reverse().map(describe) }
+  })
+}
+export async function applyUndoableChanges(scriptId: string, label: string, changes: Change[]): Promise<ReviewUndo> {
+  return inHistoryQueue(scriptId, async () => {
+    const organization = await vault.getOrganization(scriptId)
+    const entry: PersistedUndo = copy({ version: 1, id: crypto.randomUUID(), scriptId, label, createdAt: new Date().toISOString(), before: organization, after: organization, changes })
+    const history = appendHistory(await readHistory(scriptId), entry)
+    await vault.applyRecordChanges(scriptId, changes, { save: [{ key: historyKey, value: history }] })
+    return actionFromState(entry, 'undo')
+  })
+}
 
 export function timelineEvidence(item: OrganizationTimelineSuggestion, clues: ClueRecord[]) {
   const sources = item.evidence?.length ? item.evidence : [{ clueId: '', sourceNo: item.sourceNo, quote: item.quote }]
@@ -16,40 +135,6 @@ export function timelineEvidence(item: OrganizationTimelineSuggestion, clues: Cl
     const clue = clues.find(clue => clue.number === source.sourceNo && (!source.clueId || clue.id === source.clueId))
     return clue && source.quote && clue.ocrText.includes(source.quote) ? [{ clueId: clue.id, sourceNo: clue.number, quote: source.quote }] : []
   })
-}
-
-function undoFromState(state: PersistedUndo): ReviewUndo {
-  return { scriptId: state.scriptId, label: state.label, run: async () => {
-    const scriptId = state.scriptId
-    const currentUndo = await vault.getLocalState<PersistedUndo>(scriptId, undoKey)
-    if (currentUndo?.id !== state.id) throw new Error('已有更新的操作记录，这次撤销已过期')
-    const [relationships, events, organization, notes, board] = await Promise.all([
-      vault.listRelationships(scriptId), vault.listTimelineEvents(scriptId), vault.getOrganization(scriptId), vault.listNotes(scriptId), vault.listBoardItems(scriptId),
-    ])
-    if (!same(organization, state.after)) throw new Error('整理内容已有新变化，无法撤销这次操作')
-    const touched = new Set(state.changes.map(change => change.id))
-    for (const change of state.changes.filter(change => change.kind === 'people' && !change.before)) {
-      if (relationships.some(item => !touched.has(item.id) && (item.fromId === change.id || item.toId === change.id)) || events.some(item => !touched.has(item.id) && item.personIds.includes(change.id)) || notes.some(item => !touched.has(item.id) && item.personId === change.id) || board.some(item => !touched.has(item.id) && item.kind === 'person' && item.refId === change.id)) throw new Error('这个人物已有新的关联，请先保留当前内容')
-    }
-    const reversals = [...state.changes].reverse().map(change => ({ ...change, before: change.after, after: change.before }))
-    if (!same(state.before, state.after)) reversals.push({ kind: 'organization', id: (state.after || state.before)!.id, before: state.after, after: state.before })
-    await vault.applyRecordChanges(scriptId, reversals, { remove: [undoKey] })
-  } }
-}
-async function makeUndo(scriptId: string, label: string, before: OrganizationSnapshot | null, after: OrganizationSnapshot | null, changes: Change[]): Promise<ReviewUndo> {
-  const state: PersistedUndo = copy({ version: 1, id: crypto.randomUUID(), scriptId, label, before, after, changes })
-  await vault.saveLocalState(scriptId, undoKey, state)
-  return undoFromState(state)
-}
-export async function loadLastUndo(scriptId: string): Promise<ReviewUndo | null> {
-  const state = await vault.getLocalState<PersistedUndo>(scriptId, undoKey)
-  return state?.version === 1 && state.scriptId === scriptId ? undoFromState(state) : null
-}
-export async function applyUndoableChanges(scriptId: string, label: string, changes: Change[]): Promise<ReviewUndo> {
-  const organization = await vault.getOrganization(scriptId)
-  const state: PersistedUndo = copy({ version: 1, id: crypto.randomUUID(), scriptId, label, before: organization, after: organization, changes })
-  await vault.applyRecordChanges(scriptId, changes, { save: [{ key: undoKey, value: state }] })
-  return undoFromState(state)
 }
 
 export async function reviewSuggestions(scriptId: string, selection: ReviewSelection[], mode: 'accept' | 'ignore'): Promise<{ applied: number; skipped: number; undo: ReviewUndo | null; warning?: string }> {
@@ -65,7 +150,7 @@ export async function reviewSuggestions(scriptId: string, selection: ReviewSelec
     else changes.push({ kind, id: value.id, before: copy(old), after: copy(value) })
   }
   async function findPerson(name: string, aliases: string[] = []) {
-    const found = people.find(person => normalized(person.name) === normalized(name) || person.aliases.some(alias => normalized(alias) === normalized(name)))
+    const found = people.find(person => normalized(person.name) === normalized(name) || [...person.aliases, ...(person.ocrNames || [])].some(alias => normalized(alias) === normalized(name)))
     if (found) return found
     const created = await vault.createPerson(scriptId, { name, aliases })
     people.push(created); remember('people', null, created)
@@ -124,7 +209,7 @@ export async function reviewSuggestions(scriptId: string, selection: ReviewSelec
     }
   }
   const after = await vault.getOrganization(scriptId)
-  return { applied, skipped, warning, undo: applied || changes.length ? await makeUndo(scriptId, mode === 'ignore' ? '忽略整理建议' : '录入整理建议', before, after, changes) : null }
+  return { applied, skipped, warning, undo: applied || changes.length ? await makeUndo(scriptId, `${mode === 'ignore' ? '忽略' : '录入'}整理建议（${applied} 条）`, before, after, changes) : null }
 }
 
 export async function recordUndo(scriptId: string, label: string, kind: Change['kind'], before: { id: string } | null, after: { id: string } | null, organizationBefore?: OrganizationSnapshot | null): Promise<ReviewUndo> {

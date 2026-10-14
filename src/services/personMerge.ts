@@ -40,11 +40,17 @@ export async function mergePeople(scriptId: string, sourceId: string, targetId: 
     const value = name.trim(), key = vault.organizationTextKey(value)
     if (value && key !== vault.organizationTextKey(target.name) && !names.has(key)) names.set(key, value)
   }
+  const formalNames = new Set([target.name, ...names.values()].map(vault.organizationTextKey))
+  const ocrNames = new Map<string, string>()
+  for (const value of [...(target.ocrNames || []), ...(source.ocrNames || [])]) {
+    const name = value.trim(), key = vault.organizationTextKey(name)
+    if (name && !formalNames.has(key) && !ocrNames.has(key)) ocrNames.set(key, name)
+  }
   const primaryPhoto = target.photoPath || source.photoPath
   const photoPaths = [...new Set([...(target.photoPaths || []), source.photoPath, ...(source.photoPaths || [])].filter(path => path && path !== primaryPhoto))]
   const notesText = source.notes.trim() && source.notes.trim() !== target.notes.trim()
     ? [target.notes.trim(), `【原人物：${source.name}】\n${source.notes.trim()}`].filter(Boolean).join('\n\n') : target.notes
-  const merged: PersonRecord = { ...target, aliases: [...names.values()], notes: notesText, photoPath: primaryPhoto, photoPaths }
+  const merged: PersonRecord = { ...target, aliases: [...names.values()], ocrNames: [...ocrNames.values()], notes: notesText, photoPath: primaryPhoto, photoPaths }
   remember('people', target, merged)
   for (const event of events) if (event.personIds.includes(sourceId)) remember('timeline', event, { ...event, personIds: [...new Set(event.personIds.map(id => id === sourceId ? targetId : id))] })
   const seenRelations = new Set<string>()

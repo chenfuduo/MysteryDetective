@@ -22,6 +22,7 @@ const emit = defineEmits<{
   'open-person': [personId: string]
   'edit-person': [personId: string]
   'merge-person': [id: string]
+  'correct-name': [id: string]
   'compare-event': [eventId: string]
 }>()
 const tab = ref<'events' | 'clues' | 'relationships'>('events')
@@ -32,7 +33,7 @@ const peopleById = computed(() => new Map(people.value.map(person => [person.id,
 const person = computed(() => peopleById.value.get(props.personId))
 const clues = computed(() => props.clues.filter(clue => clue.scriptId === props.scriptId))
 const cluesById = computed(() => new Map(clues.value.map(clue => [clue.id, clue])))
-const names = computed(() => [...new Set([person.value?.name || '', ...(person.value?.aliases || [])].map(name => name.trim()).filter(Boolean))])
+const names = computed(() => [...new Set([person.value?.name || '', ...(person.value?.aliases || []), ...(person.value?.ocrNames || [])].map(name => name.trim()).filter(Boolean))])
 const hasName = (text: string) => names.value.some(name => text.includes(name))
 function sourcesFor(event: LinkedEvent): Evidence[] {
   const sources = (event.evidence || []).filter(source => cluesById.value.has(source.clueId)).map(source => ({ ...source, sourceNo: cluesById.value.get(source.clueId)?.number }))
@@ -94,7 +95,7 @@ onBeforeUnmount(() => { if (document.body.style.overflow === 'hidden') document.
       <section ref="panel" class="person-workspace" role="dialog" aria-modal="true" :aria-label="`${person?.name || '人物'}的线索与事件`" tabindex="-1" @keydown="keydown">
         <header class="workspace-header"><div><span>人物工作台</span><h2>线索与事件</h2></div><button type="button" class="workspace-icon" aria-label="关闭人物工作台" @click="emit('close')"><UiIcon name="close" /></button></header>
         <template v-if="person">
-          <div class="workspace-profile"><div class="workspace-avatar"><img v-if="photo" :src="photo" alt="" /><span v-else>{{ person.name.slice(0, 1) }}</span></div><div class="workspace-person"><h3>{{ person.name }}</h3><p>{{ person.aliases.length ? `别名：${person.aliases.join('、')}` : '未设置别名' }}</p></div><div class="workspace-profile-actions"><button v-if="people.length >= 2" type="button" class="workspace-edit" @click="emit('merge-person', person.id)">合并人物</button><button type="button" class="workspace-edit" @click="emit('edit-person', person.id)"><UiIcon name="edit" :size="16" />编辑</button></div></div>
+          <div class="workspace-profile"><div class="workspace-avatar"><img v-if="photo" :src="photo" alt="" /><span v-else>{{ person.name.slice(0, 1) }}</span></div><div class="workspace-person"><h3>{{ person.name }}</h3><p>{{ person.aliases.length ? `别名：${person.aliases.join('、')}` : '未设置别名' }}</p></div><div class="workspace-profile-actions"><button type="button" class="workspace-edit" @click="emit('correct-name', person.id)">姓名识别纠错</button><button v-if="people.length >= 2" type="button" class="workspace-edit" @click="emit('merge-person', person.id)">合并人物</button><button type="button" class="workspace-edit" @click="emit('edit-person', person.id)"><UiIcon name="edit" :size="16" />编辑</button></div></div>
           <p v-if="person.notes" class="workspace-notes">{{ person.notes }}</p>
           <nav class="workspace-tabs" aria-label="人物相关信息"><button type="button" :class="{ active: tab === 'events' }" :aria-current="tab === 'events' ? 'page' : undefined" @click="changeTab('events')">事件<span>{{ events.length }}</span></button><button type="button" :class="{ active: tab === 'clues' }" :aria-current="tab === 'clues' ? 'page' : undefined" @click="changeTab('clues')">线索<span>{{ relatedClues.length }}</span></button><button type="button" :class="{ active: tab === 'relationships' }" :aria-current="tab === 'relationships' ? 'page' : undefined" @click="changeTab('relationships')">关系<span>{{ relationships.length }}</span></button></nav>
           <div ref="scroller" class="workspace-content">
@@ -108,12 +109,12 @@ onBeforeUnmount(() => { if (document.body.style.overflow === 'hidden') document.
                 <details v-for="(source, index) in sourcesFor(event)" :key="`${source.clueId}:${index}`" class="event-evidence"><summary>原线索 #{{ String(source.sourceNo || 0).padStart(3, '0') }}<span>查看原文</span></summary><blockquote v-if="source.quote">{{ source.quote }}</blockquote><blockquote v-else>{{ cluesById.get(source.clueId)?.ocrText || '该线索暂无识别文字，可打开原始照片核对。' }}</blockquote><button type="button" class="source-button" @click="emit('open-clue', source.clueId, source.quote)"><UiIcon name="image" :size="16" />查看原始线索<UiIcon name="chevron" :size="14" /></button></details>
                 <p v-if="!sourcesFor(event).length" class="manual-event">手动事件 · 未关联原线索</p>
               </article>
-              <div v-if="!events.length" class="workspace-empty"><UiIcon name="timeline" :size="32" /><strong>还没有相关的已确认事件</strong><p>与该人物关联，或原文明确提及其姓名、别名的事件会显示在这里。</p></div>
+              <div v-if="!events.length" class="workspace-empty"><UiIcon name="timeline" :size="32" /><strong>还没有相关的已确认事件</strong><p>与该人物关联，或原文明确提及其姓名、别名及已确认识别错名的事件会显示在这里。</p></div>
             </template>
             <template v-else-if="tab === 'clues'">
-              <p class="workspace-caption">来自姓名、别名的明确匹配及事件关联。</p>
+              <p class="workspace-caption">来自姓名、别名、已确认识别错名的明确匹配及事件关联。</p>
               <article v-for="clue in relatedClues" :key="clue.id" class="workspace-clue"><div class="clue-open"><span class="clue-photo" @click="emit('open-clue', clue.id)"><ClueThumbnail :path="clue.displayImagePath || clue.imagePath" :rotation="clue.rotation" :alt="clue.title" /></span><button type="button" class="clue-heading" @click="emit('open-clue', clue.id)"><small>线索 #{{ String(clue.number).padStart(3, '0') }}</small><strong>{{ clue.title || '未命名线索' }}</strong><span>{{ clue.category || '未分类' }} · 第 {{ clue.round }} 轮</span></button><UiIcon name="chevron" :size="17" /></div><p v-if="clue.ocrText" class="clue-excerpt">{{ clueExcerpt(clue) }}</p><details v-if="clue.ocrText" class="clue-text"><summary>展开 OCR 原文</summary><p>{{ clue.ocrText }}</p></details></article>
-              <div v-if="!relatedClues.length" class="workspace-empty"><UiIcon name="archive" :size="32" /><strong>还没有相关线索</strong><p>拍摄录入后，可通过姓名、别名或事件关联查找。</p></div>
+              <div v-if="!relatedClues.length" class="workspace-empty"><UiIcon name="archive" :size="32" /><strong>还没有相关线索</strong><p>拍摄录入后，可通过姓名、别名、已确认识别错名或事件关联查找。</p></div>
             </template>
             <template v-else>
               <p class="workspace-caption">仅展示玩家手动建立的关系。</p>

@@ -91,3 +91,8 @@ button,input,select,textarea,a{-webkit-tap-highlight-color:transparent}button{to
 .organization-run-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 28px 0;padding:11px 14px;background:#f4f7ee;border:1px solid #dfe8d4;border-radius:10px;color:#678056;font-size:12px}.organization-run-controls>span{flex:1;min-width:180px;line-height:1.7}.organization-run-controls>small{color:#95a286;white-space:nowrap}.organization-run-controls>button{min-height:38px;padding:0 12px;border:1px solid #d1dfc4;border-radius:8px;background:#fff;color:#577448;font-size:12px}.organization-run-controls>button:disabled{opacity:.6}
 .recent-clue-source>.recent-clue-thumbnail{flex:0 0 35px;width:35px;height:45px;border-radius:5px;overflow:hidden}.clue-load-more{display:block;min-height:44px;min-width:200px;max-width:100%;margin:20px auto 0;padding:0 20px;border:1px solid #dce6d4;border-radius:10px;background:#f7faf3;color:#6c835c;font-size:12px}
 @media(max-width:760px){.organization-run-controls{margin:12px 18px 0;padding:10px 12px;gap:8px}.organization-run-controls>button{min-height:44px}.organization-pause-button{min-height:40px;padding:0 8px;font-size:11px}.clue-load-more{width:100%}}
+
+.topbar-history{min-width:36px;min-height:40px;border-radius:9px;color:#6c805f}.topbar-history:hover{background:#f1f6e9}.redo-icon{transform:scaleX(-1)}
+@media(max-width:600px){.topbar-history{width:32px;min-width:32px;padding:0}.topbar-actions{gap:4px}}
+
+@media(max-width:1000px){.topbar-actions .topbar-undo{font-size:0;min-width:34px;width:34px;min-height:40px;padding:0;justify-content:center}}

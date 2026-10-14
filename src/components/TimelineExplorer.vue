@@ -264,7 +264,7 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body" :disabled="!fullscreen">
-    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看">
+    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
       <header class="explorer-toolbar">
         <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>{{ fullscreen ? '时间线' : `${visibleEvents.length} 个事件` }}</strong><span>{{ fullscreen ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `共 ${allEvents.length} 个已确认事件` }}</span></div></div>
         <label class="person-filter"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
@@ -294,6 +294,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.timeline-explorer, .timeline-explorer :deep(*) { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .timeline-explorer { --explorer-green: #315c48; --explorer-copper: #b66b4d; position: relative; display: flex; flex: 1; flex-direction: column; width: 100%; min-width: 0; min-height: 0; height: 100%; overflow: hidden; border: 1px solid #e3e8e2; border-radius: 20px; background: #f8faf7; box-shadow: 0 4px 18px #273d2f06; outline: none; }
 .timeline-explorer.is-fullscreen { position: fixed; inset: 0; z-index: 1100; width: 100%; height: 100dvh; border: 0; border-radius: 0; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); background: #f6f8f4; box-sizing: border-box; }
 .explorer-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; flex-shrink: 0; padding: 15px 18px 10px; background: #fff; }

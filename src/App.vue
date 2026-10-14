@@ -7,6 +7,8 @@ import { Controls } from '@vue-flow/controls'
 import { Timeline } from 'vis-timeline/standalone'
 import UiIcon from './components/UiIcon.vue'
 import AnnotationEditor from './components/AnnotationEditor.vue'
+import OrganizationOverview from './components/OrganizationOverview.vue'
+import * as organizer from './services/organizer'
 import * as vault from './services/vault'
 import type { ScriptRecord, ClueRecord, PersonRecord, RelationshipRecord, TimelineRecord, BoardItemRecord, BoardLinkRecord, NoteRecord } from './services/vault'
 
@@ -18,8 +20,12 @@ const events = ref<TimelineRecord[]>([])
 const boardItems = ref<BoardItemRecord[]>([])
 const boardLinks = ref<BoardLinkRecord[]>([])
 const notes = ref<NoteRecord[]>([])
+const organization = ref<OrganizationSnapshot | null>(null)
+const apiKeyDraft = ref('')
+const apiKeyConfigured = ref(false)
+const autoOrganize = ref(localStorage.getItem('clue-vault:auto-organize') === 'true')
 const activeScriptId = ref('')
-const view = ref<'clues' | 'people' | 'timeline' | 'board' | 'notes' | 'compare' | 'settings'>('clues')
+const view = ref<'clues' | 'organize' | 'people' | 'timeline' | 'board' | 'notes' | 'compare' | 'settings'>('clues')
 const mode = ref<'capture' | 'organize'>('capture')
 const busy = ref(false)
 const toast = ref('')
@@ -71,13 +77,11 @@ let searchSequence = 0
 
 const nav = [
   { id: 'clues', label: '线索库', icon: 'archive' },
-  { id: 'people', label: '人物', icon: 'people' },
-  { id: 'timeline', label: '时间线', icon: 'timeline' },
-  { id: 'board', label: '整理板', icon: 'board' },
-  { id: 'notes', label: '笔记', icon: 'note' },
-  { id: 'compare', label: '线索对照', icon: 'compare' },
-  { id: 'settings', label: '档案管理', icon: 'file' },
+  { id: 'organize', label: '整理总览', icon: 'board' },
+  { id: 'settings', label: '剧本管理', icon: 'file' },
 ] as const
+const activeNavId = computed(() => ['people', 'timeline', 'board', 'notes', 'compare'].includes(view.value) ? 'organize' : view.value)
+const viewLabel = computed(() => ({ clues: '线索库', organize: '整理总览', people: '人物档案', timeline: '时间线', board: '自由整理板', notes: '笔记', compare: '线索对照', settings: '剧本管理' })[view.value])
 const activeScript = computed(() => scripts.value.find(item => item.id === activeScriptId.value))
 const selectedClue = computed(() => clues.value.find(item => item.id === detailId.value))
 const selectedBoardItem = computed(() => boardItems.value.find(item => item.id === selectedBoardId.value))
@@ -161,9 +165,9 @@ async function loadScripts() {
 async function loadWorkspace() {
   if (!activeScriptId.value) return
   const id = activeScriptId.value
-  const [nextClues, nextPeople, nextRelationships, nextEvents, nextBoardItems, nextBoardLinks, nextNotes] = await Promise.all([
+  const [nextClues, nextPeople, nextRelationships, nextEvents, nextBoardItems, nextBoardLinks, nextNotes, nextOrganization] = await Promise.all([
     vault.listClues(id), vault.listPeople(id), vault.listRelationships(id), vault.listTimelineEvents(id),
-    vault.listBoardItems(id), vault.listBoardLinks(id), vault.listNotes(id),
+    vault.listBoardItems(id), vault.listBoardLinks(id), vault.listNotes(id), vault.getOrganization(id),
   ])
   if (id !== activeScriptId.value) return
   clues.value = nextClues
@@ -173,6 +177,7 @@ async function loadWorkspace() {
   boardItems.value = nextBoardItems
   boardLinks.value = nextBoardLinks
   notes.value = nextNotes
+  organization.value = nextOrganization
   compareIds.value = compareIds.value.filter(value => nextClues.some(clue => clue.id === value))
   await loadImages()
 }
@@ -185,7 +190,7 @@ async function action(work: () => Promise<unknown>, success?: string) {
 }
 function switchView(next: typeof view.value) {
   view.value = next
-  if (next !== 'clues') mode.value = 'organize'
+  mode.value = next === 'clues' ? 'capture' : 'organize'
 }
 function openScriptDialog(script?: ScriptRecord) {
   editingScriptId.value = script?.id || ''
@@ -220,13 +225,118 @@ async function removeScript(script: ScriptRecord) {
     else { clues.value = []; people.value = []; events.value = []; boardItems.value = []; notes.value = [] }
   }, '剧本已删除')
 }
+async function performOrganization() {
+  if (!activeScriptId.value) throw new Error('请先打开一个剧本')
+  const result = await organizer.organizeClues(clues.value)
+  await vault.saveOrganization(activeScriptId.value, result)
+  organization.value = await vault.getOrganization(activeScriptId.value)
+}
+async function runOrganization() {
+  if (!clues.value.some(item => item.ocrText.trim())) return notify('当前剧本没有可整理的 OCR 文字')
+  await action(performOrganization, '整理建议已更新')
+}
 async function capture() {
   if (!activeScriptId.value) return
-  await action(async () => { const captured = await vault.captureClues(activeScriptId.value); await loadWorkspace(); if (captured.length) openClue(captured[0]) }, '照片已保存，可继续拍摄')
+  let message = '照片已保存，可继续拍摄'
+  await action(async () => {
+    const captured = await vault.captureClues(activeScriptId.value)
+    await loadWorkspace()
+    if (captured.length && autoOrganize.value) {
+      try { await performOrganization(); message = '照片已录入，整理建议已更新' }
+      catch (error) { message = `照片已保存，整理未完成：${error instanceof Error ? error.message : '请重试'}` }
+    }
+  })
+  notify(message)
 }
 async function importPhotos() {
   if (!activeScriptId.value) return
-  await action(async () => { await vault.importCluePhotos(activeScriptId.value); await loadWorkspace() }, '图片已导入并识别')
+  let message = '图片已导入并识别'
+  await action(async () => {
+    const imported = await vault.importCluePhotos(activeScriptId.value)
+    await loadWorkspace()
+    if (imported.length && autoOrganize.value) {
+      try { await performOrganization(); message = '图片已录入，整理建议已更新' }
+      catch (error) { message = `图片已保存，整理未完成：${error instanceof Error ? error.message : '请重试'}` }
+    }
+  })
+  notify(message)
+}
+async function saveDeepSeekKey() {
+  await action(async () => {
+    await organizer.saveApiKey(apiKeyDraft.value)
+    apiKeyDraft.value = ''
+    apiKeyConfigured.value = true
+  }, 'API Key 已保存到 iPad 安全存储')
+}
+async function removeDeepSeekKey() {
+  await action(async () => {
+    await organizer.removeApiKey()
+    apiKeyConfigured.value = false
+    autoOrganize.value = false
+    localStorage.setItem('clue-vault:auto-organize', 'false')
+  }, 'API Key 已从 iPad 移除')
+}
+function saveAutoOrganize() {
+  if (autoOrganize.value && !apiKeyConfigured.value) {
+    autoOrganize.value = false
+    return notify('请先保存 DeepSeek API Key')
+  }
+  localStorage.setItem('clue-vault:auto-organize', String(autoOrganize.value))
+}
+async function refreshOrganization() {
+  if (activeScriptId.value) organization.value = await vault.getOrganization(activeScriptId.value)
+}
+async function acceptPersonSuggestion(id: string) {
+  const item = organization.value?.people.find(value => value.id === id)
+  if (!item || !activeScriptId.value) return
+  await action(async () => {
+    if (!people.value.some(person => person.name === item.name || person.aliases.includes(item.name))) {
+      await vault.createPerson(activeScriptId.value, { name: item.name, aliases: item.aliases })
+    }
+    await vault.resolveOrganizationSuggestion(activeScriptId.value, 'people', id)
+    await loadWorkspace()
+  }, '人物已加入档案')
+}
+async function acceptRelationshipSuggestion(id: string) {
+  const item = organization.value?.relationships.find(value => value.id === id)
+  if (!item || !activeScriptId.value) return
+  await action(async () => {
+    const findOrCreate = async (name: string) => {
+      const found = people.value.find(person => person.name === name || person.aliases.includes(name))
+      return found || await vault.createPerson(activeScriptId.value, { name })
+    }
+    const from = await findOrCreate(item.from)
+    const to = await findOrCreate(item.to)
+    const existing = relationships.value.some(relation => relation.fromId === from.id && relation.toId === to.id && relation.label === item.label)
+    if (!existing) await vault.createRelationship(activeScriptId.value, { fromId: from.id, toId: to.id, label: item.label })
+    await vault.resolveOrganizationSuggestion(activeScriptId.value, 'relationships', id)
+    await loadWorkspace()
+  }, '关系已确认并加入关系图')
+}
+async function acceptTimelineSuggestion(id: string) {
+  const item = organization.value?.timeline.find(value => value.id === id)
+  if (!item || !activeScriptId.value) return
+  await action(async () => {
+    const personIds = people.value.filter(person => item.people.some(name => name === person.name || person.aliases.includes(name))).map(person => person.id)
+    const clue = clues.value.find(value => value.number === item.sourceNo)
+    await vault.createTimelineEvent(activeScriptId.value, { title: item.title, startsAt: item.startsAt, personIds, clueId: clue?.id || '', confirmed: true })
+    await vault.resolveOrganizationSuggestion(activeScriptId.value, 'timeline', id)
+    await loadWorkspace()
+  }, '时间节点已确认')
+}
+async function acceptCluePointSuggestion(id: string) {
+  const item = organization.value?.cluePoints.find(value => value.id === id)
+  const clue = item && clues.value.find(value => value.number === item.sourceNo)
+  if (!item || !clue) return
+  await action(async () => {
+    await vault.updateClue(clue.id, { title: item.title, category: item.category || clue.category, tags: [...new Set([...clue.tags, ...item.tags])] })
+    await vault.resolveOrganizationSuggestion(activeScriptId.value, 'cluePoints', id)
+    await loadWorkspace()
+  }, '线索主题已应用')
+}
+function openSourceClue(sourceNo: number) {
+  const clue = clues.value.find(item => item.number === sourceNo)
+  if (clue) openClue(clue)
 }
 function openClue(clue: ClueRecord) {
   detailId.value = clue.id
@@ -440,6 +550,7 @@ function buildTimeline() {
     if (id) openEventDialog(events.value.find(item => item.id === id))
   })
 }
+watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize' })
 watch([view, events], async () => { await nextTick(); buildTimeline() })
 watch(activeScriptId, async () => { query.value = ''; searchIds.value = null; await loadWorkspace() })
 watch(query, async value => {
@@ -452,6 +563,7 @@ watch(query, async value => {
 })
 onMounted(async () => {
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
+  try { apiKeyConfigured.value = await organizer.hasApiKey() } catch { apiKeyConfigured.value = false }
 })
 onUnmounted(() => { timelineInstance?.destroy(); if (toastTimer) clearTimeout(toastTimer) })
 </script>
@@ -466,12 +578,12 @@ onUnmounted(() => { timelineInstance?.destroy(); if (toastTimer) clearTimeout(to
           <button class="script-switcher-button" @click="view = 'settings'"><span class="script-cover-mini" :style="activeScript.coverPath && imageUrls[activeScript.coverPath] ? { backgroundImage: `url(${imageUrls[activeScript.coverPath]})` } : {}"><UiIcon v-if="!activeScript.coverPath" name="file" :size="18" /></span><span class="switcher-name">{{ activeScript.name }}<small>{{ dateLabel(activeScript.playDate) }}</small></span><UiIcon name="chevron" :size="16" /></button>
         </div>
         <div class="sidebar-section-title">工作空间</div>
-        <nav class="primary-nav" aria-label="主导航"><button v-for="item in nav" :key="item.id" :class="['nav-item', { active: view === item.id }]" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="19" /><span>{{ item.label }}</span><span v-if="item.id === 'compare' && compareIds.length" class="nav-count">{{ compareIds.length }}</span></button></nav>
-        <div class="sidebar-bottom"><div class="offline-chip"><span class="offline-dot"></span>本机离线保存</div><button class="sidebar-small-button" @click="openScriptDialog()"><UiIcon name="plus" :size="16" />新建剧本</button></div>
+        <nav class="primary-nav" aria-label="主导航"><button v-for="item in nav" :key="item.id" :class="['nav-item', { active: activeNavId === item.id }]" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="19" /><span>{{ item.label }}</span><span v-if="item.id === 'compare' && compareIds.length" class="nav-count">{{ compareIds.length }}</span></button></nav>
+        <div class="sidebar-bottom"><div class="offline-chip"><span class="offline-dot"></span>本机保存 · AI 可选</div><button class="sidebar-small-button" @click="openScriptDialog()"><UiIcon name="plus" :size="16" />新建剧本</button></div>
       </aside>
       <main class="main-panel">
-        <header class="topbar"><div class="topbar-title"><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ nav.find(item => item.id === view)?.label }}</strong></div><div class="topbar-actions"><div class="mode-switch"><button :class="{ active: mode === 'capture' }" @click="mode = 'capture'; view = 'clues'">搜证模式</button><button :class="{ active: mode === 'organize' }" @click="mode = 'organize'; view = 'board'">整理模式</button></div><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
-        <div v-if="!activeScript" class="empty-home"><div class="empty-art"><div class="art-paper art-paper-one"></div><div class="art-paper art-paper-two"></div><div class="art-paper art-paper-three"><UiIcon name="search" :size="38" /></div></div><h1>从一个剧本开始</h1><p>拍下线索，记录细节。所有内容只保存在这台 iPad 上。</p><div class="empty-home-actions"><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button><button class="secondary-button" @click="importArchive"><UiIcon name="upload" :size="18" />导入档案</button></div></div>
+        <header class="topbar"><div class="topbar-title"><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><div class="mode-switch"><button :class="{ active: mode === 'capture' }" @click="mode = 'capture'; view = 'clues'">搜证模式</button><button :class="{ active: mode === 'organize' }" @click="mode = 'organize'; view = 'organize'">整理模式</button></div><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
+        <div v-if="!activeScript" class="empty-home"><div class="empty-art"><div class="art-paper art-paper-one"></div><div class="art-paper art-paper-two"></div><div class="art-paper art-paper-three"><UiIcon name="search" :size="38" /></div></div><h1>从一个剧本开始</h1><p>拍下线索，OCR 文字在本机识别。需要时可选择 AI 整理。</p><div class="empty-home-actions"><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button><button class="secondary-button" @click="importArchive"><UiIcon name="upload" :size="18" />导入档案</button></div></div>
         <template v-else>
           <section v-if="view === 'clues'" class="page page-clues">
             <div class="page-header"><div><h1>线索库</h1><p>收集到的照片与文字，随时回到原始线索。</p></div><div class="header-actions"><button class="secondary-button" :disabled="busy" @click="importPhotos"><UiIcon name="image" :size="18" />导入照片</button><button class="primary-button" :disabled="busy" @click="capture"><UiIcon name="camera" :size="18" />拍摄线索</button></div></div>
@@ -480,15 +592,16 @@ onUnmounted(() => { timelineInstance?.destroy(); if (toastTimer) clearTimeout(to
             <div v-if="!visibleClues.length" class="section-empty"><div class="section-empty-icon"><UiIcon :name="clues.length ? 'search' : 'camera'" :size="31" /></div><h2>{{ clues.length ? '没有符合条件的线索' : '还没有线索' }}</h2><p>{{ clues.length ? '试着调整搜索词或筛选条件。' : '拍摄或导入第一张线索照片，文字会在本机自动识别。' }}</p><button v-if="!clues.length" class="primary-button" @click="capture"><UiIcon name="camera" :size="18" />拍摄线索</button></div>
             <div v-else :class="['clue-collection', layout]"><article v-for="clue in visibleClues" :key="clue.id" class="clue-card" @click="openClue(clue)"><div class="clue-image"><img v-if="imageUrls[clue.displayImagePath || clue.imagePath]" :src="imageUrls[clue.displayImagePath || clue.imagePath]" :alt="clue.title" :style="{ transform: `rotate(${clue.rotation}deg)` }" /><UiIcon v-else name="image" :size="31" /><span class="clue-number">#{{ String(clue.number).padStart(3, '0') }}</span><button :class="['favorite-button', { active: clue.favorite }]" title="收藏线索" @click.stop="toggleFavorite(clue)"><UiIcon name="heart" :size="17" /></button></div><div class="clue-card-body"><div class="clue-card-meta"><span v-if="clue.round">{{ clue.round }}</span><span v-if="clue.category">{{ clue.category }}</span></div><h2 v-html="highlight(clue.title)"></h2><p v-if="clue.ocrText" v-html="highlight(shortText(clue.ocrText, layout === 'list' ? 165 : 74))"></p><p v-else class="muted">暂无识别文字</p><div class="clue-card-foot"><span>{{ dateLabel(clue.createdAt) }}</span><button :class="['compare-pick', { active: compareIds.includes(clue.id) }]" @click.stop="toggleCompare(clue.id)"><UiIcon name="compare" :size="15" />{{ compareIds.includes(clue.id) ? '已对照' : '加入对照' }}</button></div></div></article></div>
           </section>
+          <OrganizationOverview v-else-if="view === 'organize'" :clues="clues" :people="people" :relationships="relationships" :events="events" :organization="organization" :busy="busy" :auto-organize="autoOrganize" :api-configured="apiKeyConfigured" @analyze="runOrganization" @navigate="switchView" @open-clue="openSourceClue" @accept-person="acceptPersonSuggestion" @accept-relationship="acceptRelationshipSuggestion" @accept-timeline="acceptTimelineSuggestion" @accept-clue-point="acceptCluePointSuggestion" />
           <section v-else-if="view === 'people'" class="page"><div class="page-header"><div><h1>人物档案</h1><p>名字匹配来自已保存线索；人物之间的关系由你亲自建立。</p></div><div class="header-actions"><button class="secondary-button" :disabled="people.length < 2" @click="relationForm.fromId = ''; relationForm.toId = ''; relationForm.label = ''; relationshipDialog = true"><UiIcon name="plus" :size="18" />添加关系</button><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div></div><div class="subtabs"><button :class="{ active: !relationGraph }" @click="relationGraph = false">人物列表</button><button :class="{ active: relationGraph }" @click="relationGraph = true">关系图</button></div><div v-if="!people.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="people" :size="31" /></div><h2>建立人物档案</h2><p>添加人物姓名后，可以自动找到提及姓名的线索。</p><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div><div v-else-if="relationGraph" class="graph-shell"><VueFlow :nodes="relationNodes" :edges="relationEdges" :fit-view-on-init="true" :nodes-connectable="false" :edges-updatable="false"><Background :gap="24" :size="1" pattern-color="#e2ddd5" /><Controls /></VueFlow><div v-if="relationships.length" class="graph-legend"><div v-for="link in relationships" :key="link.id"><span>{{ people.find(p => p.id === link.fromId)?.name }} — {{ link.label }} — {{ people.find(p => p.id === link.toId)?.name }}</span><button title="删除关系" @click="removeRelationship(link.id)"><UiIcon name="close" :size="14" /></button></div></div></div><div v-else class="people-grid"><article v-for="person in people" :key="person.id" class="person-card"><div class="person-avatar"><img v-if="person.photoPath && imageUrls[person.photoPath]" :src="imageUrls[person.photoPath]" :alt="person.name" /><span v-else>{{ person.name.slice(0, 1) }}</span></div><div class="person-card-main"><h2>{{ person.name }}</h2><p v-if="person.aliases.length">又名 {{ person.aliases.join('、') }}</p><p v-else class="muted">暂无别名</p></div><div class="person-card-meta">{{ personClueCount(person) }} 条相关线索</div><p v-if="person.notes" class="person-card-notes">{{ shortText(person.notes, 82) }}</p><div class="person-card-actions"><button @click="filterPerson = person.id; view = 'clues'">查看线索 <UiIcon name="chevron" :size="15" /></button><button title="编辑人物" @click="openPersonDialog(person)"><UiIcon name="edit" :size="17" /></button><button title="删除人物" @click="removePerson(person)"><UiIcon name="trash" :size="17" /></button></div></article></div></section>
           <section v-else-if="view === 'timeline'" class="page"><div class="page-header"><div><h1>时间线</h1><p>只展示你确认的事件，不补全未知经过。</p></div><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div><div v-if="candidateEvents.length" class="candidate-list"><div class="section-label">待确认的时间</div><p>以下日期来自照片文字识别。请核对原图并填写事件后再加入时间线。</p><article v-for="candidate in candidateEvents" :key="candidate.id"><span>{{ dateLabel(candidate.startsAt) }}</span><button v-if="candidate.clueId" @click="clues.find(clue => clue.id === candidate.clueId) && openClue(clues.find(clue => clue.id === candidate.clueId)!)">查看原图</button><button class="primary-button" @click="openEventDialog(candidate)">确认事件</button></article></div><div v-if="!confirmedEvents.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="timeline" :size="31" /></div><h2>等待第一条确认的事件</h2><p>从线索里找到明确的时间，再由你录入事件。</p><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div><template v-else><div class="timeline-visual"><div class="section-label">时间概览</div><div ref="timelineElement" class="vis-timeline-host"></div></div><div class="timeline-list"><article v-for="event in [...confirmedEvents].sort((a,b) => a.startsAt.localeCompare(b.startsAt))" :key="event.id" class="timeline-event"><div class="timeline-event-marker"></div><div class="timeline-event-date">{{ dateLabel(event.startsAt) }}</div><div class="timeline-event-content"><h2>{{ event.title }}</h2><div class="timeline-event-refs"><span v-for="id in event.personIds" :key="id">{{ people.find(person => person.id === id)?.name }}</span><button v-if="event.clueId" @click="clues.find(clue => clue.id === event.clueId) && openClue(clues.find(clue => clue.id === event.clueId)!)">查看原始线索 <UiIcon name="chevron" :size="13" /></button></div></div><div class="row-actions"><button title="编辑" @click="openEventDialog(event)"><UiIcon name="edit" :size="17" /></button><button title="删除" @click="removeEvent(event.id)"><UiIcon name="trash" :size="17" /></button></div></article></div></template></section>
           <section v-else-if="view === 'board'" class="page board-page"><div class="page-header"><div><h1>自由整理板</h1><p>拖动卡片，手动连接思路。布局自动保存在本机。</p></div><div class="header-actions"><button class="secondary-button" @click="boardLinkForm.fromId = ''; boardLinkForm.toId = ''; boardLinkForm.label = ''; boardLinkDialog = true"><UiIcon name="plus" :size="18" />连接卡片</button><button class="primary-button" @click="openBoardDialog('note')"><UiIcon name="plus" :size="18" />添加卡片</button></div></div><div class="board-toolbar"><button @click="openBoardDialog('clue')"><UiIcon name="archive" :size="17" />线索</button><button @click="openBoardDialog('person')"><UiIcon name="person" :size="17" />人物</button><button @click="openBoardDialog('note')"><UiIcon name="note" :size="17" />便签</button><div class="board-toolbar-spacer"></div><button @click="boardZoom = Math.max(.5, boardZoom - .15)"><UiIcon name="zoomOut" :size="17" /></button><span>{{ Math.round(boardZoom * 100) }}%</span><button @click="boardZoom = Math.min(2, boardZoom + .15)"><UiIcon name="zoomIn" :size="17" /></button></div><div class="board-canvas"><div v-if="!boardItems.length" class="board-empty"><div class="board-empty-symbol"><UiIcon name="board" :size="37" /></div><strong>你的线索空间</strong><span>添加人物、线索或便签，开始整理。</span><button class="primary-button" @click="openBoardDialog('note')"><UiIcon name="plus" :size="17" />添加第一张卡片</button></div><VueFlow v-else :nodes="boardNodes" :edges="boardEdges" :default-zoom="boardZoom" :min-zoom=".5" :max-zoom="2" :fit-view-on-init="false" @node-click="selectedBoardId = $event.node.id" @node-drag-stop="onBoardDragStop" @connect="onBoardConnect"><Background :gap="24" :size="1" pattern-color="#e2ddd5" /><Controls /></VueFlow><div v-if="selectedBoardItem" class="board-inspector"><div><strong>卡片详情</strong><button title="关闭" @click="selectedBoardId = ''"><UiIcon name="close" :size="16" /></button></div><p>{{ selectedBoardItem.text || (selectedBoardItem.kind === 'clue' ? clues.find(clue => clue.id === selectedBoardItem.refId)?.title : people.find(person => person.id === selectedBoardItem.refId)?.name) }}</p><span v-if="selectedBoardItem.group">分组：{{ selectedBoardItem.group }}</span><div><button @click="openBoardDialog(selectedBoardItem.kind, selectedBoardItem)"><UiIcon name="edit" :size="16" />编辑</button><button @click="removeBoardItem(selectedBoardItem.id)"><UiIcon name="trash" :size="16" />移除</button></div></div></div><div v-if="boardLinks.length" class="board-links-list"><span>已建立的连接</span><div v-for="link in boardLinks" :key="link.id"><span>{{ link.label || '未命名连接' }}</span><button title="删除连接" @click="removeBoardLink(link.id)"><UiIcon name="close" :size="15" /></button></div></div></section>
           <section v-else-if="view === 'notes'" class="page"><div class="page-header"><div><h1>笔记</h1><p>记录你自己的观察与讨论，不生成答案或推理。</p></div><button class="primary-button" @click="openNoteDialog()"><UiIcon name="plus" :size="18" />新建笔记</button></div><div v-if="!notes.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="note" :size="31" /></div><h2>先记下一个想法</h2><p>文字笔记可以关联具体线索或人物。</p><button class="primary-button" @click="openNoteDialog()"><UiIcon name="plus" :size="18" />新建笔记</button></div><div v-else class="notes-grid"><article v-for="note in [...notes].sort((a,b) => b.createdAt.localeCompare(a.createdAt))" :key="note.id" class="note-card"><div class="note-card-top"><UiIcon name="note" :size="19" /><span>{{ dateLabel(note.createdAt) }}</span></div><p>{{ note.text }}</p><div class="note-card-bottom"><span v-if="note.clueId">{{ clues.find(clue => clue.id === note.clueId)?.title || '线索' }}</span><span v-else-if="note.personId">{{ people.find(person => person.id === note.personId)?.name || '人物' }}</span><span v-else>独立笔记</span><button title="编辑" @click="openNoteDialog(note)"><UiIcon name="edit" :size="17" /></button><button title="删除" @click="removeNote(note.id)"><UiIcon name="trash" :size="17" /></button></div></article></div></section>
           <section v-else-if="view === 'compare'" class="page"><div class="page-header"><div><h1>线索对照</h1><p>把多条线索放在一起，逐字查看原图和识别内容。</p></div><button v-if="compareIds.length" class="secondary-button" @click="compareIds = []">清空对照</button></div><div v-if="!compareClues.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="compare" :size="31" /></div><h2>还没有加入对照的线索</h2><p>在线索库中点击「加入对照」，即可并排查看。</p><button class="primary-button" @click="view = 'clues'"><UiIcon name="archive" :size="18" />前往线索库</button></div><div v-else class="compare-grid"><article v-for="clue in compareClues" :key="clue.id" class="compare-card"><div class="compare-card-header"><div><span>#{{ String(clue.number).padStart(3, '0') }}</span><h2>{{ clue.title }}</h2></div><button title="移出对照" @click="toggleCompare(clue.id)"><UiIcon name="close" :size="18" /></button></div><button class="compare-photo" @click="openClue(clue)"><img v-if="imageUrls[clue.imagePath]" :src="imageUrls[clue.imagePath]" :alt="clue.title" :style="{ transform: `rotate(${clue.rotation}deg)` }" /><UiIcon v-else name="image" :size="32" /></button><div class="compare-ocr"><span>识别文字</span><p>{{ clue.ocrText || '暂无识别文字' }}</p></div></article></div></section>
-          <section v-else-if="view === 'settings'" class="page"><div class="page-header"><div><h1>档案管理</h1><p>每个剧本独立存储；可以按剧本导出与恢复。</p></div><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button></div><div class="settings-layout"><div><div class="section-label">我的剧本</div><div class="script-list"><article v-for="script in scripts" :key="script.id" :class="['script-row', { active: script.id === activeScriptId }]" @click="activeScriptId = script.id"><div class="script-row-cover" :style="script.coverPath && imageUrls[script.coverPath] ? { backgroundImage: `url(${imageUrls[script.coverPath]})` } : {}"><UiIcon v-if="!script.coverPath" name="file" :size="23" /></div><div><h2>{{ script.name }}</h2><p>{{ dateLabel(script.playDate) }}</p></div><UiIcon name="chevron" :size="16" /></article></div></div><div class="settings-side"><div class="section-label">当前剧本</div><div class="settings-card"><h2>{{ activeScript.name }}</h2><p>照片、OCR 文字、人物和整理内容都保存在本机。导出的档案可在另一台设备上导入。</p><button class="settings-action" @click="openScriptDialog(activeScript)"><UiIcon name="edit" :size="18" />编辑剧本<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="exportArchive"><UiIcon name="download" :size="18" />导出完整档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="importArchive"><UiIcon name="upload" :size="18" />导入历史档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action danger" @click="removeScript(activeScript)"><UiIcon name="trash" :size="18" />删除剧本<UiIcon name="chevron" :size="16" /></button></div><div class="privacy-note"><UiIcon name="info" :size="18" /><span>应用不联网获取剧情，不使用大语言模型。所有关联和结论由玩家自己建立。</span></div></div></div></section>
+          <section v-else-if="view === 'settings'" class="page"><div class="page-header"><div><h1>档案管理</h1><p>每个剧本独立存储；可以按剧本导出与恢复。</p></div><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button></div><div class="settings-layout"><div><div class="section-label">我的剧本</div><div class="script-list"><article v-for="script in scripts" :key="script.id" :class="['script-row', { active: script.id === activeScriptId }]" @click="activeScriptId = script.id"><div class="script-row-cover" :style="script.coverPath && imageUrls[script.coverPath] ? { backgroundImage: `url(${imageUrls[script.coverPath]})` } : {}"><UiIcon v-if="!script.coverPath" name="file" :size="23" /></div><div><h2>{{ script.name }}</h2><p>{{ dateLabel(script.playDate) }}</p></div><UiIcon name="chevron" :size="16" /></article></div></div><div class="settings-side"><div class="section-label">当前剧本</div><div class="settings-card"><h2>{{ activeScript.name }}</h2><p>照片、OCR 文字、人物和整理内容都保存在本机。导出的档案可在另一台设备上导入。</p><button class="settings-action" @click="openScriptDialog(activeScript)"><UiIcon name="edit" :size="18" />编辑剧本<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="exportArchive"><UiIcon name="download" :size="18" />导出完整档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="importArchive"><UiIcon name="upload" :size="18" />导入历史档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action danger" @click="removeScript(activeScript)"><UiIcon name="trash" :size="18" />删除剧本<UiIcon name="chevron" :size="16" /></button></div><div class="settings-card ai-settings-card"><h2>DeepSeek 线索整理</h2><p>可选联网功能。发送当前剧本的 OCR 文字和线索编号，照片仍保存在本机；API Key 保存于 iPad Keychain，不进入导出档案。</p><label class="ai-key-label">DeepSeek API Key<input v-model="apiKeyDraft" type="password" autocomplete="off" placeholder="粘贴 API Key 后保存" /></label><div class="ai-key-actions"><button class="primary-button" :disabled="busy || !apiKeyDraft.trim()" @click="saveDeepSeekKey">保存到 iPad</button><button v-if="apiKeyConfigured" class="text-button" :disabled="busy" @click="removeDeepSeekKey">移除密钥</button></div><label class="auto-organize-toggle"><input v-model="autoOrganize" type="checkbox" :disabled="!apiKeyConfigured" @change="saveAutoOrganize" /><span><strong>自动整理新增线索</strong><small>拍照或导入后会发送 OCR 文字到 DeepSeek；可能产生 API 用量。</small></span></label></div><div class="privacy-note"><UiIcon name="info" :size="18" /><span>本机 OCR 和照片管理可离线使用。选择 AI 整理时会联网发送文字；模型只生成待确认建议，不判断证词、不推断因果或答案。</span></div></div></div></section>
         </template>
       </main>
-      <nav class="mobile-nav" aria-label="底部导航"><button v-for="item in nav.slice(0, 5)" :key="item.id" :class="{ active: view === item.id }" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="21" /><span>{{ item.label }}</span></button><button :class="{ active: view === 'settings' || view === 'compare' }" @click="view = view === 'settings' ? 'compare' : 'settings'"><UiIcon name="more" :size="21" /><span>更多</span></button></nav>
+      <nav class="mobile-nav" aria-label="底部导航"><button v-for="item in nav" :key="item.id" :class="{ active: activeNavId === item.id }" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="21" /><span>{{ item.label }}</span></button></nav>
       <div v-if="toast" class="toast" role="status">{{ toast }}</div>
       <div v-if="scriptDialog" class="modal-backdrop" @click.self="scriptDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ editingScriptId ? '编辑剧本' : '新建剧本' }}</h2><button title="关闭" @click="scriptDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>剧本名称<input v-model="scriptForm.name" maxlength="80" placeholder="输入剧本名称" /></label><label>游玩日期<input v-model="scriptForm.playDate" type="date" /></label><div class="image-picker-row"><div class="image-picker-preview" :style="scriptForm.coverPath ? { backgroundImage: `url(${scriptForm.coverPath.startsWith('data:') ? scriptForm.coverPath : imageUrls[scriptForm.coverPath] || ''})` } : {}"><UiIcon v-if="!scriptForm.coverPath" name="image" :size="22" /></div><button class="secondary-button" @click="chooseCover">选择封面照片</button></div></div><div class="modal-actions"><button class="secondary-button" @click="scriptDialog = false">取消</button><button class="primary-button" :disabled="busy" @click="saveScript">保存剧本</button></div></div></div>
       <div v-if="clueDialog && selectedClue" class="modal-backdrop clue-backdrop" @click.self="clueDialog = false"><div class="modal clue-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">线索 #{{ String(selectedClue.number).padStart(3, '0') }}</span><h2>{{ selectedClue.title }}</h2></div><button title="关闭" @click="clueDialog = false"><UiIcon name="close" :size="20" /></button></div><div class="clue-detail-layout"><div class="clue-photo-panel"><div class="photo-stage" :class="{ zoomed: photoZoom }" @click="photoZoom = !photoZoom"><img v-if="imageUrls[selectedClue.imagePath]" :src="imageUrls[selectedClue.imagePath]" :alt="selectedClue.title" :style="{ transform: `rotate(${selectedClue.rotation}deg)` }" /><UiIcon v-else name="image" :size="40" /></div><div class="photo-tools"><span>原始照片</span><button @click="capture"><UiIcon name="camera" :size="18" />继续拍摄</button><button title="放大或缩小" @click="photoZoom = !photoZoom"><UiIcon name="zoomIn" :size="18" />{{ photoZoom ? '缩小' : '放大' }}</button><button @click="rotatePhoto(selectedClue)"><UiIcon name="rotate" :size="18" />旋转</button><button @click="openCrop"><UiIcon name="image" :size="18" />裁剪</button><button @click="annotationOpen = true"><UiIcon name="edit" :size="18" />标注</button></div></div><div class="clue-editor"><div class="editor-section"><span class="section-label">基础信息</span><label>标题<input v-model="clueForm.title" /></label><div class="two-fields"><label>搜证轮次<input v-model="clueForm.round" placeholder="如：第一轮" /></label><label>分类<input v-model="clueForm.category" placeholder="如：物证" /></label></div><label>标签<input v-model="clueForm.tags" placeholder="用逗号分隔" /></label></div><div class="editor-section"><span class="section-label">OCR 识别文字 <small>可直接修正错误</small></span><textarea v-model="clueForm.ocrText" rows="8" placeholder="照片中暂未识别出文字"></textarea></div><div class="editor-section"><span class="section-label">备注</span><textarea v-model="clueForm.notes" rows="3" placeholder="写下你的观察"></textarea></div><div class="clue-editor-bottom"><button class="danger-text" @click="removeClue(selectedClue)"><UiIcon name="trash" :size="17" />删除线索</button><div><button class="secondary-button" @click="toggleCompare(selectedClue)"><UiIcon name="compare" :size="17" />{{ compareIds.includes(selectedClue.id) ? '移出对照' : '加入对照' }}</button><button class="primary-button" :disabled="busy" @click="saveClue">保存修改</button></div></div></div></div></div></div>

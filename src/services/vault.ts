@@ -14,11 +14,16 @@ export type TimelineRecord = { id: string; scriptId: string; title: string; star
 export type BoardItemRecord = { id: string; scriptId: string; kind: 'clue' | 'person' | 'note' | 'photo'; refId: string; text: string; x: number; y: number; color: string; group: string }
 export type BoardLinkRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
 export type NoteRecord = { id: string; scriptId: string; clueId: string; personId: string; text: string; createdAt: string }
+export type OrganizationPersonSuggestion = { id: string; name: string; aliases: string[]; sourceNo: number; quote: string }
+export type OrganizationRelationshipSuggestion = { id: string; from: string; to: string; label: string; sourceNo: number; quote: string }
+export type OrganizationTimelineSuggestion = { id: string; title: string; startsAt: string; people: string[]; sourceNo: number; quote: string }
+export type OrganizationCluePointSuggestion = { id: string; title: string; category: string; tags: string[]; sourceNo: number; quote: string }
+export type OrganizationSnapshot = { id: string; scriptId: string; updatedAt: string; people: OrganizationPersonSuggestion[]; relationships: OrganizationRelationshipSuggestion[]; timeline: OrganizationTimelineSuggestion[]; cluePoints: OrganizationCluePointSuggestion[] }
 export type AnnotationRecord = { id: string; clueId: string; strokes: unknown[] }
 
-type Table = 'scripts' | 'clues' | 'people' | 'relationships' | 'timeline' | 'board_items' | 'board_links' | 'notes' | 'annotations'
+type Table = 'scripts' | 'clues' | 'people' | 'relationships' | 'timeline' | 'board_items' | 'board_links' | 'notes' | 'annotations' | 'organization'
 type Stored = { id: string; scriptId?: string }
-const tables: Table[] = ['scripts', 'clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations']
+const tables: Table[] = ['scripts', 'clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations', 'organization']
 const native = Capacitor.isNativePlatform()
 let database: any = null
 let initialized = false
@@ -388,6 +393,18 @@ export async function createBoardLink(scriptId: string, input: Partial<BoardLink
 export async function deleteBoardLink(id: string): Promise<void> { await removeRecord('board_links', id) }
 
 export async function listNotes(scriptId: string): Promise<NoteRecord[]> { return listRecords('notes', scriptId) }
+export async function getOrganization(scriptId: string): Promise<OrganizationSnapshot | null> {
+  return (await listRecords<OrganizationSnapshot>('organization', scriptId))[0] || null
+}
+export async function saveOrganization(scriptId: string, result: OrganizationSnapshot): Promise<OrganizationSnapshot> {
+  return putRecord('organization', { ...result, id: `organization-${scriptId}`, scriptId, updatedAt: now() })
+}
+export async function resolveOrganizationSuggestion(scriptId: string, kind: 'people' | 'relationships' | 'timeline' | 'cluePoints', id: string): Promise<void> {
+  const result = await getOrganization(scriptId)
+  if (!result) return
+  await saveOrganization(scriptId, { ...result, [kind]: result[kind].filter(item => item.id !== id) })
+}
+
 export async function createNote(scriptId: string, input: Partial<NoteRecord>): Promise<NoteRecord> {
   return putRecord('notes', { id: uid(), scriptId, clueId: input.clueId || '', personId: input.personId || '', text: input.text || '', createdAt: now() })
 }
@@ -407,7 +424,7 @@ export async function saveAnnotation(clueId: string, strokes: unknown[]): Promis
   return putRecord('annotations', { id: existing?.id || uid(), scriptId: clue.scriptId, clueId, strokes }) as Promise<AnnotationRecord>
 }
 
-const archiveTables: Table[] = ['clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations']
+const archiveTables: Table[] = ['clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations', 'organization']
 export async function exportScript(id: string): Promise<void> {
   const script = await getRecord<ScriptRecord>('scripts', id)
   if (!script) throw new Error('剧本不存在')

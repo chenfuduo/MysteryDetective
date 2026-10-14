@@ -62,6 +62,8 @@ const visibleSuggestions = computed(() => activeFilter.value === 'all'
   ? allSuggestions.value
   : allSuggestions.value.filter(item => item.kind === activeFilter.value))
 const dateLabel = (value: string) => {
+  const partial = value.match(/^--(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/)
+  if (partial) return `${Number(partial[1])}月${Number(partial[2])}日${partial[3] ? ` ${partial[3]}:${partial[4]}` : ''}（未标年份）`
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date)
 }

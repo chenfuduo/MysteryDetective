@@ -56,9 +56,34 @@ function sourceQuote(sourceNo: number, quote: unknown, clues: ClueRecord[]): { c
 }
 function validDate(value: unknown, quote: string): string {
   const candidate = text(value, 40).replace(' ', 'T')
-  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?$/.test(candidate)) return ''
-  if (Number.isNaN(Date.parse(candidate))) return ''
-  return quote ? `${candidate.length === 10 ? `${candidate}T00:00` : candidate}` : ''
+  if (!quote) return ''
+  const dateMatch = candidate.match(/^(?:(\d{4})-)?--?(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/)
+  if (!dateMatch) return ''
+  const [, candidateYear, month, day, hour, minute] = dateMatch
+  const monthNumber = Number(month)
+  const dayNumber = Number(day)
+  const validMonthDay = monthNumber >= 1 && monthNumber <= 12 && dayNumber >= 1 && dayNumber <= new Date(Date.UTC(2000, monthNumber, 0)).getUTCDate()
+  if (!validMonthDay) return ''
+  if (hour && (Number(hour) > 23 || Number(minute) > 59)) return ''
+
+  const source = quote.replace(/\s/g, '')
+  const sourceDate = source.match(new RegExp(`(?:(\\d{4})年)?0?${monthNumber}月0?${dayNumber}日`))
+    || source.match(new RegExp(`(?:(\\d{4})[-/.])?0?${monthNumber}[-/.]0?${dayNumber}(?:日)?`))
+  if (!sourceDate) return ''
+  const sourceYear = sourceDate[1] || ''
+  if (candidateYear && sourceYear && candidateYear !== sourceYear) return ''
+
+  let time = ''
+  if (hour && minute) {
+    const clock = source.match(new RegExp(`(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?0?${Number(hour)}(?:[:：]|点|时)0?${Number(minute)}分?`))
+    if (clock) {
+      let normalizedHour = Number(hour)
+      if (['下午', '傍晚', '晚上', '中午'].includes(clock[1]) && normalizedHour < 12) normalizedHour += 12
+      if (['凌晨', '清晨'].includes(clock[1]) && normalizedHour === 12) normalizedHour = 0
+      time = `T${String(normalizedHour).padStart(2, '0')}:${minute}`
+    }
+  }
+  return `${sourceYear || '--'}${sourceYear ? '-' : ''}${month}-${day}${time}`
 }
 
 function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
@@ -111,8 +136,8 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
   if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
 
   const system = `你是剧本杀线索的文字整理工具。只整理用户给出的 OCR 原文，不搜索外部资料，不推理剧情。
-只输出 JSON，格式为：{"people":[{"name":"原文明确出现的人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说的关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确写出的事件短句","startsAt":"YYYY-MM-DDTHH:mm","people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"这条线索的简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
-约束：人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；日期时间和事件必须在对应原文中明确出现；线索主题只能简要归纳该原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
+只输出 JSON，格式为：{"people":[{"name":"原文明确出现的人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说的关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确写出的事件短句","startsAt":"YYYY-MM-DD 或 YYYY-MM-DDTHH:mm；原文未写年份时用 --MM-DD 或 --MM-DDTHH:mm","people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"这条线索的简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
+约束：人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；日期时间和事件必须在对应原文中明确出现；原文只写月日时，保留为 --MM-DD 格式，不得补年份；没有明确写出的时分不得补齐。线索主题只能简要归纳该原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
   const data = {
     model: 'deepseek-chat',
     stream: false,

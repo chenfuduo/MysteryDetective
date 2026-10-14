@@ -2,12 +2,13 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { IonApp } from '@ionic/vue'
 import { VueFlow, type Connection, type Node, type Edge } from '@vue-flow/core'
-import { Timeline } from 'vis-timeline/standalone'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import UiIcon from './components/UiIcon.vue'
 import AnnotationEditor from './components/AnnotationEditor.vue'
 import OrganizationOverview from './components/OrganizationOverview.vue'
+import RelationshipExplorer from './components/RelationshipExplorer.vue'
+import TimelineExplorer from './components/TimelineExplorer.vue'
 import * as organizer from './services/organizer'
 import * as vault from './services/vault'
 import type { ScriptRecord, ClueRecord, PersonRecord, RelationshipRecord, TimelineRecord, BoardItemRecord, BoardLinkRecord, NoteRecord, OrganizationSnapshot, OrganizationTimelineSuggestion } from './services/vault'
@@ -74,13 +75,8 @@ const boardLinkForm = reactive({ fromId: '', toId: '', label: '' })
 const timelinePersonFilter = ref('')
 const timelineSpacingScale = ref(Number(localStorage.getItem('clue-vault:timeline-scale')) || 1)
 const timelineOrientation = ref<'portrait' | 'landscape'>('landscape')
-const datedTimelineElement = ref<HTMLElement | null>(null)
-const yearlessTimelineElement = ref<HTMLElement | null>(null)
-let datedTimelineInstance: Timeline | null = null
-let yearlessTimelineInstance: Timeline | null = null
-let datedTimelineViewport: { start: Date; end: Date } | null = null
-let yearlessTimelineViewport: { start: Date; end: Date } | null = null
-let appliedTimelineScale = timelineSpacingScale.value
+const timelineImmersive = ref(false)
+const timelineExplorer = ref<{ enterFullscreen: () => void } | null>(null)
 let timelineOrientationQuery: MediaQueryList | null = null
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let searchSequence = 0
@@ -91,19 +87,24 @@ const nav = [
   { id: 'organize', label: '整理总览', icon: 'board' },
   { id: 'settings', label: '剧本管理', icon: 'file' },
 ] as const
+const toolNav = [
+  { id: 'profiles', label: '人物档案', icon: 'person', view: 'people', section: 'profiles' },
+  { id: 'relationships', label: '人物关系', icon: 'relationship', view: 'people', section: 'relationships' },
+  { id: 'timeline', label: '时间线', icon: 'clock', view: 'timeline' },
+  { id: 'board', label: '整理板', icon: 'board', view: 'board' },
+  { id: 'notes', label: '笔记', icon: 'note', view: 'notes' },
+  { id: 'compare', label: '线索对照', icon: 'compare', view: 'compare' },
+] as const
+const activeToolId = computed(() => view.value === 'people' ? relationGraph.value ? 'relationships' : 'profiles' : view.value)
 const activeNavId = computed(() => ['people', 'timeline', 'board', 'notes', 'compare'].includes(view.value) ? 'organize' : view.value)
-const viewLabel = computed(() => ({ clues: '线索库', organize: '整理总览', people: '人物档案', timeline: '时间线', board: '自由整理板', notes: '笔记', compare: '线索对照', settings: '剧本管理' })[view.value])
+const viewLabel = computed(() => view.value === 'people' && relationGraph.value ? '人物关系' : ({ clues: '线索库', organize: '整理总览', people: '人物档案', timeline: '时间线', board: '自由整理板', notes: '笔记', compare: '线索对照', settings: '剧本管理' })[view.value])
 const activeScript = computed(() => scripts.value.find(item => item.id === activeScriptId.value))
 const selectedClue = computed(() => clues.value.find(item => item.id === detailId.value))
 const selectedBoardItem = computed(() => boardItems.value.find(item => item.id === selectedBoardId.value))
 const compareClues = computed(() => compareIds.value.map(id => clues.value.find(item => item.id === id)).filter((item): item is ClueRecord => Boolean(item)))
 const confirmedEvents = computed(() => events.value.filter(item => item.confirmed))
-const datedConfirmedEvents = computed(() => confirmedEvents.value.filter(item => !item.startsAt.startsWith('--')).sort((a, b) => a.startsAt.localeCompare(b.startsAt)))
-const yearlessEvents = computed(() => sortedConfirmedEvents.value.filter(item => item.startsAt.startsWith('--')))
 const sortedConfirmedEvents = computed(() => [...confirmedEvents.value].sort((a, b) => Number(a.startsAt.startsWith('--')) - Number(b.startsAt.startsWith('--')) || a.startsAt.localeCompare(b.startsAt)))
 const visibleTimelineEvents = computed(() => sortedConfirmedEvents.value.filter(event => !timelinePersonFilter.value || event.personIds.includes(timelinePersonFilter.value)))
-const visibleDatedEvents = computed(() => visibleTimelineEvents.value.filter(event => !event.startsAt.startsWith('--')))
-const visibleYearlessEvents = computed(() => visibleTimelineEvents.value.filter(event => event.startsAt.startsWith('--')))
 const candidateEvents = computed(() => events.value.filter(item => !item.confirmed))
 const cropStyle = computed(() => {
   if (!cropStart.value || !cropEnd.value) return {}
@@ -134,14 +135,7 @@ const boardNodes = computed<Node[]>(() => boardItems.value.map(item => ({
   style: { background: item.color || '#fffaf0' },
 })))
 const boardEdges = computed<Edge[]>(() => boardLinks.value.map(link => ({ id: link.id, source: link.fromId, target: link.toId, label: link.label || undefined, animated: false, style: { stroke: '#8b7f70', strokeWidth: 2 } })))
-const relationNodes = computed<Node[]>(() => people.value.map((person, index) => ({
-  id: person.id,
-  position: { x: 65 + (index % 3) * 240, y: 55 + Math.floor(index / 3) * 145 },
-  data: { label: person.name },
-  draggable: false,
-  class: 'relationship-node',
-})))
-const relationEdges = computed<Edge[]>(() => relationships.value.map(link => ({ id: link.id, source: link.fromId, target: link.toId, label: link.label, style: { stroke: '#c08d60', strokeWidth: 2 } })))
+const personClueCounts = computed(() => Object.fromEntries(people.value.map(person => [person.id, personClueCount(person)])))
 
 function notify(message: string) {
   toast.value = message
@@ -150,7 +144,7 @@ function notify(message: string) {
 }
 function dateLabel(value: string) {
   if (!value) return '未设置日期'
-  const partial = value.match(/^--(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
+  const partial = value.match(/^--(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2})(?::\d{2})?)?)?$/)
   if (partial) return `${Number(partial[1])}月${Number(partial[2])}日${partial[3] ? ` ${partial[4] ? `${partial[3]}:${partial[4]}` : `${partial[3]}时`}` : ''}`
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' }).format(date)
@@ -250,6 +244,12 @@ function switchView(next: typeof view.value, section?: 'profiles' | 'relationshi
   if (next === 'people' && section) relationGraph.value = section === 'relationships'
   mode.value = next === 'clues' ? 'capture' : 'organize'
 }
+function openTool(item: typeof toolNav[number]) { switchView(item.view, 'section' in item ? item.section : undefined) }
+function openGraphPerson(id: string) { const person = people.value.find(item => item.id === id); if (person) openPersonDialog(person) }
+function viewPersonClues(id: string) { query.value = ''; filterRound.value = ''; filterCategory.value = ''; favoriteOnly.value = false; filterPerson.value = id; switchView('clues') }
+function openTimelineClue(id: string) { const clue = clues.value.find(item => item.id === id); if (clue) openClue(clue) }
+function openTimelineFullscreen() { timelineImmersive.value = true; nextTick(() => timelineExplorer.value?.enterFullscreen()) }
+function openRelationshipDialog() { relationForm.fromId = ''; relationForm.toId = ''; relationForm.label = ''; relationshipDialog.value = true }
 function selectScript(id: string) {
   if (busy.value) return notify('当前操作完成后再切换剧本')
   activeScriptId.value = id
@@ -663,108 +663,12 @@ async function importArchive() {
     await loadScripts(); await loadWorkspace()
   }, '档案已导入')
 }
-function timelineEventTime(event: TimelineRecord) {
-  const value = event.startsAt.startsWith('--') ? `2000-${event.startsAt.slice(2)}` : event.startsAt
-  const timestamp = Date.parse(value)
-  return Number.isNaN(timestamp) ? 0 : timestamp
-}
-function timelineWindow(items: TimelineRecord[], scale = timelineSpacingScale.value) {
-  const times = items.map(timelineEventTime).sort((a, b) => a - b)
-  const first = times[0] ?? Date.now()
-  const last = times[times.length - 1] ?? first
-  const span = Math.max(last - first, 3 * 60 * 60 * 1000) * 1.16 / scale
-  const center = (first + last) / 2
-  return { start: new Date(center - span / 2), end: new Date(center + span / 2) }
-}
-function timelineAxisLabel(date: Date, scale: string, major = false) {
-  const momentLike = date as Date & { toDate?: () => Date }
-  const value = momentLike.toDate?.() ?? date
-  const format = (options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat('zh-CN-u-ca-gregory-nu-latn', options).format(value)
-  if (scale === 'millisecond') return `${String(value.getMilliseconds()).padStart(3, '0')} 毫秒`
-  if (scale === 'second') return format({ hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
-  if (scale === 'minute' || scale === 'hour') return major ? format({ month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : format({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-  if (scale === 'weekday') return format(major ? { year: 'numeric', month: '2-digit', day: '2-digit' } : { month: '2-digit', day: '2-digit', weekday: 'short' })
-  if (scale === 'day' || scale === 'week') return format(major ? { year: 'numeric', month: '2-digit' } : { month: '2-digit', day: '2-digit' })
-  if (scale === 'month') return format({ year: 'numeric', month: '2-digit' })
-  if (scale === 'year') return format({ year: 'numeric' })
-  return format({ year: 'numeric', month: '2-digit', day: '2-digit' })
-}
-function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], visibleEvents: TimelineRecord[], yearless = false, initialRange?: { start: Date; end: Date } | null) {
-  if (!host || !allEvents.length || !visibleEvents.length) return null
-  const range = initialRange ?? timelineWindow(allEvents)
-  const items = visibleEvents.map(event => ({
-    id: event.id,
-    content: timelineEventTitle(event),
-    start: new Date(timelineEventTime(event)),
-    title: `${timelineDateLabel(event.startsAt)} · ${timelineEventTitle(event)}${yearless ? '（无年份）' : ''}`,
-  }))
-  const instance = new Timeline(host, items, {
-    locale: 'zh-cn',
-    locales: { 'zh-cn': { current: '现在', time: '时间', deleteSelected: '删除所选项' } },
-    format: { minorLabels: (date, scale) => timelineAxisLabel(date, scale), majorLabels: (date, scale) => timelineAxisLabel(date, scale, true) },
-    stack: true,
-    zoomKey: 'ctrlKey',
-    margin: { item: 18 },
-    height: '100%',
-    showCurrentTime: false,
-    start: range.start,
-    end: range.end,
-  })
-  instance.on('select', properties => {
-    const id = properties.items?.[0]
-    if (id) openEventDialog(events.value.find(item => item.id === id))
-  })
-  return instance
-}
-function buildTimelineCharts() {
-  if (datedTimelineInstance) datedTimelineViewport = datedTimelineInstance.getWindow()
-  if (yearlessTimelineInstance) yearlessTimelineViewport = yearlessTimelineInstance.getWindow()
-  datedTimelineInstance?.destroy()
-  yearlessTimelineInstance?.destroy()
-  datedTimelineInstance = null
-  yearlessTimelineInstance = null
-  if (view.value !== 'timeline' || timelineOrientation.value !== 'landscape') return
-  datedTimelineInstance = createTimeline(datedTimelineElement.value, datedConfirmedEvents.value, visibleDatedEvents.value, false, datedTimelineViewport)
-  yearlessTimelineInstance = createTimeline(yearlessTimelineElement.value, yearlessEvents.value, visibleYearlessEvents.value, true, yearlessTimelineViewport)
-  if (!datedTimelineViewport && datedTimelineInstance) datedTimelineViewport = datedTimelineInstance.getWindow()
-  if (!yearlessTimelineViewport && yearlessTimelineInstance) yearlessTimelineViewport = yearlessTimelineInstance.getWindow()
-  appliedTimelineScale = timelineSpacingScale.value
-}
-function setTimelineViewport(instance: Timeline | null, items: TimelineRecord[], range: { start: Date; end: Date } | null) {
-  if (!items.length) return null
-  const next = range ?? timelineWindow(items, 1)
-  instance?.setWindow(next.start, next.end, { animation: false })
-  return next
-}
-function updateTimelineScale(scale: number) {
-  const factor = appliedTimelineScale / scale
-  if (!Number.isFinite(factor) || factor <= 0 || factor === 1) return
-  const resizeViewport = (instance: Timeline | null, viewport: { start: Date; end: Date } | null) => {
-    const current = instance?.getWindow() ?? viewport
-    if (!current) return viewport
-    const center = (current.start.getTime() + current.end.getTime()) / 2
-    const span = Math.max(60_000, (current.end.getTime() - current.start.getTime()) * factor)
-    const next = { start: new Date(center - span / 2), end: new Date(center + span / 2) }
-    instance?.setWindow(next.start, next.end, { animation: false })
-    return next
-  }
-  datedTimelineViewport = resizeViewport(datedTimelineInstance, datedTimelineViewport)
-  yearlessTimelineViewport = resizeViewport(yearlessTimelineInstance, yearlessTimelineViewport)
-  appliedTimelineScale = scale
-}
-function fitTimelineCharts() {
-  timelineSpacingScale.value = 1
-  appliedTimelineScale = 1
-  datedTimelineViewport = setTimelineViewport(datedTimelineInstance, datedConfirmedEvents.value, timelineWindow(datedConfirmedEvents.value, 1))
-  yearlessTimelineViewport = setTimelineViewport(yearlessTimelineInstance, yearlessEvents.value, timelineWindow(yearlessEvents.value, 1))
-}
 function updateTimelineOrientation() {
   timelineOrientation.value = timelineOrientationQuery?.matches ? 'portrait' : 'landscape'
 }
-watch(timelineSpacingScale, value => { localStorage.setItem('clue-vault:timeline-scale', String(value)); updateTimelineScale(value) })
-watch([view, visibleDatedEvents, visibleYearlessEvents, timelineOrientation], async () => { await nextTick(); buildTimelineCharts() })
-watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize' })
-watch(activeScriptId, async () => { query.value = ''; searchIds.value = null; timelinePersonFilter.value = ''; datedTimelineInstance?.destroy(); yearlessTimelineInstance?.destroy(); datedTimelineInstance = null; yearlessTimelineInstance = null; datedTimelineViewport = null; yearlessTimelineViewport = null; appliedTimelineScale = timelineSpacingScale.value; await loadWorkspace() })
+watch(timelineSpacingScale, value => localStorage.setItem('clue-vault:timeline-scale', String(value)))
+watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize'; if (next !== 'timeline') timelineImmersive.value = false })
+watch(activeScriptId, async () => { query.value = ''; searchIds.value = null; timelinePersonFilter.value = ''; timelineImmersive.value = false; await loadWorkspace() })
 watch(query, async value => {
   const sequence = ++searchSequence
   if (!value.trim() || !activeScriptId.value) { searchIds.value = null; return }
@@ -780,7 +684,7 @@ onMounted(async () => {
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
   try { apiKeyConfigured.value = await organizer.hasApiKey() } catch { apiKeyConfigured.value = false }
 })
-onUnmounted(() => { datedTimelineInstance?.destroy(); yearlessTimelineInstance?.destroy(); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
+onUnmounted(() => { timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -793,11 +697,11 @@ onUnmounted(() => { datedTimelineInstance?.destroy(); yearlessTimelineInstance?.
           <button class="script-switcher-button" @click="view = 'settings'"><span class="script-cover-mini" :style="activeScript.coverPath && imageUrls[activeScript.coverPath] ? { backgroundImage: `url(${imageUrls[activeScript.coverPath]})` } : {}"><UiIcon v-if="!activeScript.coverPath" name="file" :size="18" /></span><span class="switcher-name">{{ activeScript.name }}<small>{{ dateLabel(activeScript.playDate) }}</small></span><UiIcon name="chevron" :size="16" /></button>
         </div>
         <div class="sidebar-section-title">工作空间</div>
-        <nav class="primary-nav" aria-label="主导航"><button v-for="item in nav" :key="item.id" :class="['nav-item', { active: activeNavId === item.id }]" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="19" /><span>{{ item.label }}</span><span v-if="item.id === 'compare' && compareIds.length" class="nav-count">{{ compareIds.length }}</span></button></nav>
+        <nav class="primary-nav" aria-label="主导航"><button v-for="item in nav" :key="item.id" :class="['nav-item', { active: view === item.id }]" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="19" /><span>{{ item.label }}</span></button></nav><template v-if="activeScript"><div class="sidebar-section-title tools-section-title">整理工具</div><nav class="tools-nav" aria-label="整理工具导航"><button v-for="item in toolNav" :key="item.id" :class="['nav-item', { active: activeToolId === item.id }]" @click="openTool(item)"><UiIcon :name="item.icon" :size="19" /><span>{{ item.label }}</span><span v-if="item.id === 'compare' && compareIds.length" class="nav-count">{{ compareIds.length }}</span></button></nav></template>
         <div class="sidebar-bottom"><div class="offline-chip"><span class="offline-dot"></span>本机保存 · AI 可选</div><button class="sidebar-small-button" @click="openScriptDialog()"><UiIcon name="plus" :size="16" />新建剧本</button></div>
       </aside>
       <main class="main-panel">
-        <header class="topbar"><div class="topbar-title"><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
+        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
         <div v-if="!activeScript" class="empty-home"><div class="empty-art"><div class="art-paper art-paper-one"></div><div class="art-paper art-paper-two"></div><div class="art-paper art-paper-three"><UiIcon name="search" :size="38" /></div></div><h1>从一个剧本开始</h1><p>拍下线索，OCR 文字在本机识别。需要时可选择 AI 整理。</p><div class="empty-home-actions"><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button><button class="secondary-button" @click="importArchive"><UiIcon name="upload" :size="18" />导入档案</button></div></div>
         <template v-else>
           <section v-if="view === 'clues'" class="page page-clues">
@@ -808,17 +712,18 @@ onUnmounted(() => { datedTimelineInstance?.destroy(); yearlessTimelineInstance?.
             <div v-else :class="['clue-collection', layout]"><article v-for="clue in visibleClues" :key="clue.id" class="clue-card" @click="openClue(clue)"><div class="clue-image"><img v-if="imageUrls[clue.displayImagePath || clue.imagePath]" :src="imageUrls[clue.displayImagePath || clue.imagePath]" :alt="clue.title" :style="{ transform: `rotate(${clue.rotation}deg)` }" /><UiIcon v-else name="image" :size="31" /><span class="clue-number">#{{ String(clue.number).padStart(3, '0') }}</span><button :class="['favorite-button', { active: clue.favorite }]" title="收藏线索" @click.stop="toggleFavorite(clue)"><UiIcon name="heart" :size="17" /></button></div><div class="clue-card-body"><div class="clue-card-meta"><span v-if="clue.round">{{ clue.round }}</span><span v-if="clue.category">{{ clue.category }}</span></div><h2 v-html="highlight(clue.title)"></h2><p v-if="clue.ocrText" v-html="highlight(shortText(clue.ocrText, layout === 'list' ? 165 : 74))"></p><p v-else class="muted">暂无识别文字</p><div class="clue-card-foot"><span>{{ dateLabel(clue.createdAt) }}</span><button :class="['compare-pick', { active: compareIds.includes(clue.id) }]" @click.stop="toggleCompare(clue.id)"><UiIcon name="compare" :size="15" />{{ compareIds.includes(clue.id) ? '已对照' : '加入对照' }}</button></div></div></article></div>
           </section>
           <OrganizationOverview v-else-if="view === 'organize'" :clues="clues" :people="people" :relationships="relationships" :events="events" :organization="organization" :busy="busy" :auto-organize="autoOrganize" :api-configured="apiKeyConfigured" @analyze="runOrganization" @navigate="switchView" @open-clue="openSourceClue" @accept-person="acceptPersonSuggestion" @accept-relationship="acceptRelationshipSuggestion" @accept-timeline="acceptTimelineSuggestion" @accept-clue-point="acceptCluePointSuggestion" @clear-suggestions="clearOrganizationSuggestions" />
-          <section v-else-if="view === 'people'" class="page"><div class="page-header"><div><h1>{{ relationGraph ? '人物关系' : '人物档案' }}</h1><p>{{ relationGraph ? '查看你手动建立的人物关系。' : '名字匹配来自已保存线索；人物之间的关系由你亲自建立。' }}</p></div><div class="header-actions"><button class="secondary-button" :disabled="people.length < 2" @click="relationForm.fromId = ''; relationForm.toId = ''; relationForm.label = ''; relationshipDialog = true"><UiIcon name="plus" :size="18" />添加关系</button><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div></div><div class="subtabs"><button :class="{ active: !relationGraph }" @click="relationGraph = false">人物列表</button><button :class="{ active: relationGraph }" @click="relationGraph = true">关系图</button></div><div v-if="!people.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="people" :size="31" /></div><h2>建立人物档案</h2><p>添加人物姓名后，可以自动找到提及姓名的线索。</p><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div><div v-else-if="relationGraph" class="graph-shell"><VueFlow :nodes="relationNodes" :edges="relationEdges" :fit-view-on-init="true" :nodes-connectable="false" :edges-updatable="false"><Background :gap="24" :size="1" pattern-color="#e2ddd5" /><Controls /></VueFlow><div v-if="relationships.length" class="graph-legend"><div v-for="link in relationships" :key="link.id"><span>{{ people.find(p => p.id === link.fromId)?.name }} — {{ link.label }} — {{ people.find(p => p.id === link.toId)?.name }}</span><button title="删除关系" @click="removeRelationship(link.id)"><UiIcon name="close" :size="14" /></button></div></div></div><div v-else class="people-grid"><article v-for="person in people" :key="person.id" class="person-card"><div class="person-avatar"><img v-if="person.photoPath && imageUrls[person.photoPath]" :src="imageUrls[person.photoPath]" :alt="person.name" /><span v-else>{{ person.name.slice(0, 1) }}</span></div><div class="person-card-main"><h2>{{ person.name }}</h2><p v-if="person.aliases.length">又名 {{ person.aliases.join('、') }}</p><p v-else class="muted">暂无别名</p></div><div class="person-card-meta">{{ personClueCount(person) }} 条相关线索</div><p v-if="person.notes" class="person-card-notes">{{ shortText(person.notes, 82) }}</p><div class="person-card-actions"><button @click="filterPerson = person.id; view = 'clues'">查看线索 <UiIcon name="chevron" :size="15" /></button><button title="编辑人物" @click="openPersonDialog(person)"><UiIcon name="edit" :size="17" /></button><button title="删除人物" @click="removePerson(person)"><UiIcon name="trash" :size="17" /></button></div></article></div></section>
-          <section v-else-if="view === 'timeline'" class="page timeline-page">
+          <section v-else-if="view === 'people'" class="page people-page" :class="{ 'relationship-page': relationGraph }"><div class="page-header"><div><h1>{{ relationGraph ? '人物关系' : '人物档案' }}</h1><p>{{ relationGraph ? '查看你手动建立的人物关系。' : '名字匹配来自已保存线索；人物之间的关系由你亲自建立。' }}</p></div><div class="header-actions"><button v-if="!relationGraph" class="secondary-button" :disabled="people.length < 2" @click="relationForm.fromId = ''; relationForm.toId = ''; relationForm.label = ''; relationshipDialog = true"><UiIcon name="plus" :size="18" />添加关系</button><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div></div><div class="subtabs"><button :class="{ active: !relationGraph }" @click="relationGraph = false">人物列表</button><button :class="{ active: relationGraph }" @click="relationGraph = true">关系图</button></div><div v-if="!people.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="people" :size="31" /></div><h2>建立人物档案</h2><p>添加人物姓名后，可以自动找到提及姓名的线索。</p><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div><RelationshipExplorer v-else-if="relationGraph" :key="activeScriptId" :people="people" :relationships="relationships" :image-urls="imageUrls" :clue-counts="personClueCounts" :script-id="activeScriptId" @open-person="openGraphPerson" @view-clues="viewPersonClues" @remove-relationship="removeRelationship" @add-relationship="openRelationshipDialog" /><div v-else class="people-grid"><article v-for="person in people" :key="person.id" class="person-card"><div class="person-avatar"><img v-if="person.photoPath && imageUrls[person.photoPath]" :src="imageUrls[person.photoPath]" :alt="person.name" /><span v-else>{{ person.name.slice(0, 1) }}</span></div><div class="person-card-main"><h2>{{ person.name }}</h2><p v-if="person.aliases.length">又名 {{ person.aliases.join('、') }}</p><p v-else class="muted">暂无别名</p></div><div class="person-card-meta">{{ personClueCount(person) }} 条相关线索</div><p v-if="person.notes" class="person-card-notes">{{ shortText(person.notes, 82) }}</p><div class="person-card-actions"><button @click="filterPerson = person.id; view = 'clues'">查看线索 <UiIcon name="chevron" :size="15" /></button><button title="编辑人物" @click="openPersonDialog(person)"><UiIcon name="edit" :size="17" /></button><button title="删除人物" @click="removePerson(person)"><UiIcon name="trash" :size="17" /></button></div></article></div></section>
+          <section v-else-if="view === 'timeline'" class="page timeline-page" :class="{ 'timeline-page-landscape': timelineOrientation === 'landscape' }">
             <div class="page-header"><div><h1>时间线</h1><p>只展示你确认的事件，不补全未知经过。</p></div><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div>
+            <details v-if="organization?.timeline.length || candidateEvents.length" class="timeline-pending"><summary>待确认时间点 <span>{{ (organization?.timeline.length || 0) + candidateEvents.length }}</span><UiIcon name="chevron" :size="16" /></summary><div class="timeline-pending-content">
             <div v-if="organization?.timeline.length" class="candidate-list ai-timeline-list"><div class="section-label">待确认时间点</div><p>AI 和 OCR 原文扫描结果会显示在这里。无年份的时间也可以录入，保存后会标记；标记可单独忽略。</p><article v-for="suggestion in organization.timeline" :key="suggestion.id"><div class="ai-timeline-main"><strong>{{ suggestion.title }}</strong><span>{{ dateLabel(suggestion.startsAt) }}</span><em v-if="suggestion.startsAt.startsWith('--')" class="ai-timeline-yearless">无年份</em><small>“{{ suggestion.quote }}”</small></div><button @click="openSourceClue(suggestion.sourceNo)">原线索 #{{ String(suggestion.sourceNo).padStart(3, '0') }}</button><button class="primary-button" @click="acceptTimelineSuggestion(suggestion.id)">{{ suggestion.startsAt.startsWith('--') ? '录入无年份' : suggestion.requiresTitle || !/T\d{2}:\d{2}$/.test(suggestion.startsAt) ? '补充并确认' : '确认并加入' }}</button></article></div>
             <div v-if="candidateEvents.length" class="candidate-list"><div class="section-label">待确认的时间</div><p>以下日期来自照片文字识别。请核对原图并填写事件后再加入时间线。</p><article v-for="candidate in candidateEvents" :key="candidate.id"><span>{{ dateLabel(candidate.startsAt) }}</span><button v-if="candidate.clueId" @click="clues.find(clue => clue.id === candidate.clueId) && openClue(clues.find(clue => clue.id === candidate.clueId)!)">查看原图</button><button class="primary-button" @click="openEventDialog(candidate)">确认事件</button></article></div>
+            </div></details>
             <div v-if="!confirmedEvents.length && !organization?.timeline.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="timeline" :size="31" /></div><h2>等待第一条确认的事件</h2><p>从线索里找到明确的时间，再由你录入事件。</p><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div>
             <template v-else-if="confirmedEvents.length">
-              <div class="timeline-controls"><label><span>人物筛选</span><select v-model="timelinePersonFilter" aria-label="按人物筛选时间线"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><label class="timeline-scale-control"><span>时间间距 <strong>{{ Math.round(timelineSpacingScale * 100) }}%</strong></span><input v-model.number="timelineSpacingScale" type="range" min="0.5" max="4" step="0.1" aria-label="时间线间距缩放" /></label><span class="timeline-visible-count">{{ visibleTimelineEvents.length }} / {{ confirmedEvents.length }} 个事件</span><button class="secondary-button timeline-fit-button" title="恢复到包含全部事件的视图" @click="fitTimelineCharts">显示全部</button></div>
-              <div v-if="visibleDatedEvents.length && timelineOrientation === 'landscape'" class="timeline-visual"><div class="section-label">时间概览</div><div ref="datedTimelineElement" class="vis-timeline-host"></div></div>
-              <div v-if="visibleYearlessEvents.length && timelineOrientation === 'landscape'" class="timeline-visual yearless-timeline-visual"><div class="yearless-timeline-heading"><div class="section-label">无年份时间线</div><p>按月日和时刻排列，不代表具体年份。点击事件可编辑。</p></div><div ref="yearlessTimelineElement" class="vis-timeline-host yearless-vis"></div></div>
-              <div v-if="!visibleTimelineEvents.length" class="timeline-filter-empty">没有与该人物关联的已确认事件。</div>
+              <TimelineExplorer v-if="timelineOrientation === 'landscape' || timelineImmersive" ref="timelineExplorer" :key="activeScriptId" :events="confirmedEvents" :people="people" :clues="clues" :script-id="activeScriptId" v-model:person-id="timelinePersonFilter" v-model:scale="timelineSpacingScale" @edit-event="openEventDialog" @open-clue="openTimelineClue" @toggle-marker="toggleYearlessMarker" @fullscreen-change="timelineImmersive = $event" />
+              <div v-if="timelineOrientation === 'portrait'" class="timeline-controls"><label><span>人物筛选</span><select v-model="timelinePersonFilter" aria-label="按人物筛选时间线"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><span class="timeline-visible-count">{{ visibleTimelineEvents.length }} / {{ confirmedEvents.length }} 个事件</span><button class="secondary-button" @click="openTimelineFullscreen"><UiIcon name="fullscreen" :size="17" />全屏查看</button></div>
+              <div v-if="!visibleTimelineEvents.length && timelineOrientation === 'portrait'" class="timeline-filter-empty">没有与该人物关联的已确认事件。</div>
               <div v-if="visibleTimelineEvents.length && timelineOrientation === 'portrait'" class="timeline-list"><article v-for="event in visibleTimelineEvents" :key="event.id" class="timeline-event"><div class="timeline-event-marker"></div><div class="timeline-event-date">{{ timelineDateLabel(event.startsAt) }}<span v-if="event.startsAt.startsWith('--') && !event.yearlessMarkerIgnored" class="yearless-pill">无年份</span><button v-if="event.startsAt.startsWith('--')" class="timeline-marker-action" @click.stop="toggleYearlessMarker(event)">{{ event.yearlessMarkerIgnored ? '显示标记' : '忽略标记' }}</button></div><div class="timeline-event-content"><h2>{{ timelineEventTitle(event) }}</h2><div class="timeline-event-refs"><span v-for="id in event.personIds" :key="id">{{ people.find(person => person.id === id)?.name }}</span><button v-if="event.clueId" @click="clues.find(clue => clue.id === event.clueId) && openClue(clues.find(clue => clue.id === event.clueId)!)">查看原始线索 <UiIcon name="chevron" :size="13" /></button></div></div><div class="row-actions"><button title="编辑" @click="openEventDialog(event)"><UiIcon name="edit" :size="17" /></button><button title="删除" @click="removeEvent(event.id)"><UiIcon name="trash" :size="17" /></button></div></article></div>
             </template>
           </section>
@@ -829,6 +734,7 @@ onUnmounted(() => { datedTimelineInstance?.destroy(); yearlessTimelineInstance?.
         </template>
       </main>
       <nav class="mobile-nav" aria-label="底部导航"><button v-for="item in nav" :key="item.id" :class="{ active: activeNavId === item.id }" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="21" /><span>{{ item.label }}</span></button></nav>
+      <Teleport to="body">
       <div v-if="toast" class="toast" role="status">{{ toast }}</div>
       <div v-if="scriptDialog" class="modal-backdrop" @click.self="scriptDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ editingScriptId ? '编辑剧本' : '新建剧本' }}</h2><button title="关闭" @click="scriptDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>剧本名称<input v-model="scriptForm.name" maxlength="80" placeholder="输入剧本名称" /></label><label>游玩日期<input v-model="scriptForm.playDate" type="date" /></label><div class="image-picker-row"><div class="image-picker-preview" :style="scriptForm.coverPath ? { backgroundImage: `url(${scriptForm.coverPath.startsWith('data:') ? scriptForm.coverPath : imageUrls[scriptForm.coverPath] || ''})` } : {}"><UiIcon v-if="!scriptForm.coverPath" name="image" :size="22" /></div><button class="secondary-button" @click="chooseCover">选择封面照片</button></div></div><div class="modal-actions"><button class="secondary-button" @click="scriptDialog = false">取消</button><button class="primary-button" :disabled="busy" @click="saveScript">保存剧本</button></div></div></div>
       <div v-if="clueDialog && selectedClue" class="modal-backdrop clue-backdrop" @click.self="clueDialog = false"><div class="modal clue-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">线索 #{{ String(selectedClue.number).padStart(3, '0') }}</span><h2>{{ selectedClue.title }}</h2></div><button title="关闭" @click="clueDialog = false"><UiIcon name="close" :size="20" /></button></div><div class="clue-detail-layout"><div class="clue-photo-panel"><div class="photo-stage" :class="{ zoomed: photoZoom }" @click="photoZoom = !photoZoom"><img v-if="imageUrls[selectedClue.imagePath]" :src="imageUrls[selectedClue.imagePath]" :alt="selectedClue.title" :style="{ transform: `rotate(${selectedClue.rotation}deg)` }" /><UiIcon v-else name="image" :size="40" /></div><div class="photo-tools"><span>原始照片</span><button @click="capture"><UiIcon name="camera" :size="18" />继续拍摄</button><button title="放大或缩小" @click="photoZoom = !photoZoom"><UiIcon name="zoomIn" :size="18" />{{ photoZoom ? '缩小' : '放大' }}</button><button @click="rotatePhoto(selectedClue)"><UiIcon name="rotate" :size="18" />旋转</button><button @click="openCrop"><UiIcon name="image" :size="18" />裁剪</button><button @click="annotationOpen = true"><UiIcon name="edit" :size="18" />标注</button></div></div><div class="clue-editor"><div class="editor-section"><span class="section-label">基础信息</span><label>标题<input v-model="clueForm.title" /></label><div class="two-fields"><label>搜证轮次<input v-model="clueForm.round" placeholder="如：第一轮" /></label><label>分类<input v-model="clueForm.category" placeholder="如：物证" /></label></div><label>标签<input v-model="clueForm.tags" placeholder="用逗号分隔" /></label></div><div class="editor-section"><span class="section-label">OCR 识别文字 <small>可直接修正错误</small></span><textarea v-model="clueForm.ocrText" rows="8" placeholder="照片中暂未识别出文字"></textarea></div><div class="editor-section"><span class="section-label">备注</span><textarea v-model="clueForm.notes" rows="3" placeholder="写下你的观察"></textarea></div><div class="clue-editor-bottom"><button class="danger-text" @click="removeClue(selectedClue)"><UiIcon name="trash" :size="17" />删除线索</button><div><button class="secondary-button" @click="toggleCompare(selectedClue)"><UiIcon name="compare" :size="17" />{{ compareIds.includes(selectedClue.id) ? '移出对照' : '加入对照' }}</button><button class="primary-button" :disabled="busy" @click="saveClue">保存修改</button></div></div></div></div></div></div>
@@ -840,6 +746,7 @@ onUnmounted(() => { datedTimelineInstance?.destroy(); yearlessTimelineInstance?.
       <div v-if="boardLinkDialog" class="modal-backdrop" @click.self="boardLinkDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>手动连接卡片</h2><button title="关闭" @click="boardLinkDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>起点<select v-model="boardLinkForm.fromId"><option value="">选择卡片</option><option v-for="item in boardItems" :key="item.id" :value="item.id">{{ item.text || (item.kind === 'clue' ? clues.find(clue => clue.id === item.refId)?.title : people.find(person => person.id === item.refId)?.name) }}</option></select></label><label>终点<select v-model="boardLinkForm.toId"><option value="">选择卡片</option><option v-for="item in boardItems" :key="item.id" :value="item.id">{{ item.text || (item.kind === 'clue' ? clues.find(clue => clue.id === item.refId)?.title : people.find(person => person.id === item.refId)?.name) }}</option></select></label><label>连接说明<input v-model="boardLinkForm.label" placeholder="可选" /></label></div><div class="modal-actions"><button class="secondary-button" @click="boardLinkDialog = false">取消</button><button class="primary-button" @click="saveBoardLink">连接卡片</button></div></div></div>
       <div v-if="cropDialog && selectedClue" class="modal-backdrop crop-backdrop" @click.self="cropDialog = false"><div class="crop-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2>裁剪线索照片</h2><p>在原图上拖动，选择需要保留的范围。原图始终保留。</p></div><button title="关闭" @click="cropDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="crop-stage"><div class="crop-image-frame" @pointerdown="beginCrop" @pointermove="moveCrop" @pointerup="endCrop" @pointercancel="endCrop"><img ref="cropImage" :src="imageUrls[selectedClue.imagePath]" :alt="selectedClue.title" draggable="false" /><div v-if="cropStart && cropEnd" class="crop-selection" :style="cropStyle"></div></div></div><div class="modal-actions"><button class="secondary-button" @click="cropDialog = false">取消</button><button class="primary-button" :disabled="busy || !cropStart || !cropEnd" @click="applyCrop">保存裁剪</button></div></div></div>
       <AnnotationEditor v-if="annotationOpen && selectedClue" :clue-id="selectedClue.id" :image-url="imageUrls[selectedClue.imagePath] || ''" :rotation="selectedClue.rotation" @close="annotationOpen = false" @saved="annotationOpen = false; notify('标注已保存')" />
+      </Teleport>
     </div>
   </IonApp>
 </template>

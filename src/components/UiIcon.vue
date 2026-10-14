@@ -3,6 +3,13 @@ import { computed } from 'vue'
 
 const props = withDefaults(defineProps<{ name: string; size?: number }>(), { size: 20 })
 const paths: Record<string, string> = {
+  fullscreen: 'M8 3H3v5 M16 3h5v5 M3 16v5h5 M21 16v5h-5',
+  restore: 'M3 8h5V3 M16 3v5h5 M3 16h5v5 M21 16h-5v5',
+  cube: 'm12 3 9 5v9l-9 5-9-5V8z M3 8l9 5 9-5 M12 13v9',
+  move: 'M12 2v20 M2 12h20 M9 5l3-3 3 3 M9 19l3 3 3-3 M5 9l-3 3 3 3 M19 9l3 3-3 3',
+  relationship: 'M6 12h12 M6 12l11-7 M6 12l11 7 M6 12a3 3 0 1 0-6 0 3 3 0 0 0 6 0 M23 4a3 3 0 1 0-6 0 3 3 0 0 0 6 0 M23 20a3 3 0 1 0-6 0 3 3 0 0 0 6 0',
+  arrowLeft: 'M20 12H4 M10 6l-6 6 6 6',
+  clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l4 2',
   archive: 'M3 5h18v4H3z M5 9v11h14V9 M9 13h6',
   board: 'M3 4h18v16H3z M7 8h5v4H7z M15 8h3 M15 12h3 M7 16h11',
   camera: 'M4 7h3l2-3h6l2 3h3v13H4z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',

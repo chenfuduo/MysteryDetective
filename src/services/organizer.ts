@@ -54,7 +54,22 @@ function sourceQuote(sourceNo: number, quote: unknown, clues: ClueRecord[]): { c
   if (!clue || !excerpt || !clue.ocrText.includes(excerpt)) return null
   return { clue, quote: excerpt }
 }
-function validDate(value: unknown, quote: string): string {
+function lastExplicitDateBefore(value: string, index: number): { year: string; month: number; day: number } | null {
+  const pattern = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)/g
+  const prefix = value.slice(0, index)
+  let latest: { year: string; month: number; day: number } | null = null
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(prefix)) !== null) {
+    const year = match[1] || match[4] || ''
+    const month = Number(match[2] || match[5])
+    const day = Number(match[3] || match[6])
+    const maxDay = new Date(Date.UTC(year ? Number(year) : 2000, month, 0)).getUTCDate()
+    if (month >= 1 && month <= 12 && day >= 1 && day <= maxDay) latest = { year, month, day }
+  }
+  return latest
+}
+
+function validDate(value: unknown, quote: string, clueText: string): string {
   const candidate = text(value, 40).replace(' ', 'T')
   if (!quote) return ''
   const dateMatch = candidate.match(/^(?:(\d{4})-)?--?(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
@@ -64,14 +79,19 @@ function validDate(value: unknown, quote: string): string {
   const dayNumber = Number(day)
   const validMonthDay = monthNumber >= 1 && monthNumber <= 12 && dayNumber >= 1 && dayNumber <= new Date(Date.UTC(2000, monthNumber, 0)).getUTCDate()
   if (!validMonthDay) return ''
-  if (hour && (Number(hour) > 23 || (minute && Number(minute) > 59))) return ''
 
   const source = quote.replace(/\s/g, '')
-  const sourceDate = source.match(new RegExp(`(?:(\\d{4})年)?0?${monthNumber}月0?${dayNumber}日`))
+  const quotedDate = source.match(new RegExp(`(?:(\\d{4})年)?0?${monthNumber}月0?${dayNumber}日`))
     || source.match(new RegExp(`(?:(\\d{4})[-/.])?0?${monthNumber}[-/.]0?${dayNumber}(?:日)?`))
-  if (!sourceDate) return ''
-  const sourceYear = sourceDate[1] || ''
+  let sourceYear = quotedDate?.[1] || ''
+  if (!quotedDate) {
+    const quoteIndex = clueText.indexOf(quote)
+    const contextualDate = quoteIndex >= 0 ? lastExplicitDateBefore(clueText, quoteIndex) : null
+    if (!contextualDate || contextualDate.month !== monthNumber || contextualDate.day !== dayNumber) return ''
+    sourceYear = contextualDate.year
+  }
   if (candidateYear && sourceYear && candidateYear !== sourceYear) return ''
+  if (candidateYear && !sourceYear && !quotedDate) return ''
 
   let time = ''
   if (hour) {
@@ -88,7 +108,6 @@ function validDate(value: unknown, quote: string): string {
   }
   return `${sourceYear || '--'}${sourceYear ? '-' : ''}${month}-${day}${time}`
 }
-
 function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
   const people: OrganizationSnapshot['people'] = []
   const knownNames = new Set<string>()
@@ -115,7 +134,7 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
   for (const item of asArray(raw.timeline) as RawTimeline[]) {
     const source = sourceQuote(number(item.source), item.quote, clues)
     const title = text(item.title, 100)
-    let startsAt = validDate(item.startsAt, source?.quote || '')
+    let startsAt = validDate(item.startsAt, source?.quote || '', source?.clue.ocrText || '')
     if (!source || !title || !startsAt) continue
     const names = Array.isArray(item.people) ? item.people.map(value => text(value, 60)).filter(value => value && source.quote.includes(value)).slice(0, 8) : []
     timeline.push({ id: crypto.randomUUID(), title, startsAt, people: names, sourceNo: source.clue.number, quote: source.quote })
@@ -176,7 +195,7 @@ function extractExplicitTimeline(clues: ClueRecord[]): OrganizationSnapshot['tim
       const next = dates.find(date => date.index >= clock.end)
       const previousDistance = previous ? clock.index - previous.end : Infinity
       const nextDistance = next ? next.index - clock.end : Infinity
-      const relatedDate = previousDistance <= 180 ? previous : nextDistance <= 180 ? next : undefined
+      const relatedDate = nextDistance < previousDistance && nextDistance <= 180 ? next : previous || (nextDistance <= 180 ? next : undefined)
       if (!relatedDate) continue
       const relatedClocks = clocksByDate.get(relatedDate.index) || []
       relatedClocks.push(clock)
@@ -235,7 +254,7 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
 1. 原文中的每个明确日期都要检查同一事件或同一句中是否写有时刻。只要原文明确写了几点几分，startsAt 就必须保留到分钟，绝不能只输出日期。例如“6月17日凌晨3时04分”写成“--06-17T03:04”，“2025年6月17日 15:08”写成“2025-06-17T15:08”。
 2. 原文未写年份时使用 --MM-DD；有明确时刻时使用 --MM-DDTHH:mm。原文有年份时使用 YYYY-MM-DD 或 YYYY-MM-DDTHH:mm。不得补年份、时刻或分钟；原文只写到小时就只保留小时。
 3. 同一条线索可能包含多项日期和时刻。每个明确的日期时间都单独输出一项，按原文出现顺序逐项检查，不得漏项、合并或只保留一个代表时间。对同一事件同时识别出日期和时刻时，只输出包含时刻的完整时间，不要再为该事件重复输出一个仅有日期的项目。
-4. 只在原文明示关联时才把日期和时刻组合。若无法确定某个时刻属于哪个日期，不要猜测关联；仍保留原文明确、彼此独立的时间信息。
+4. 日期与时刻可以相隔一段描述文字。若同一条线索前文明确写出月日，后续分项没有出现新日期，则沿用最近出现的月日，直到线索中出现新的明确日期；不得跨不同线索沿用日期，也不得补年份。原文没有任何可沿用日期时，不要猜日期。
 5. 事件标题只简述原文明确写出的动作或事实，不概括动机、因果或真相。原文有明确时间但事件标题无法简洁提取时，仍输出时间建议，标题可写“待补充事件”。
 6. 每条时间建议的 quote 必须是对应 OCR 原文中的逐字连续摘录，并且尽可能同时包含该日期、时刻和事件描述，便于核对原图。source 必须是该摘录所属线索的编号。
 

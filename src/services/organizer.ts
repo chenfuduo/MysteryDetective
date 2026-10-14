@@ -76,12 +76,12 @@ function validDate(value: unknown, quote: string): string {
   let time = ''
   if (hour) {
     const clockPattern = minute
-      ? `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?0?${Number(hour)}(?:[:：]|点|时)0?${Number(minute)}分?`
-      : `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?0?${Number(hour)}(?:点|时)(?!\\d)`
+      ? `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|晚)?0?${Number(hour)}(?:[:：]|点|时)0?${Number(minute)}分?`
+      : `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|晚)?0?${Number(hour)}(?:点|时)(?!\\d)`
     const clock = source.match(new RegExp(clockPattern))
     if (clock) {
       let normalizedHour = Number(hour)
-      if (['下午', '傍晚', '晚上', '中午'].includes(clock[1]) && normalizedHour < 12) normalizedHour += 12
+      if (['下午', '傍晚', '晚上', '晚', '中午'].includes(clock[1]) && normalizedHour < 12) normalizedHour += 12
       if (['凌晨', '清晨'].includes(clock[1]) && normalizedHour === 12) normalizedHour = 0
       time = `T${String(normalizedHour).padStart(2, '0')}${minute ? `:${minute}` : ''}`
     }
@@ -119,7 +119,7 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
     if (!source || !title || !startsAt) continue
     if (!startsAt.includes('T')) {
       const quoteTimes = extractExplicitTimeline([{ ...source.clue, ocrText: source.quote }])
-        .filter(candidate => candidate.startsAt.includes('T') && candidate.startsAt.slice(-5) === startsAt.slice(-5))
+        .filter(candidate => candidate.startsAt.includes('T') && candidate.startsAt.split('T')[0].slice(-5) === startsAt.split('T')[0].slice(-5))
         .filter(candidate => {
           const suggestedYear = startsAt.startsWith('--') ? '' : startsAt.slice(0, 4)
           const detectedYear = candidate.startsAt.startsWith('--') ? '' : candidate.startsAt.slice(0, 4)
@@ -148,7 +148,7 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
 function extractExplicitTimeline(clues: ClueRecord[]): OrganizationSnapshot['timeline'] {
   const suggestions: OrganizationSnapshot['timeline'] = []
   const datePattern = /(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日/g
-  const clockPattern = /^[\s，,、:：]*(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?\s*(\d{1,2})\s*(点|时|[:：])\s*(\d{1,2})?\s*分?/
+  const clockPattern = /^[\s，,、:：]*(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|晚)?\s*(\d{1,2})\s*(点|时|[:：])\s*(\d{1,2})?\s*分?/
 
   for (const clue of clues) {
     if (!clue.ocrText.trim()) continue
@@ -168,7 +168,7 @@ function extractExplicitTimeline(clues: ClueRecord[]): OrganizationSnapshot['tim
         let hour = Number(clock[2])
         const minute = clock[4] === undefined ? '' : String(Number(clock[4])).padStart(2, '0')
         if (hour <= 23 && (!minute || Number(minute) <= 59)) {
-          if (['下午', '傍晚', '晚上', '中午'].includes(clock[1]) && hour < 12) hour += 12
+          if (['下午', '傍晚', '晚上', '晚', '中午'].includes(clock[1]) && hour < 12) hour += 12
           if (['凌晨', '清晨'].includes(clock[1]) && hour === 12) hour = 0
           time = `T${String(hour).padStart(2, '0')}${minute ? `:${minute}` : ''}`
         }

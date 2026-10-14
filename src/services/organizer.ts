@@ -57,14 +57,14 @@ function sourceQuote(sourceNo: number, quote: unknown, clues: ClueRecord[]): { c
 function validDate(value: unknown, quote: string): string {
   const candidate = text(value, 40).replace(' ', 'T')
   if (!quote) return ''
-  const dateMatch = candidate.match(/^(?:(\d{4})-)?--?(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/)
+  const dateMatch = candidate.match(/^(?:(\d{4})-)?--?(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
   if (!dateMatch) return ''
   const [, candidateYear, month, day, hour, minute] = dateMatch
   const monthNumber = Number(month)
   const dayNumber = Number(day)
   const validMonthDay = monthNumber >= 1 && monthNumber <= 12 && dayNumber >= 1 && dayNumber <= new Date(Date.UTC(2000, monthNumber, 0)).getUTCDate()
   if (!validMonthDay) return ''
-  if (hour && (Number(hour) > 23 || Number(minute) > 59)) return ''
+  if (hour && (Number(hour) > 23 || (minute && Number(minute) > 59))) return ''
 
   const source = quote.replace(/\s/g, '')
   const sourceDate = source.match(new RegExp(`(?:(\\d{4})年)?0?${monthNumber}月0?${dayNumber}日`))
@@ -74,13 +74,16 @@ function validDate(value: unknown, quote: string): string {
   if (candidateYear && sourceYear && candidateYear !== sourceYear) return ''
 
   let time = ''
-  if (hour && minute) {
-    const clock = source.match(new RegExp(`(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?0?${Number(hour)}(?:[:：]|点|时)0?${Number(minute)}分?`))
+  if (hour) {
+    const clockPattern = minute
+      ? `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?0?${Number(hour)}(?:[:：]|点|时)0?${Number(minute)}分?`
+      : `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?0?${Number(hour)}(?:点|时)(?!\\d)`
+    const clock = source.match(new RegExp(clockPattern))
     if (clock) {
       let normalizedHour = Number(hour)
       if (['下午', '傍晚', '晚上', '中午'].includes(clock[1]) && normalizedHour < 12) normalizedHour += 12
       if (['凌晨', '清晨'].includes(clock[1]) && normalizedHour === 12) normalizedHour = 0
-      time = `T${String(normalizedHour).padStart(2, '0')}:${minute}`
+      time = `T${String(normalizedHour).padStart(2, '0')}${minute ? `:${minute}` : ''}`
     }
   }
   return `${sourceYear || '--'}${sourceYear ? '-' : ''}${month}-${day}${time}`
@@ -130,6 +133,54 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
   return { id: '', scriptId: '', updatedAt: new Date().toISOString(), people, relationships, timeline, cluePoints }
 }
 
+function extractExplicitTimeline(clues: ClueRecord[]): OrganizationSnapshot['timeline'] {
+  const suggestions: OrganizationSnapshot['timeline'] = []
+  const datePattern = /(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日/g
+  const clockPattern = /^[\s，,、:：]*(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?\s*(\d{1,2})\s*(点|时|[:：])\s*(\d{1,2})?\s*分?/
+
+  for (const clue of clues) {
+    if (!clue.ocrText.trim()) continue
+    datePattern.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = datePattern.exec(clue.ocrText)) !== null) {
+      const [, year, monthText, dayText] = match
+      const month = Number(monthText)
+      const day = Number(dayText)
+      const maxDay = new Date(Date.UTC(2000, month, 0)).getUTCDate()
+      if (month < 1 || month > 12 || day < 1 || day > maxDay) continue
+
+      const afterDate = clue.ocrText.slice(datePattern.lastIndex, datePattern.lastIndex + 32)
+      const clock = afterDate.match(clockPattern)
+      let time = ''
+      if (clock) {
+        let hour = Number(clock[2])
+        const minute = clock[4] === undefined ? '' : String(Number(clock[4])).padStart(2, '0')
+        if (hour <= 23 && (!minute || Number(minute) <= 59)) {
+          if (['下午', '傍晚', '晚上', '中午'].includes(clock[1]) && hour < 12) hour += 12
+          if (['凌晨', '清晨'].includes(clock[1]) && hour === 12) hour = 0
+          time = `T${String(hour).padStart(2, '0')}${minute ? `:${minute}` : ''}`
+        }
+      }
+
+      const yearValue = year || ''
+      const startAt = `${yearValue || '--'}${yearValue ? '-' : ''}${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}${time}`
+      const index = match.index
+      const end = datePattern.lastIndex + (clock?.[0].length || 0)
+      const quote = clue.ocrText.slice(Math.max(0, index - 36), Math.min(clue.ocrText.length, end + 90)).trim()
+      suggestions.push({
+        id: `ocr-time-${crypto.randomUUID()}`,
+        title: '待补充事件',
+        startsAt: startAt,
+        people: [],
+        sourceNo: clue.number,
+        quote,
+        requiresTitle: true,
+      })
+    }
+  }
+  return suggestions
+}
+
 export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSnapshot> {
   const apiKey = await readApiKey()
   const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText.trim() }))
@@ -137,7 +188,7 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
 
   const system = `你是剧本杀线索的文字整理工具。只整理用户给出的 OCR 原文，不搜索外部资料，不推理剧情。
 只输出 JSON，格式为：{"people":[{"name":"原文明确出现的人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说的关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确写出的事件短句","startsAt":"YYYY-MM-DD 或 YYYY-MM-DDTHH:mm；原文未写年份时用 --MM-DD 或 --MM-DDTHH:mm","people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"这条线索的简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
-约束：人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；日期时间和事件必须在对应原文中明确出现；原文只写月日时，保留为 --MM-DD 格式，不得补年份；没有明确写出的时分不得补齐。线索主题只能简要归纳该原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
+约束：逐条扫描全部 OCR 原文，不得漏掉同一条线索中的多个时间；每个明确出现的日期时间都单独输出一项 timeline，不得合并。人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；日期时间和事件必须在对应原文中明确出现；原文只写月日时，保留为 --MM-DD 格式，不得补年份；没有明确写出的时分不得补齐。线索主题只能简要归纳该原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
   const data = {
     model: 'deepseek-chat',
     stream: false,
@@ -181,5 +232,9 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
   if (!content) throw new Error('DeepSeek 没有返回整理结果，请重试')
   let parsed: RawResult
   try { parsed = JSON.parse(content) as RawResult } catch { throw new Error('DeepSeek 返回内容格式异常，请重试') }
-  return normalize(parsed, clues)
+  const normalized = normalize(parsed, clues)
+  const aiTimelineKeys = new Set(normalized.timeline.map(item => `${item.sourceNo}|${item.startsAt}`))
+  const explicitTimeline = extractExplicitTimeline(clues).filter(item => !aiTimelineKeys.has(`${item.sourceNo}|${item.startsAt}`))
+  normalized.timeline = [...normalized.timeline, ...explicitTimeline].sort((a, b) => a.sourceNo - b.sourceNo || a.startsAt.localeCompare(b.startsAt))
+  return normalized
 }

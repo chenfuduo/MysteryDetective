@@ -25,7 +25,9 @@ const replacements = [
     patched: `            }
             textDetectionRequest.recognitionLevel = .accurate
             textDetectionRequest.recognitionLanguages = ["zh-Hans", "en-US"]
-            textDetectionRequest.automaticallyDetectsLanguage = true
+            if #available(iOS 16.0, *) {
+                textDetectionRequest.automaticallyDetectsLanguage = true
+            }
             do {
                 if let requestHandler {
 `,

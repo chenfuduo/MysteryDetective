@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { IonApp } from '@ionic/vue'
 import { VueFlow, type Connection, type Node, type Edge } from '@vue-flow/core'
+import { Timeline } from 'vis-timeline/standalone'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import UiIcon from './components/UiIcon.vue'
@@ -73,7 +74,11 @@ const boardLinkForm = reactive({ fromId: '', toId: '', label: '' })
 const timelinePersonFilter = ref('')
 const timelineSpacingScale = ref(Number(localStorage.getItem('clue-vault:timeline-scale')) || 1)
 const timelineOrientation = ref<'portrait' | 'landscape'>('landscape')
+const datedTimelineElement = ref<HTMLElement | null>(null)
+const yearlessTimelineElement = ref<HTMLElement | null>(null)
 let timelineOrientationQuery: MediaQueryList | null = null
+let datedTimelineInstance: Timeline | null = null
+let yearlessTimelineInstance: Timeline | null = null
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let searchSequence = 0
 let loadedWorkspaceScriptId = ''
@@ -96,8 +101,6 @@ const sortedConfirmedEvents = computed(() => [...confirmedEvents.value].sort((a,
 const visibleTimelineEvents = computed(() => sortedConfirmedEvents.value.filter(event => !timelinePersonFilter.value || event.personIds.includes(timelinePersonFilter.value)))
 const visibleDatedEvents = computed(() => visibleTimelineEvents.value.filter(event => !event.startsAt.startsWith('--')))
 const visibleYearlessEvents = computed(() => visibleTimelineEvents.value.filter(event => event.startsAt.startsWith('--')))
-const datedTimelineLayout = computed(() => timelineAxisLayout(datedConfirmedEvents.value))
-const yearlessTimelineLayout = computed(() => timelineAxisLayout(yearlessEvents.value))
 const candidateEvents = computed(() => events.value.filter(item => !item.confirmed))
 const cropStyle = computed(() => {
   if (!cropStart.value || !cropEnd.value) return {}
@@ -640,32 +643,59 @@ async function importArchive() {
     await loadScripts(); await loadWorkspace()
   }, '档案已导入')
 }
-function timelineAxisLayout(items: TimelineRecord[]) {
-  const times = items.map(event => timelineEventTime(event)).sort((a, b) => a - b)
-  const first = times[0] ?? 0
-  const last = times[times.length - 1] ?? first
-  const length = Math.max(720, ((last - first) / 3_600_000) * 12) * timelineSpacingScale.value
-  const positions: Record<string, number> = {}
-  for (const event of items) positions[event.id] = 24 + (last === first ? 0 : ((timelineEventTime(event) - first) / (last - first)) * Math.max(0, length - 48))
-  return { length: Math.ceil(length), positions }
-}
 function timelineEventTime(event: TimelineRecord) {
   const value = event.startsAt.startsWith('--') ? `2000-${event.startsAt.slice(2)}` : event.startsAt
   const timestamp = Date.parse(value)
   return Number.isNaN(timestamp) ? 0 : timestamp
 }
-function timelineAxisSize(length: number) {
-  return timelineOrientation.value === 'portrait' ? { width: '88px', height: `${length}px` } : { width: `${length}px`, height: '88px' }
+function timelineWindow(items: TimelineRecord[]) {
+  const times = items.map(timelineEventTime).sort((a, b) => a - b)
+  const first = times[0] ?? Date.now()
+  const last = times[times.length - 1] ?? first
+  const span = Math.max(last - first, 3 * 60 * 60 * 1000) * 1.16 / timelineSpacingScale.value
+  const center = (first + last) / 2
+  return { start: new Date(center - span / 2), end: new Date(center + span / 2) }
 }
-function timelinePointPosition(layout: { positions: Record<string, number> }, event: TimelineRecord) {
-  const point = `${layout.positions[event.id] ?? 24}px`
-  return timelineOrientation.value === 'portrait' ? { top: point } : { left: point }
+function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], visibleEvents: TimelineRecord[], yearless = false) {
+  if (!host || !allEvents.length || !visibleEvents.length) return null
+  const window = timelineWindow(allEvents)
+  const items = visibleEvents.map(event => ({
+    id: event.id,
+    content: event.title,
+    start: new Date(timelineEventTime(event)),
+    title: `${timelineDateLabel(event.startsAt)} · ${event.title}${yearless ? '（无年份）' : ''}`,
+  }))
+  const instance = new Timeline(host, items, {
+    locale: 'zh-cn',
+    stack: true,
+    zoomKey: 'ctrlKey',
+    margin: { item: 18 },
+    height: '240px',
+    showCurrentTime: false,
+    start: window.start,
+    end: window.end,
+  })
+  instance.on('select', properties => {
+    const id = properties.items?.[0]
+    if (id) openEventDialog(events.value.find(item => item.id === id))
+  })
+  return instance
+}
+function buildTimelineCharts() {
+  datedTimelineInstance?.destroy()
+  yearlessTimelineInstance?.destroy()
+  datedTimelineInstance = null
+  yearlessTimelineInstance = null
+  if (view.value !== 'timeline' || timelineOrientation.value !== 'landscape') return
+  datedTimelineInstance = createTimeline(datedTimelineElement.value, datedConfirmedEvents.value, visibleDatedEvents.value)
+  yearlessTimelineInstance = createTimeline(yearlessTimelineElement.value, yearlessEvents.value, visibleYearlessEvents.value, true)
 }
 function updateTimelineOrientation() {
   timelineOrientation.value = timelineOrientationQuery?.matches ? 'portrait' : 'landscape'
 }
 watch(timelineSpacingScale, value => localStorage.setItem('clue-vault:timeline-scale', String(value)))
 watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize' })
+watch([view, visibleDatedEvents, visibleYearlessEvents, timelineOrientation, timelineSpacingScale], async () => { await nextTick(); buildTimelineCharts() })
 watch(activeScriptId, async () => { query.value = ''; searchIds.value = null; timelinePersonFilter.value = ''; await loadWorkspace() })
 watch(query, async value => {
   const sequence = ++searchSequence
@@ -682,7 +712,7 @@ onMounted(async () => {
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
   try { apiKeyConfigured.value = await organizer.hasApiKey() } catch { apiKeyConfigured.value = false }
 })
-onUnmounted(() => { timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
+onUnmounted(() => { datedTimelineInstance?.destroy(); yearlessTimelineInstance?.destroy(); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -718,8 +748,8 @@ onUnmounted(() => { timelineOrientationQuery?.removeEventListener('change', upda
             <div v-if="!confirmedEvents.length && !organization?.timeline.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="timeline" :size="31" /></div><h2>等待第一条确认的事件</h2><p>从线索里找到明确的时间，再由你录入事件。</p><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div>
             <template v-else-if="confirmedEvents.length">
               <div class="timeline-controls"><label><span>人物筛选</span><select v-model="timelinePersonFilter" aria-label="按人物筛选时间线"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><label class="timeline-scale-control"><span>时间间距 <strong>{{ Math.round(timelineSpacingScale * 100) }}%</strong></span><input v-model.number="timelineSpacingScale" type="range" min="0.5" max="4" step="0.1" aria-label="时间线间距缩放" /></label><span class="timeline-visible-count">{{ visibleTimelineEvents.length }} / {{ confirmedEvents.length }} 个事件</span></div>
-              <div v-if="visibleDatedEvents.length && timelineOrientation === 'landscape'" class="timeline-visual timeline-axis-section"><div class="timeline-section-heading"><div class="section-label">时间概览</div><span>按时间间隔比例排布 · {{ timelineOrientation === 'portrait' ? '竖屏' : '横屏' }}视图</span></div><div class="timeline-axis-viewport" :class="timelineOrientation"><div class="timeline-axis" :class="timelineOrientation" :style="timelineAxisSize(datedTimelineLayout.length)"><div class="timeline-axis-line"></div><span class="timeline-axis-end timeline-axis-start">{{ timelineDateLabel(datedConfirmedEvents[0].startsAt) }}</span><span class="timeline-axis-end timeline-axis-finish">{{ timelineDateLabel(datedConfirmedEvents[datedConfirmedEvents.length - 1].startsAt) }}</span><button v-for="event in visibleDatedEvents" :key="event.id" class="timeline-axis-point" :class="timelineOrientation" :style="timelinePointPosition(datedTimelineLayout, event)" :title="`${timelineDateLabel(event.startsAt)} · ${event.title}`" :aria-label="`${timelineDateLabel(event.startsAt)}，${event.title}`" @click="openEventDialog(event)"><span></span><span class="timeline-axis-point-label">{{ timelineDateLabel(event.startsAt) }} · {{ event.title }}</span></button></div></div></div>
-              <div v-if="visibleYearlessEvents.length && timelineOrientation === 'landscape'" class="timeline-visual timeline-axis-section"><div class="timeline-section-heading"><div class="section-label">无年份时间线</div><span>按月日和时刻排列，不代表具体年份</span></div><div class="timeline-axis-viewport" :class="timelineOrientation"><div class="timeline-axis" :class="timelineOrientation" :style="timelineAxisSize(yearlessTimelineLayout.length)"><div class="timeline-axis-line"></div><span class="timeline-axis-end timeline-axis-start">{{ timelineDateLabel(yearlessEvents[0].startsAt) }}</span><span class="timeline-axis-end timeline-axis-finish">{{ timelineDateLabel(yearlessEvents[yearlessEvents.length - 1].startsAt) }}</span><button v-for="event in visibleYearlessEvents" :key="event.id" class="timeline-axis-point" :class="timelineOrientation" :style="timelinePointPosition(yearlessTimelineLayout, event)" :title="`${timelineDateLabel(event.startsAt)} · ${event.title}${event.yearlessMarkerIgnored ? '' : '（无年份）'}`" :aria-label="`${timelineDateLabel(event.startsAt)}，${event.title}，无年份`" @click="openEventDialog(event)"><span></span><span class="timeline-axis-point-label">{{ timelineDateLabel(event.startsAt) }} · {{ event.title }}</span></button></div></div></div>
+              <div v-if="visibleDatedEvents.length && timelineOrientation === 'landscape'" class="timeline-visual"><div class="section-label">时间概览</div><div ref="datedTimelineElement" class="vis-timeline-host"></div></div>
+              <div v-if="visibleYearlessEvents.length && timelineOrientation === 'landscape'" class="timeline-visual yearless-timeline-visual"><div class="yearless-timeline-heading"><div class="section-label">无年份时间线</div><p>按月日和时刻排列，不代表具体年份。点击事件可编辑。</p></div><div ref="yearlessTimelineElement" class="vis-timeline-host yearless-vis"></div></div>
               <div v-if="!visibleTimelineEvents.length" class="timeline-filter-empty">没有与该人物关联的已确认事件。</div>
               <div v-if="visibleTimelineEvents.length && timelineOrientation === 'portrait'" class="timeline-list"><article v-for="event in visibleTimelineEvents" :key="event.id" class="timeline-event"><div class="timeline-event-marker"></div><div class="timeline-event-date">{{ timelineDateLabel(event.startsAt) }}<span v-if="event.startsAt.startsWith('--') && !event.yearlessMarkerIgnored" class="yearless-pill">无年份</span><button v-if="event.startsAt.startsWith('--')" class="timeline-marker-action" @click.stop="toggleYearlessMarker(event)">{{ event.yearlessMarkerIgnored ? '显示标记' : '忽略标记' }}</button></div><div class="timeline-event-content"><h2>{{ event.title }}</h2><div class="timeline-event-refs"><span v-for="id in event.personIds" :key="id">{{ people.find(person => person.id === id)?.name }}</span><button v-if="event.clueId" @click="clues.find(clue => clue.id === event.clueId) && openClue(clues.find(clue => clue.id === event.clueId)!)">查看原始线索 <UiIcon name="chevron" :size="13" /></button></div></div><div class="row-actions"><button title="编辑" @click="openEventDialog(event)"><UiIcon name="edit" :size="17" /></button><button title="删除" @click="removeEvent(event.id)"><UiIcon name="trash" :size="17" /></button></div></article></div>
             </template>

@@ -705,7 +705,7 @@ function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], v
     stack: true,
     zoomKey: 'ctrlKey',
     margin: { item: 18 },
-    height: '220px',
+    height: '100%',
     showCurrentTime: false,
     start: range.start,
     end: range.end,

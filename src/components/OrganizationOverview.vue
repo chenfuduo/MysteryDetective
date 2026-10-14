@@ -34,6 +34,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   analyze: []
+  discuss: []
   openWorkbench: []
   navigate: [view: 'clues' | 'people' | 'timeline' | 'board' | 'notes' | 'compare' | 'settings', section?: 'profiles' | 'relationships']
   openClue: [sourceNo: number, quote?: string]
@@ -185,7 +186,7 @@ function accept(suggestion: Suggestion) {
   <section class="page organization-page" :aria-busy="busy">
     <header class="organize-header">
       <div><h1>整理线索</h1><p>人物、关系、时间和线索点都在这里核对。</p></div>
-      <button v-if="apiConfigured" class="primary-button" :disabled="busy || !clues.some(item => item.ocrText.trim())" @click="emit('analyze')"><span v-if="busy" class="organize-spinner" aria-hidden="true"></span>{{ busy ? '整理中…' : '整理线索' }}</button>
+      <button class="secondary-button discussion-entry" :disabled="busy" @click="emit('discuss')">讨论查看</button><button v-if="apiConfigured" class="primary-button" :disabled="busy || !clues.some(item => item.ocrText.trim())" @click="emit('analyze')"><span v-if="busy" class="organize-spinner" aria-hidden="true"></span>{{ busy ? '整理中…' : '整理线索' }}</button>
       <button v-else class="primary-button" @click="emit('navigate', 'settings')">配置 AI</button>
     </header>
 

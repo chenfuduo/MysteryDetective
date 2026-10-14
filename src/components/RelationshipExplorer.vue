@@ -10,6 +10,7 @@ const props = defineProps<{
   clueCounts: Record<string, number>
   scriptId: string
   relationshipDialogOpen?: boolean
+  readOnly?: boolean
 }>()
 const emit = defineEmits<{
   'open-person': [personId: string]
@@ -17,6 +18,7 @@ const emit = defineEmits<{
   'view-clues': [personId: string]
   'remove-relationship': [relationshipId: string]
   'add-relationship': [fromId?: string, toId?: string]
+  'fullscreen-change': [active: boolean]
 }>()
 
 type Point = { x: number; y: number }
@@ -31,6 +33,7 @@ let activeScriptId = props.scriptId
 let viewReady = false
 const spatial = ref(true)
 const fullscreen = ref(false)
+defineExpose({ exitFullscreen: () => { fullscreen.value = false } })
 const selectedId = ref('')
 const search = ref('')
 const dragging = ref(false)
@@ -108,6 +111,7 @@ function cancelConnection() {
   for (const id of captured) if (stage.value?.hasPointerCapture(id)) stage.value.releasePointerCapture(id)
 }
 function beginConnection(personId: string) {
+  if (props.readOnly) return
   clearLongPress()
   if (people.value.length < 2 || !peopleById.value.has(personId)) return
   selectedId.value = ''
@@ -124,6 +128,7 @@ function updateConnection(event: PointerEvent) {
   linkEndpoint.value = { x: (point.x - pan.value.x) / zoom.value, y: (point.y - pan.value.y) / zoom.value }
 }
 function requestConnection(targetId: string) {
+  if (props.readOnly) return
   if (!linkSourceId.value || targetId === linkSourceId.value || !peopleById.value.has(targetId) || awaitingRelationship.value) return
   linkTargetId.value = targetId; awaitingRelationship.value = true
   emit('add-relationship', linkSourceId.value, targetId)
@@ -132,7 +137,7 @@ function choosePerson(personId: string) {
   if (linkSourceId.value) requestConnection(personId)
   else selectedId.value = personId
 }
-function openRelationshipPicker() { cancelConnection(); emit('add-relationship') }
+function openRelationshipPicker() { if (props.readOnly) return; cancelConnection(); emit('add-relationship') }
 
 function imageFor(person: PersonRecord): string { return props.imageUrls[person.photoPath] || props.imageUrls[person.id] || '' }
 function personStyle(person: PersonRecord, index: number) {
@@ -156,6 +161,7 @@ function restoreView() {
   } catch { return false }
 }
 function finishPersonMove() {
+  if (props.readOnly) return
   if (gesture?.kind !== 'person' || !gesture.personId || !gesture.position || !gesture.beforePositions) return
   const current = positions.value[gesture.personId]
   if (!current || (current.x === gesture.position.x && current.y === gesture.position.y)) return
@@ -163,6 +169,7 @@ function finishPersonMove() {
   persistLayout()
 }
 function undoPersonMove() {
+  if (props.readOnly) return
   if (!moveHistory.value.length || linkSourceId.value || awaitingRelationship.value || pointers.size) return
   const previous = moveHistory.value[moveHistory.value.length - 1]
   moveHistory.value = moveHistory.value.slice(0, -1)
@@ -170,6 +177,7 @@ function undoPersonMove() {
   persistLayout()
 }
 function persistLayout() {
+  if (props.readOnly) return
   try { localStorage.setItem(layoutKey(), JSON.stringify(positions.value)) } catch { /* The view remains usable when storage is full. */ }
 }
 function syncPeople(load = false) {
@@ -259,7 +267,7 @@ function pointerDown(event: PointerEvent) {
   gesture = { kind: linkSourceId.value ? 'connect' : personId ? 'person' : 'pan', start: point, pan: { ...pan.value }, personId, position: personId ? { ...positions.value[personId] } : undefined, beforePositions: personId && !linkSourceId.value ? Object.fromEntries(Object.entries(positions.value).map(([id, position]) => [id, { ...position }])) : undefined, moved: false }
   dragging.value = !linkSourceId.value
   if (linkSourceId.value) updateConnection(event)
-  else if (personId && people.value.length > 1) {
+  else if (!props.readOnly && personId && people.value.length > 1) {
     longPressTimer = setTimeout(() => {
       if (gesture?.kind === 'person' && !gesture.moved && pointers.size === 1) beginConnection(personId)
     }, 500)
@@ -280,7 +288,7 @@ function pointerMove(event: PointerEvent) {
   const dx = point.x - gesture.start.x, dy = point.y - gesture.start.y
   if (Math.hypot(dx, dy) > 5) { gesture.moved = true; clearLongPress() }
   if (gesture.kind === 'connect') { updateConnection(event); return }
-  if (gesture.kind === 'person' && gesture.personId && gesture.position) {
+  if (!props.readOnly && gesture.kind === 'person' && gesture.personId && gesture.position) {
     if (gesture.moved) positions.value[gesture.personId] = { x: gesture.position.x + dx / zoom.value, y: gesture.position.y + dy / zoom.value }
   } else pan.value = { x: gesture.pan.x + dx, y: gesture.pan.y + dy }
 }
@@ -314,9 +322,11 @@ function wheel(event: WheelEvent) {
 }
 function onKey(event: KeyboardEvent) {
   const target = event.target instanceof Element ? event.target : null
+  const targetGraph = target?.closest('.relationship-explorer')
+  if (targetGraph && targetGraph !== stage.value?.closest('.relationship-explorer')) return
   if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
   if (target?.closest('[role="dialog"]') && !target.closest('.relationship-explorer')) return
-  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z' && !props.relationshipDialogOpen && moveHistory.value.length && !linkSourceId.value) { event.preventDefault(); undoPersonMove(); return }
+  if (!props.readOnly && (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z' && !props.relationshipDialogOpen && moveHistory.value.length && !linkSourceId.value) { event.preventDefault(); undoPersonMove(); return }
   if (event.key !== 'Escape' || awaitingRelationship.value) return
   if (linkSourceId.value) cancelConnection()
   else if (fullscreen.value) fullscreen.value = false
@@ -334,7 +344,9 @@ watch(() => people.value.map(person => person.id).join('|'), async () => {
 watch(() => props.relationshipDialogOpen, (open, previous) => {
   if (previous && !open && awaitingRelationship.value) cancelConnection()
 })
+watch(() => props.readOnly, value => { if (value) cancelConnection() })
 watch(fullscreen, async value => {
+  emit('fullscreen-change', value)
   if (value) { previousBodyOverflow = document.body.style.overflow; document.body.style.overflow = 'hidden' }
   else document.body.style.overflow = previousBodyOverflow
   await nextTick(); measure()
@@ -358,12 +370,12 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body" :disabled="!fullscreen">
-    <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-spatial': spatial }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
+    <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-spatial': spatial, 'is-readonly': readOnly }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>{{ people.length }} 位人物</strong><span>{{ relationships.length }} 条手动关系</span></div>
         <div class="graph-actions">
-          <button type="button" class="graph-icon-button graph-undo" title="撤销人物移动" aria-label="撤销人物移动" :disabled="!moveHistory.length || Boolean(linkSourceId) || Boolean(relationshipDialogOpen)" @click="undoPersonMove"><UiIcon name="arrowLeft" :size="19" /></button>
-          <button type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" /><span>添加关系</span></button>
+          <button v-if="!readOnly" type="button" class="graph-icon-button graph-undo" title="撤销人物移动" aria-label="撤销人物移动" :disabled="!moveHistory.length || Boolean(linkSourceId) || Boolean(relationshipDialogOpen)" @click="undoPersonMove"><UiIcon name="arrowLeft" :size="19" /></button>
+          <button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" /><span>添加关系</span></button>
           <button type="button" class="graph-icon-button" :title="fullscreen ? '退出全屏' : '全屏查看'" :aria-label="fullscreen ? '退出全屏' : '全屏查看'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'restore' : 'fullscreen'" /></button>
           <button v-if="fullscreen" type="button" class="graph-icon-button" aria-label="关闭全屏" @click="fullscreen = false"><UiIcon name="close" /></button>
         </div>
@@ -380,7 +392,7 @@ onBeforeUnmount(() => {
               </g>
               <g v-if="linkingLine" class="connection-preview"><line class="connection-preview-shadow" :x1="linkingLine.from.x" :y1="linkingLine.from.y + 6" :x2="linkingLine.to.x" :y2="linkingLine.to.y + 6" /><line :class="{ 'has-target': linkTargetId }" :x1="linkingLine.from.x" :y1="linkingLine.from.y" :x2="linkingLine.to.x" :y2="linkingLine.to.y" /></g>
             </svg>
-            <div v-for="(person, index) in people" :key="person.id" class="person-node" :class="{ 'is-selected': linkSourceId ? linkSourceId === person.id : selectedId === person.id, 'is-neighbor': !linkSourceId && adjacent.has(person.id), 'is-link-target': linkTargetId === person.id, 'is-muted': linkSourceId ? person.id !== linkSourceId && person.id !== linkTargetId : selectedId && selectedId !== person.id && !adjacent.has(person.id) }" :style="personStyle(person, index)" :data-person="person.id" tabindex="0" role="button" :aria-label="`查看${person.name}的人物关系`" :aria-pressed="linkSourceId ? linkSourceId === person.id || linkTargetId === person.id : selectedId === person.id" @keydown.enter.prevent="choosePerson(person.id)" @keydown.space.prevent="choosePerson(person.id)" @dblclick.stop="!linkSourceId && emit('open-person', person.id)">
+            <div v-for="(person, index) in people" :key="person.id" class="person-node" :class="{ 'is-selected': linkSourceId ? linkSourceId === person.id : selectedId === person.id, 'is-neighbor': !linkSourceId && adjacent.has(person.id), 'is-link-target': linkTargetId === person.id, 'is-muted': linkSourceId ? person.id !== linkSourceId && person.id !== linkTargetId : selectedId && selectedId !== person.id && !adjacent.has(person.id) }" :style="personStyle(person, index)" :data-person="person.id" tabindex="0" role="button" :aria-label="`查看${person.name}的人物关系`" :aria-pressed="linkSourceId ? linkSourceId === person.id || linkTargetId === person.id : selectedId === person.id" @keydown.enter.prevent="choosePerson(person.id)" @keydown.space.prevent="choosePerson(person.id)" @dblclick.stop="!linkSourceId && (readOnly ? emit('view-person', person.id) : emit('open-person', person.id))">
               <div class="graph-person-card">
                 <div class="graph-person-avatar"><img v-if="imageFor(person)" :src="imageFor(person)" alt="" draggable="false" /><span v-else>{{ person.name.slice(0, 1) }}</span></div>
                 <div class="graph-person-card-copy"><strong>{{ person.name }}</strong><span>{{ person.aliases.length ? person.aliases.join(' · ') : '人物档案' }}</span></div>
@@ -394,19 +406,19 @@ onBeforeUnmount(() => {
             <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
             <button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '立体' : '平面' }}</button>
           </div>
-          <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
+          <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
           <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
         </div>
         <aside v-if="selected && !linkSourceId" class="graph-inspector">
           <header><span>人物详情</span><button type="button" class="graph-icon-button" aria-label="关闭人物详情" @click="selectedId = ''"><UiIcon name="close" :size="18" /></button></header>
           <div class="inspector-content">
             <div class="inspector-person"><div class="graph-person-avatar"><img v-if="imageFor(selected)" :src="imageFor(selected)" alt="" /><span v-else>{{ selected.name.slice(0, 1) }}</span></div><div><h3>{{ selected.name }}</h3><p>{{ selected.aliases.length ? selected.aliases.join(' · ') : '暂无别名' }}</p></div></div>
-            <div class="inspector-actions"><button type="button" @click="emit('open-person', selected.id)"><UiIcon name="edit" :size="16" />编辑档案</button><button type="button" @click="emit('view-clues', selected.id)"><UiIcon name="archive" :size="16" />线索 {{ clueCounts[selected.id] || 0 }}</button></div>
+            <div class="inspector-actions"><button v-if="!readOnly" type="button" @click="emit('open-person', selected.id)"><UiIcon name="edit" :size="16" />编辑档案</button><button type="button" @click="emit('view-clues', selected.id)"><UiIcon name="archive" :size="16" />线索 {{ clueCounts[selected.id] || 0 }}</button></div>
             <button type="button" class="inspector-workspace" @click="emit('view-person', selected.id)"><UiIcon name="person" :size="17" /><span>人物线索与事件</span><UiIcon name="chevron" :size="16" /></button>
             <p v-if="selected.notes" class="inspector-notes">{{ selected.notes }}</p>
             <div class="inspector-section-title"><strong>关联人物</strong><span>{{ selectedRelationships.length }}</span></div>
-            <div v-for="relationship in selectedRelationships" :key="relationship.id" class="inspector-relation"><button type="button" class="relation-person" @click="focusPerson(relationship.fromId === selected.id ? relationship.toId : relationship.fromId)"><span>{{ relationship.label || '关联' }}</span><strong>{{ peopleById.get(relationship.fromId === selected.id ? relationship.toId : relationship.fromId)?.name }}</strong><UiIcon name="chevron" :size="16" /></button><button type="button" class="graph-icon-button relation-delete" :aria-label="`删除${relationship.label || '关联'}关系`" @click="emit('remove-relationship', relationship.id)"><UiIcon name="trash" :size="16" /></button></div>
-            <p v-if="!selectedRelationships.length" class="inspector-no-relations">尚未建立关系，点击“添加关系”手动连接。</p>
+            <div v-for="relationship in selectedRelationships" :key="relationship.id" class="inspector-relation"><button type="button" class="relation-person" @click="focusPerson(relationship.fromId === selected.id ? relationship.toId : relationship.fromId)"><span>{{ relationship.label || '关联' }}</span><strong>{{ peopleById.get(relationship.fromId === selected.id ? relationship.toId : relationship.fromId)?.name }}</strong><UiIcon name="chevron" :size="16" /></button><button v-if="!readOnly" type="button" class="graph-icon-button relation-delete" :aria-label="`删除${relationship.label || '关联'}关系`" @click="emit('remove-relationship', relationship.id)"><UiIcon name="trash" :size="16" /></button></div>
+            <p v-if="!selectedRelationships.length" class="inspector-no-relations">{{ readOnly ? '尚未建立人物关系。' : '尚未建立关系，点击“添加关系”手动连接。' }}</p>
           </div>
         </aside>
       </div>
@@ -526,4 +538,8 @@ button:focus-visible { outline: 3px solid #bdd3b7; outline-offset: 2px; }
 @media (max-width: 900px) { .graph-inspector { flex-basis: 230px; } .graph-help > span { display: none; } .graph-help { justify-content: flex-end; } }
 @media (max-width: 700px) { .graph-toolbar { gap: 8px; padding: 10px 12px; } .graph-heading-icon { display: none; } .graph-actions { gap: 5px; } .graph-text-button { padding: 0 9px; font-size: 11px; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 40%; max-height: 260px; border-left: 0; border-top: 1px solid #e4e9e1; } .graph-inspector > header { min-height: 42px; padding: 0 12px; } .inspector-content { padding: 12px; } .inspector-actions { margin: 10px 0; } .graph-heading > div > span { font-size: 10px; } .graph-hud { top: 12px; right: 12px; left: 12px; } .graph-search { width: min(250px, 70%); } }
 @media (prefers-reduced-motion: reduce) { .graph-ground, .graph-edges g, .person-node, .graph-person-card { transition: none; } }
+</style>
+
+<style scoped>
+.is-readonly .graph-help{display:none}.is-readonly .person-node{cursor:pointer}
 </style>

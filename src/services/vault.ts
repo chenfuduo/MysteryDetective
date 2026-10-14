@@ -9,7 +9,7 @@ import { normalizedOcrRegions, type OcrRegion } from './ocrLocation'
 export type { OcrRegion } from './ocrLocation'
 
 export type ScriptRecord = { id: string; name: string; playDate: string; coverPath: string; createdAt: string }
-export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; ocrRegions?: OcrRegion[]; ocrImagePath?: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
+export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; displayImageKind?: 'crop' | 'perspective' | 'retake'; ocrText: string; ocrRegions?: OcrRegion[]; ocrImagePath?: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
 export type CluePhotoImportResult = { clues: ClueRecord[]; skippedDuplicates: number }
 export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string; photoPaths?: string[]; ocrNames?: string[] }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
@@ -1030,5 +1030,38 @@ export async function cropCluePhoto(id: string, crop: { x: number; y: number; wi
   context.drawImage(original, original.naturalWidth * x, original.naturalHeight * y, original.naturalWidth * width, original.naturalHeight * height, 0, 0, canvas.width, canvas.height)
   const imagePath = await saveImage(clue.scriptId, canvas.toDataURL('image/jpeg', 0.94), 'image/jpeg')
   await deleteImage(clue.displayImagePath)
-  return updateClue(id, { displayImagePath: imagePath })
+  return updateClue(id, { displayImagePath: imagePath, displayImageKind: 'crop' })
+}
+
+
+export async function saveCorrectedCluePhoto(scriptId: string, id: string, dataUrl: string) {
+  const clue = await getRecord<ClueRecord>('clues', id)
+  if (!clue || clue.scriptId !== scriptId) throw new Error('线索不属于当前剧本')
+  if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(dataUrl)) throw new Error('无法读取校正后的照片')
+  const path = await saveImage(scriptId, dataUrl, 'image/jpeg')
+  try {
+    const current = await getRecord<ClueRecord>('clues', id)
+    if (!current || current.scriptId !== scriptId || current.imagePath !== clue.imagePath) throw new Error('原线索已变化，请重新打开后校正')
+    const after: ClueRecord = { ...current, displayImagePath: path, displayImageKind: 'perspective' }
+    const { applyUndoableChanges } = await import('./reviewActions')
+    const undo = await applyUndoableChanges(scriptId, '保存四角校正视图', [{ kind: 'clues', id, before: current, after }])
+    return { clue: after, undo }
+  } catch (error) { await deleteImage(path); throw error }
+}
+
+export async function retakeCluePhoto(scriptId: string, id: string) {
+  const clue = await getRecord<ClueRecord>('clues', id)
+  if (!clue || clue.scriptId !== scriptId) throw new Error('线索不属于当前剧本')
+  const photo = await Camera.takePhoto({ quality: 90, includeMetadata: true })
+  const uri = photo.uri || photo.webPath
+  if (!uri) throw new Error('无法读取补拍照片')
+  const path = await saveImage(scriptId, await sourceBase64(uri), mimeForPath(uri))
+  try {
+    const current = await getRecord<ClueRecord>('clues', id)
+    if (!current || current.scriptId !== scriptId || current.imagePath !== clue.imagePath) throw new Error('原线索已变化，请重新打开后补拍')
+    const after: ClueRecord = { ...current, displayImagePath: path, displayImageKind: 'retake' }
+    const { applyUndoableChanges } = await import('./reviewActions')
+    const undo = await applyUndoableChanges(scriptId, '保存线索补拍照片', [{ kind: 'clues', id, before: current, after }])
+    return { clue: after, undo }
+  } catch (error) { await deleteImage(path); throw error }
 }

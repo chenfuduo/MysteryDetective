@@ -1,11 +1,12 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
+import { reactive } from 'vue'
 import { SecureStorage } from '@aparajita/capacitor-secure-storage'
 import type { ClueRecord, OrganizationSnapshot } from './vault'
 import { resolveAiProvider, providerLabel, type AiProvider } from './aiProvider'
 
 type RawPerson = { name?: unknown; aliases?: unknown; source?: unknown; quote?: unknown }
 type RawRelationship = { from?: unknown; to?: unknown; label?: unknown; source?: unknown; quote?: unknown }
-type RawTimeline = { title?: unknown; startsAt?: unknown; people?: unknown; source?: unknown; quote?: unknown }
+type RawTimeline = { title?: unknown; startsAt?: unknown; people?: unknown; source?: unknown; quote?: unknown; approximate?: unknown }
 type RawCluePoint = { source?: unknown; title?: unknown; category?: unknown; tags?: unknown; quote?: unknown }
 type RawResult = { people?: unknown; relationships?: unknown; timeline?: unknown; cluePoints?: unknown }
 
@@ -62,61 +63,97 @@ function sourceQuote(sourceNo: number, quote: unknown, clues: ClueRecord[]): { c
   if (!clue || !excerpt || !clue.ocrText.includes(excerpt)) return null
   return { clue, quote: excerpt }
 }
-function lastExplicitDateBefore(value: string, index: number): { year: string; month: number; day: number } | null {
-  const pattern = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)/g
-  const prefix = value.slice(0, index)
-  let latest: { year: string; month: number; day: number } | null = null
+type RunPhase = 'idle' | 'extracting' | 'checking' | 'complete' | 'error' | 'local'
+export const organizationRun = reactive({ phase: 'idle' as RunPhase, provider: null as AiProvider | 'local' | null, message: '', lastError: '' })
+type DateToken = { index: number; end: number; year: string; month: number; day: number; value: string }
+type ClockToken = { index: number; end: number; hour: number; minute: number | null; approximate: boolean; value: string }
+type CheckedTime = { startsAt: string; precision: 'date' | 'hour' | 'minute'; approximate: boolean }
+type NormalizedResult = { snapshot: OrganizationSnapshot; rejected: Map<number, number> }
+
+function scanDates(value: string): DateToken[] {
+  const pattern = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)|(?<![\d-])(\d{1,2})[/.](\d{1,2})(?!\d)/g
+  const dates: DateToken[] = []
   let match: RegExpExecArray | null
-  while ((match = pattern.exec(prefix)) !== null) {
+  while ((match = pattern.exec(value)) !== null) {
     const year = match[1] || match[4] || ''
-    const month = Number(match[2] || match[5])
-    const day = Number(match[3] || match[6])
-    const maxDay = new Date(Date.UTC(year ? Number(year) : 2000, month, 0)).getUTCDate()
-    if (month >= 1 && month <= 12 && day >= 1 && day <= maxDay) latest = { year, month, day }
+    const month = Number(match[2] || match[5] || match[7])
+    const day = Number(match[3] || match[6] || match[8])
+    if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year ? Number(year) : 2000, month, 0)).getUTCDate()) continue
+    dates.push({ index: match.index, end: pattern.lastIndex, year, month, day, value: `${year ? `${year}-` : '--'}${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` })
   }
-  return latest
+  return dates
 }
-
-function validDate(value: unknown, quote: string, clueText: string): string {
+function clockNumber(value: string): number {
+  if (/^\d+$/.test(value)) return Number(value)
+  const digits: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+  if (value.includes('十')) {
+    const [tens, units] = value.split('十')
+    return (tens ? digits[tens] : 1) * 10 + (units ? digits[units] : 0)
+  }
+  return value.length > 1 ? Number([...value].map(char => digits[char]).join('')) : digits[value]
+}
+function scanClocks(value: string): ClockToken[] {
+  const pattern = /(?:(凌晨|清晨|早晨|早上|上午|中午|下午|午后|傍晚|晚上|晚间|夜里|夜间|深夜|半夜|晚)\s*)?(?<!\d)(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(点(?:钟)?|时|[:：])(?:\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?|\s*(半|一刻|三刻))?(?!\d)/g
+  const clocks: ClockToken[] = []
+  let previousPeriod = '', previousEnd = 0
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(value)) !== null) {
+    let hour = clockNumber(match[2])
+    const minute = match[4] !== undefined ? clockNumber(match[4]) : match[5] ? ({ 半: 30, 一刻: 15, 三刻: 45 }[match[5]] ?? null) : null
+    if (!Number.isFinite(hour) || hour > 23 || (minute !== null && (!Number.isFinite(minute) || minute > 59)) || (minute === null && /[:：]/.test(match[3]))) continue
+    const between = value.slice(previousEnd, match.index)
+    const inheritedPeriod = previousPeriod && !/[。；;!?！？]/.test(between) && !scanDates(between).length ? previousPeriod : ''
+    const hint = between.match(/(凌晨|清晨|早晨|早上|上午|中午|下午|午后|傍晚|晚上|晚间|夜里|夜间|深夜|半夜|晚)[^。；;!?！？]{0,24}$/)?.[1] || ''
+    const period = match[1] || hint || inheritedPeriod
+    previousPeriod = period; previousEnd = pattern.lastIndex
+    if (['下午', '午后', '傍晚', '晚上', '晚间', '夜里', '夜间', '深夜', '晚'].includes(period) && hour > 0 && hour < 12) hour += 12
+    if (period === '中午' && hour > 0 && hour < 11) hour += 12
+    if (['凌晨', '清晨', '早晨', '早上', '半夜'].includes(period) && hour === 12) hour = 0
+    const surrounding = value.slice(Math.max(0, match.index - 3), Math.min(value.length, pattern.lastIndex + 5))
+    clocks.push({ index: match.index, end: pattern.lastIndex, hour, minute, approximate: /约|左右|大概|大约|前后|许/.test(surrounding), value: `T${String(hour).padStart(2, '0')}${minute === null ? '' : `:${String(minute).padStart(2, '0')}`}` })
+  }
+  return clocks
+}
+function dateForClock(dates: DateToken[], clock: ClockToken): DateToken | undefined {
+  const previous = [...dates].reverse().find(date => date.end <= clock.index)
+  if (previous) return previous
+  return dates.find(date => date.index >= clock.end && date.index - clock.end <= 120)
+}
+function quoteOffsets(source: string, quote: string): number[] {
+  const positions: number[] = []
+  let offset = source.indexOf(quote)
+  while (offset >= 0) { positions.push(offset); offset = source.indexOf(quote, offset + 1) }
+  return positions
+}
+function validDate(value: unknown, quote: string, clueText: string): CheckedTime | null {
   const candidate = text(value, 40).replace(' ', 'T')
-  if (!quote) return ''
-  const dateMatch = candidate.match(/^(?:(\d{4})-)?--?(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
-  if (!dateMatch) return ''
-  const [, candidateYear, month, day, hour, minute] = dateMatch
-  const monthNumber = Number(month)
-  const dayNumber = Number(day)
-  const validMonthDay = monthNumber >= 1 && monthNumber <= 12 && dayNumber >= 1 && dayNumber <= new Date(Date.UTC(2000, monthNumber, 0)).getUTCDate()
-  if (!validMonthDay) return ''
-
-  const source = quote.replace(/\s/g, '')
-  const quotedDate = source.match(new RegExp(`(?:(\\d{4})年)?0?${monthNumber}月0?${dayNumber}日`))
-    || source.match(new RegExp(`(?:(\\d{4})[-/.])?0?${monthNumber}[-/.]0?${dayNumber}(?:日)?`))
-  let sourceYear = quotedDate?.[1] || ''
-  if (!quotedDate) {
-    const quoteIndex = clueText.indexOf(quote)
-    const contextualDate = quoteIndex >= 0 ? lastExplicitDateBefore(clueText, quoteIndex) : null
-    if (!contextualDate || contextualDate.month !== monthNumber || contextualDate.day !== dayNumber) return ''
-    sourceYear = contextualDate.year
+  const match = candidate.match(/^(?:(\d{4})-|--)(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
+  if (!quote || !match) return null
+  const [, year, month, day, hour, minute] = match
+  const dates = scanDates(clueText)
+  const quotePositions = quoteOffsets(clueText, quote)
+  const inQuote = (index: number, end: number) => quotePositions.some(position => index >= position && end <= position + quote.length)
+  const matchingDate = (date: DateToken) => date.month === Number(month) && date.day === Number(day) && (!year || date.year === year)
+  const clocks = scanClocks(clueText).filter(clock => inQuote(clock.index, clock.end)).map(clock => ({ clock, date: dateForClock(dates, clock) })).filter((item): item is { clock: ClockToken; date: DateToken } => Boolean(item.date && matchingDate(item.date)))
+  if (hour !== undefined) {
+    if (Number(hour) > 23 || (minute !== undefined && Number(minute) > 59)) return null
+    const exact = clocks.filter(({ clock }) => clock.hour === Number(hour) && (minute === undefined || clock.minute === Number(minute)))
+    if (!exact.length) return null
+    const { clock, date } = exact[0]
+    return { startsAt: `${date.value}${clock.value}`, precision: clock.minute === null ? 'hour' : 'minute', approximate: clock.approximate }
   }
-  if (candidateYear && sourceYear && candidateYear !== sourceYear) return ''
-  if (candidateYear && !sourceYear && !quotedDate) return ''
-
-  let time = ''
-  if (hour) {
-    const clockPattern = minute
-      ? `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|晚)?0?${Number(hour)}(?:[:：]|点|时)0?${Number(minute)}分?`
-      : `(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|晚)?0?${Number(hour)}(?:点|时)(?!\\d)`
-    const clock = source.match(new RegExp(clockPattern))
-    if (clock) {
-      let normalizedHour = Number(hour)
-      if (['下午', '傍晚', '晚上', '晚', '中午'].includes(clock[1]) && normalizedHour < 12) normalizedHour += 12
-      if (['凌晨', '清晨'].includes(clock[1]) && normalizedHour === 12) normalizedHour = 0
-      time = `T${String(normalizedHour).padStart(2, '0')}${minute ? `:${minute}` : ''}`
-    }
+  // A date-only API candidate with one explicit clock in its own quote retains that clock.
+  const clockValues = new Set(clocks.map(({ clock, date }) => `${date.value}${clock.value}`))
+  if (clockValues.size === 1) {
+    const { clock, date } = clocks[0]
+    return { startsAt: `${date.value}${clock.value}`, precision: clock.minute === null ? 'hour' : 'minute', approximate: clock.approximate }
   }
-  return `${sourceYear || '--'}${sourceYear ? '-' : ''}${month}-${day}${time}`
+  if (clockValues.size > 1) return null
+  const date = dates.find(item => matchingDate(item) && inQuote(item.index, item.end))
+    || quotePositions.map(position => [...dates].reverse().find(item => item.end <= position)).find((item): item is DateToken => Boolean(item && matchingDate(item)))
+  return date ? { startsAt: date.value, precision: 'date', approximate: /(?:约|大约|前后|左右)/.test(quote) } : null
 }
-function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
+function normalize(raw: RawResult, clues: ClueRecord[]): NormalizedResult {
   const people: OrganizationSnapshot['people'] = []
   const knownNames = new Set<string>()
   for (const item of asArray(raw.people) as RawPerson[]) {
@@ -127,27 +164,24 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
     const aliases = Array.isArray(item.aliases) ? item.aliases.map(value => text(value, 60)).filter(value => value && source.clue.ocrText.includes(value)).slice(0, 5) : []
     people.push({ id: crypto.randomUUID(), name, aliases, sourceNo: source.clue.number, quote: source.quote })
   }
-
   const relationships: OrganizationSnapshot['relationships'] = []
   for (const item of asArray(raw.relationships) as RawRelationship[]) {
     const source = sourceQuote(number(item.source), item.quote, clues)
-    const from = text(item.from, 60)
-    const to = text(item.to, 60)
-    const label = text(item.label, 80)
+    const from = text(item.from, 60), to = text(item.to, 60), label = text(item.label, 80)
     if (!source || !from || !to || from === to || !label || !source.quote.includes(from) || !source.quote.includes(to) || !source.quote.includes(label)) continue
     relationships.push({ id: crypto.randomUUID(), from, to, label, sourceNo: source.clue.number, quote: source.quote })
   }
-
   const timeline: OrganizationSnapshot['timeline'] = []
+  const rejected = new Map<number, number>()
   for (const item of asArray(raw.timeline) as RawTimeline[]) {
-    const source = sourceQuote(number(item.source), item.quote, clues)
+    const sourceNo = number(item.source)
+    const source = sourceQuote(sourceNo, item.quote, clues)
     const title = text(item.title, 100)
-    let startsAt = validDate(item.startsAt, source?.quote || '', source?.clue.ocrText || '')
-    if (!source || !title || !startsAt) continue
+    const checked = validDate(item.startsAt, source?.quote || '', source?.clue.ocrText || '')
+    if (!source || !title || !checked) { rejected.set(sourceNo, (rejected.get(sourceNo) || 0) + 1); continue }
     const names = Array.isArray(item.people) ? item.people.map(value => text(value, 60)).filter(value => value && source.quote.includes(value)).slice(0, 8) : []
-    timeline.push({ id: crypto.randomUUID(), title, startsAt, people: names, sourceNo: source.clue.number, quote: source.quote })
+    timeline.push({ id: crypto.randomUUID(), title, ...checked, approximate: checked.approximate || (item.approximate === true && /约|左右|大概|大约|前后|许/.test(source.quote)), people: names, sourceNo: source.clue.number, quote: source.quote, evidence: [{ clueId: source.clue.id, sourceNo: source.clue.number, quote: source.quote }] })
   }
-
   const cluePoints: OrganizationSnapshot['cluePoints'] = []
   for (const item of asArray(raw.cluePoints) as RawCluePoint[]) {
     const source = sourceQuote(number(item.source), item.quote, clues)
@@ -156,177 +190,139 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
     const tags = Array.isArray(item.tags) ? item.tags.map(value => text(value, 24)).filter(Boolean).slice(0, 6) : []
     cluePoints.push({ id: crypto.randomUUID(), title, category: text(item.category, 32), tags, sourceNo: source.clue.number, quote: source.quote })
   }
-
-  return { id: '', scriptId: '', updatedAt: new Date().toISOString(), people, relationships, timeline, cluePoints }
+  return { snapshot: { id: '', scriptId: '', updatedAt: new Date().toISOString(), people, relationships, timeline, cluePoints }, rejected }
 }
-
-function extractExplicitTimeline(clues: ClueRecord[]): OrganizationSnapshot['timeline'] {
-  const suggestions: OrganizationSnapshot['timeline'] = []
-  const datePattern = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)|(?<!\d)(\d{1,2})[-/.](\d{1,2})(?!\d)/g
-  const clockPattern = /(?:(凌晨|清晨|早晨|早上|上午|中午|下午|傍晚|晚上|夜里|夜间|深夜|半夜|晚)\s*)?(?<!\d)(\d{1,2})\s*(点(?:钟)?|时|[:：])(?:\s*(\d{1,2})\s*分?|\s*(半))?(?!\d)/g
-
+function mergeTimeline(first: OrganizationSnapshot['timeline'], next: OrganizationSnapshot['timeline']): OrganizationSnapshot['timeline'] {
+  const merged = [...first]
+  for (const item of next) {
+    const existingIndex = merged.findIndex(previous => previous.sourceNo === item.sourceNo && previous.startsAt.slice(0, 7) === item.startsAt.slice(0, 7) && (previous.title === item.title || previous.quote.includes(item.quote) || item.quote.includes(previous.quote)) && (previous.startsAt === item.startsAt || (previous.startsAt.split('T')[0] === item.startsAt.split('T')[0] && (!previous.startsAt.includes('T') || !item.startsAt.includes('T')))))
+    if (existingIndex < 0) { merged.push(item); continue }
+    const previous = merged[existingIndex]
+    if (item.startsAt.length > previous.startsAt.length || (previous.requiresTitle && !item.requiresTitle)) merged[existingIndex] = item
+  }
+  return merged
+}
+function auditTimeline(clues: ClueRecord[], timeline: OrganizationSnapshot['timeline'], rejected: Map<number, number>, reviewed: boolean, reviewError = ''): NonNullable<OrganizationSnapshot['timelineAudit']> {
+  return clues.map(clue => {
+    const dates = scanDates(clue.ocrText), clocks = scanClocks(clue.ocrText)
+    const covered = clocks.filter(clock => {
+      const date = dateForClock(dates, clock)
+      if (!date) return false
+      return timeline.some(item => item.sourceNo === clue.number && item.startsAt === `${date.value}${clock.value}` && quoteOffsets(clue.ocrText, item.quote).some(offset => clock.index >= offset && clock.end <= offset + item.quote.length))
+    }).length
+    const invalid = rejected.get(clue.number) || 0
+    const unknownSource = [...rejected.keys()].some(source => !clues.some(item => item.number === source))
+    const messages: string[] = []
+    if (covered < clocks.length) messages.push(`${clocks.length - covered} 处原文时刻尚未对应到有效事件`)
+    if (invalid) messages.push(`${invalid} 条时间建议的日期或原文出处未通过校验`)
+    if (unknownSource) messages.push('存在无法对应原线索的时间建议')
+    if (!reviewed) messages.push(reviewError || '尚未完成 API 完整性核对')
+    return { sourceNo: clue.number, clocks: clocks.length, covered, status: messages.length ? 'review' as const : 'complete' as const, message: messages.join('；') || (clocks.length ? `已核对 ${covered} 处原文时刻` : '已核对原文，未发现具体钟表时刻') }
+  })
+}
+function localTimelineFallback(clues: ClueRecord[], reason: 'offline' | 'quota', previous?: OrganizationSnapshot): OrganizationSnapshot {
+  const timeline: OrganizationSnapshot['timeline'] = []
   for (const clue of clues) {
-    const sourceText = clue.ocrText
-    if (!sourceText.trim()) continue
-    const dates: { index: number; end: number; startsAt: string }[] = []
-    datePattern.lastIndex = 0
-    let dateMatch: RegExpExecArray | null
-    while ((dateMatch = datePattern.exec(sourceText)) !== null) {
-      const [, chineseYear, chineseMonth, chineseDay, numericYear, numericMonth, numericDay, shortMonth, shortDay] = dateMatch
-      const year = chineseYear || numericYear || ''
-      const month = Number(chineseMonth || numericMonth || shortMonth)
-      const day = Number(chineseDay || numericDay || shortDay)
-      const maxDay = new Date(Date.UTC(year ? Number(year) : 2000, month, 0)).getUTCDate()
-      if (month < 1 || month > 12 || day < 1 || day > maxDay) continue
-      const monthDay = `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-      dates.push({ index: dateMatch.index, end: datePattern.lastIndex, startsAt: year ? `${year}-${monthDay}` : `--${monthDay}` })
-    }
-
-    const clocks: { index: number; end: number; value: string }[] = []
-    clockPattern.lastIndex = 0
-    let clockMatch: RegExpExecArray | null
-    while ((clockMatch = clockPattern.exec(sourceText)) !== null) {
-      const period = clockMatch[1] || ''
-      let hour = Number(clockMatch[2])
-      const minuteText = clockMatch[4] === undefined ? (clockMatch[5] ? '30' : '') : clockMatch[4]
-      const minute = minuteText ? Number(minuteText) : null
-      if (hour > 23 || (minute !== null && minute > 59)) continue
-      if (['下午', '傍晚', '晚上', '夜里', '夜间', '深夜', '晚', '中午'].includes(period) && hour > 0 && hour < 12) hour += 12
-      if (['凌晨', '清晨', '早晨'].includes(period) && hour === 12) hour = 0
-      if (['半夜'].includes(period) && hour === 12) hour = 0
-      clocks.push({ index: clockMatch.index, end: clockPattern.lastIndex, value: `T${String(hour).padStart(2, '0')}${minute === null ? '' : `:${String(minute).padStart(2, '0')}`}` })
-    }
-
-    const clocksByDate = new Map<number, typeof clocks>()
+    const dates = scanDates(clue.ocrText), clocks = scanClocks(clue.ocrText)
+    const usedDates = new Set<number>()
     for (const clock of clocks) {
-      const previous = [...dates].reverse().find(date => date.end <= clock.index)
-      const next = dates.find(date => date.index >= clock.end)
-      const previousDistance = previous ? clock.index - previous.end : Infinity
-      const nextDistance = next ? next.index - clock.end : Infinity
-      const relatedDate = nextDistance < previousDistance && nextDistance <= 180 ? next : previous || (nextDistance <= 180 ? next : undefined)
-      if (!relatedDate) continue
-      const relatedClocks = clocksByDate.get(relatedDate.index) || []
-      relatedClocks.push(clock)
-      clocksByDate.set(relatedDate.index, relatedClocks)
+      const date = dateForClock(dates, clock)
+      if (!date) continue
+      usedDates.add(date.index)
+      const quote = clue.ocrText.slice(Math.max(0, clock.index - 36), Math.min(clue.ocrText.length, clock.end + 90)).trim()
+      timeline.push({ id: `ocr-time-${crypto.randomUUID()}`, title: '待补充事件', startsAt: `${date.value}${clock.value}`, precision: clock.minute === null ? 'hour' : 'minute', approximate: clock.approximate, people: [], sourceNo: clue.number, quote, requiresTitle: true, evidence: [{ clueId: clue.id, sourceNo: clue.number, quote }] })
     }
-
-    for (const date of dates) {
-      const matchedClocks = clocksByDate.get(date.index) || []
-      const entries = matchedClocks.length ? matchedClocks.map(clock => ({ startsAt: `${date.startsAt}${clock.value}`, clock })) : [{ startsAt: date.startsAt, clock: undefined }]
-      for (const entry of entries) {
-        const anchorStart = entry.clock ? Math.min(date.index, entry.clock.index) : date.index
-        const anchorEnd = entry.clock ? Math.max(date.end, entry.clock.end) : date.end
-        const quote = sourceText.slice(Math.max(0, anchorStart - 36), Math.min(sourceText.length, anchorEnd + 90)).trim().slice(0, 600)
-        suggestions.push({
-          id: `ocr-time-${crypto.randomUUID()}`,
-          title: '待补充事件',
-          startsAt: entry.startsAt,
-          people: [],
-          sourceNo: clue.number,
-          quote,
-          requiresTitle: true,
-        })
-      }
+    for (const date of dates.filter(item => !usedDates.has(item.index))) {
+      const quote = clue.ocrText.slice(Math.max(0, date.index - 36), Math.min(clue.ocrText.length, date.end + 90)).trim()
+      timeline.push({ id: `ocr-time-${crypto.randomUUID()}`, title: '待补充事件', startsAt: date.value, precision: 'date', approximate: /约|左右|前后/.test(quote), people: [], sourceNo: clue.number, quote, requiresTitle: true, evidence: [{ clueId: clue.id, sourceNo: clue.number, quote }] })
     }
   }
-  return suggestions
+  const snapshot: OrganizationSnapshot = { id: '', scriptId: '', updatedAt: new Date().toISOString(), people: [], relationships: [], cluePoints: [], ...previous, timeline: mergeTimeline(previous?.timeline || [], timeline), analysis: { provider: 'local', localReason: reason, reviewed: false } }
+  snapshot.timelineAudit = auditTimeline(clues, snapshot.timeline, new Map(), false, `${reason === 'offline' ? '网络不可用' : 'API 额度不足'}，已使用本地时间扫描，请核对事件内容`)
+  organizationRun.phase = 'local'; organizationRun.provider = 'local'; organizationRun.message = reason === 'offline' ? '网络不可用，已保留 API 结果并使用本地扫描' : 'API 额度不足，已使用本地扫描'
+  return snapshot
 }
-function localTimelineFallback(clues: ClueRecord[]): OrganizationSnapshot {
-  return {
-    id: '',
-    scriptId: '',
-    updatedAt: new Date().toISOString(),
-    people: [],
-    relationships: [],
-    timeline: extractExplicitTimeline(clues),
-    cluePoints: [],
-  }
-}
-
 function isNetworkUnavailable(error: unknown): boolean {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
   const message = error instanceof Error ? error.message : String(error)
   return /(network|internet|offline|connection|load failed|failed to fetch|could not connect|not connected)/i.test(message)
 }
-
-export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSnapshot> {
-  const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText.trim() }))
-  if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return localTimelineFallback(clues)
-  let provider: AiProvider
-  try { provider = await resolveAiProvider() }
-  catch (error) {
-    if (isNetworkUnavailable(error)) return localTimelineFallback(clues)
-    throw error
-  }
-  const label = providerLabel(provider)
-  const apiKey = await readApiKey(provider)
-  const endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions'
-
-  const system = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
-时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索都要从头扫描到尾，不能找到第一处时间就停止。
-
+class OrganizationApiError extends Error {
+  constructor(message: string, readonly localReason?: 'offline' | 'quota') { super(message) }
+}
+const organizationSystem = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
+时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分、十点二十七分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索必须从头扫描到最后一行，尤其检查后半部分和分项列表。
 时间线规则：
-1. 原文中的每个明确日期都要检查同一事件或同一句中是否写有时刻。只要原文明确写了几点几分，startsAt 就必须保留到分钟，绝不能只输出日期。例如“6月17日凌晨3时04分”写成“--06-17T03:04”，“2025年6月17日 15:08”写成“2025-06-17T15:08”。
-2. 原文未写年份时使用 --MM-DD；有明确时刻时使用 --MM-DDTHH:mm。原文有年份时使用 YYYY-MM-DD 或 YYYY-MM-DDTHH:mm。不得补年份、时刻或分钟；原文只写到小时就只保留小时。
-3. 同一条线索可能包含多项日期和时刻。每个明确的日期时间都单独输出一项，按原文出现顺序逐项检查，不得漏项、合并或只保留一个代表时间。对同一事件同时识别出日期和时刻时，只输出包含时刻的完整时间，不要再为该事件重复输出一个仅有日期的项目。
-4. 日期与时刻可以相隔一段描述文字。若同一条线索前文明确写出月日，后续分项没有出现新日期，则沿用最近出现的月日，直到线索中出现新的明确日期；不得跨不同线索沿用日期，也不得补年份。原文没有任何可沿用日期时，不要猜日期。
-5. 事件标题只简述原文明确写出的动作或事实，不概括动机、因果或真相。原文有明确时间但事件标题无法简洁提取时，仍输出时间建议，标题可写“待补充事件”。
-6. 每条时间建议的 quote 必须是对应 OCR 原文中的逐字连续摘录，并且尽可能同时包含该日期、时刻和事件描述，便于核对原图。source 必须是该摘录所属线索的编号。
+1. 每个明确时刻单独对应事件：到达、离开、打电话等发生在不同时刻时必须分开。原文写了几点几分，startsAt 必须保留分钟；例如“6月16日晚10点27分进入，10点29分离开”必须输出 --06-16T22:27 和 --06-16T22:29。只写到小时就只保留小时，不能补 :00。
+2. 无年份使用 --MM-DD、--MM-DDTHH 或 --MM-DDTHH:mm；明确有年份使用 YYYY-MM-DD、YYYY-MM-DDTHH 或 YYYY-MM-DDTHH:mm。不得猜年份、日期、时刻或分钟。
+3. 同线索前文明确月日，后续分项未出现新日期时沿用最近月日，跨段落/医院监控/城市监控等标题也继续检查，不得跨不同线索沿用日期。“6月17日早晨7点09分……城市监控显示：凌晨3时10分……3时24分……”必须分别保留后续每一时刻。
+4. 时段词和 OCR 错别字不应阻断时钟数字识别。明确晚上/下午换算 24 小时制；没有时段依据不得擅自加 12 小时。约、左右、大概、前后等近似含义必须保留，approximate=true；不能把约十点写成精确 10:00。
+5. precision 为 date/hour/minute，与原文精度一致；约时仍保留原文实际精度。每个事件 title 只简述原文动作，无法提取标题时写“待补充事件”。不要为同一事件再重复一个仅日期建议。
+6. 每条 quote 必须逐字连续摘录对应 OCR 原文，保留原标点/空格，不要改错字、不要拼接多段，优先含时刻和事件动作；日期在前段时 quote 可只取当前时刻所在句，source 标明所属线索。每条 quote 尽量少于 400 字。
+输出纯 JSON：{"people":[{"name":"原文人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确动作","startsAt":"--06-16T22:27","precision":"minute","approximate":false,"people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
+其他约束：人物姓名须逐字出现；关系须原文明说，不因共同出现推断。每项必须有 source 和逐字 quote。只归纳明确事实，不判断证词真假、不分析动机/因果、不预测凶手/身份、不揭示答案、不补全未知经过。`
 
-输出格式为纯 JSON，不要 Markdown 或额外说明：{"people":[{"name":"原文明确出现的人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说的关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确写出的事件短句","startsAt":"YYYY-MM-DD、YYYY-MM-DDTHH:mm、--MM-DD 或 --MM-DDTHH:mm","people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"这条线索的简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
-
-其他约束：人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；事件日期和时间必须能在对应原文中找到；原文明确写出上午、下午、晚上等时段时，按其明确含义换算为 24 小时制；没有时段标记时不得擅自改变小时。线索主题只能简要归纳原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
-  const data = {
-    model: provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek-chat',
-    stream: false,
-    ...(provider === 'openai' ? { reasoning_effort: 'none', max_completion_tokens: 12000 } : { temperature: 0.2, max_tokens: 6000 }),
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: `请按系统规则完整整理以下单个剧本的 OCR 线索。逐条扫描每份原文直至末尾，优先确保时间线里的日期和具体时分都被完整保留；每条建议都要能凭 source 和 quote 回到原始线索。只返回符合格式的 JSON。\n${JSON.stringify(sourceClues)}` },
-    ],
-  }
-
-  let status: number
-  let responseData: unknown
+async function requestOrganization(provider: AiProvider, apiKey: string, user: string): Promise<RawResult> {
+  const label = providerLabel(provider)
+  const endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions'
+  const data = { model: provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek-chat', stream: false, ...(provider === 'openai' ? { reasoning_effort: 'none', max_completion_tokens: 12000 } : { temperature: 0.2, max_tokens: 6000 }), response_format: { type: 'json_object' }, messages: [{ role: 'system', content: organizationSystem }, { role: 'user', content: user }] }
+  let status: number, responseData: unknown
   try {
     if (Capacitor.isNativePlatform()) {
-      const response = await CapacitorHttp.post({
-        url: endpoint,
-        connectTimeout: 15000,
-        readTimeout: 90000,
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        data,
-      })
-      status = response.status
-      responseData = response.data
+      const response = await CapacitorHttp.post({ url: endpoint, connectTimeout: 15000, readTimeout: 90000, headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, data })
+      status = response.status; responseData = response.data
     } else {
-      const response = await fetch(import.meta.env.DEV && provider === 'openai' ? '/__local-ai/openai/chat/completions' : endpoint, {
-        method: 'POST',
-        headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(90000),
-        body: JSON.stringify(data),
-      })
-      status = response.status
-      responseData = await response.json().catch(() => null)
+      const response = await fetch(import.meta.env.DEV && provider === 'openai' ? '/__local-ai/openai/chat/completions' : endpoint, { method: 'POST', headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(90000), body: JSON.stringify(data) })
+      status = response.status; responseData = await response.json().catch(() => null)
     }
   } catch (error) {
-    if (isNetworkUnavailable(error)) return localTimelineFallback(clues)
+    if (isNetworkUnavailable(error)) throw new OrganizationApiError('网络不可用', 'offline')
     throw error
   }
   const apiError = (responseData as { error?: { code?: string; message?: string } } | null)?.error
-  if (status === 402 || (status === 429 && apiError?.code === 'insufficient_quota')) return localTimelineFallback(clues)
-  if (status < 200 || status >= 300) {
-    if (status === 401) throw new Error(`${label} API Key 无效，请在档案管理中更新`)
-    throw new Error(`${label} 整理失败（HTTP ${status}），请稍后重试`)
-  }
-  const body = responseData as { choices?: { finish_reason?: string; message?: { content?: string | null } }[] } | null
-  const choice = body?.choices?.[0]
-  if (choice?.finish_reason === 'length') throw new Error('整理结果过长，未能完整返回，请减少线索后重试')
+  if (status === 402 || (status === 429 && apiError?.code === 'insufficient_quota')) throw new OrganizationApiError(`${label} API 额度不足`, 'quota')
+  if (status < 200 || status >= 300) throw new OrganizationApiError(status === 401 ? `${label} API Key 无效，请在档案管理中更新` : `${label} 整理失败（HTTP ${status}），请稍后重试`)
+  const choice = (responseData as { choices?: { finish_reason?: string; message?: { content?: string | null } }[] } | null)?.choices?.[0]
+  if (choice?.finish_reason === 'length') throw new OrganizationApiError('整理结果过长，未能完整返回，请减少线索后重试')
   const content = choice?.message?.content
-  if (!content) throw new Error(`${label} 没有返回整理结果，请重试`)
-  let parsed: RawResult
-  try { parsed = JSON.parse(content) as RawResult } catch { throw new Error(`${label} 返回内容格式异常，请重试`) }
-  return normalize(parsed, clues)
+  if (!content) throw new OrganizationApiError(`${label} 没有返回整理结果，请重试`)
+  try { return JSON.parse(content) as RawResult } catch { throw new OrganizationApiError(`${label} 返回内容格式异常，请重试`) }
+}
+
+export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSnapshot> {
+  organizationRun.lastError = ''; organizationRun.message = '正在准备 OCR 文字'; organizationRun.phase = 'extracting'; organizationRun.provider = null
+  try {
+    const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText }))
+    if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return localTimelineFallback(clues, 'offline')
+    let provider: AiProvider
+    try { provider = await resolveAiProvider() } catch (error) { if (isNetworkUnavailable(error)) return localTimelineFallback(clues, 'offline'); throw error }
+    organizationRun.provider = provider; organizationRun.message = `${providerLabel(provider)} 正在整理 OCR 文字`
+    const apiKey = await readApiKey(provider)
+    const sources = JSON.stringify(sourceClues)
+    let first: NormalizedResult
+    try { first = normalize(await requestOrganization(provider, apiKey, `完整整理以下单个剧本的 OCR 线索。逐条从头到尾扫描，不能省略后半段时间。只返回规定 JSON。\n${sources}`), clues) }
+    catch (error) { if (error instanceof OrganizationApiError && error.localReason) return localTimelineFallback(clues, error.localReason); throw error }
+    organizationRun.phase = 'checking'; organizationRun.message = `${providerLabel(provider)} 正在逐段核对时间是否遗漏`
+    let reviewed = false, reviewError = ''
+    try {
+      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。\n${sources}`), clues)
+      first.snapshot.timeline = mergeTimeline(first.snapshot.timeline, second.snapshot.timeline)
+      // A rejected candidate remains visible in the audit even when other events passed.
+      for (const [sourceNo, count] of second.rejected) first.rejected.set(sourceNo, Math.max(first.rejected.get(sourceNo) || 0, count))
+      reviewed = true
+    } catch (error) {
+      organizationRun.lastError = error instanceof Error ? error.message : String(error)
+      if (error instanceof OrganizationApiError && error.localReason) return localTimelineFallback(clues, error.localReason, first.snapshot)
+      reviewError = `第二轮核对未完成：${organizationRun.lastError}；已保留首轮整理结果`
+    }
+    first.snapshot.analysis = { provider, reviewed }
+    first.snapshot.timelineAudit = auditTimeline(clues, first.snapshot.timeline, first.rejected, reviewed, reviewError)
+    const reviewCount = first.snapshot.timelineAudit.filter(item => item.status === 'review').length
+    organizationRun.phase = 'complete'; organizationRun.message = reviewCount ? `整理已保存，${reviewCount} 份线索的时间待复核` : '整理及时间完整性核对已完成'
+    return first.snapshot
+  } catch (error) {
+    organizationRun.phase = 'error'; organizationRun.lastError = error instanceof Error ? error.message : String(error); organizationRun.message = organizationRun.lastError
+    throw error
+  }
 }

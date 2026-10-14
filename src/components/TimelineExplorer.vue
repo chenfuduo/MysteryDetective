@@ -11,7 +11,7 @@ const emit = defineEmits<{
   'update:personId': [value: string]
   'update:scale': [value: number]
   'edit-event': [event: TimelineRecord]
-  'open-clue': [clueId: string]
+  'open-clue': [clueId: string, quote?: string]
   'toggle-marker': [event: TimelineRecord]
   'fullscreen-change': [active: boolean]
 }>()
@@ -32,7 +32,8 @@ let syncRequest = 0
 let previousOverflow = ''
 let returnFocus: HTMLElement | null = null
 let chartPointer: { x: number; y: number; moved: boolean } | null = null
-defineExpose({ enterFullscreen: () => { fullscreen.value = true } })
+let activeCacheKey = ''
+defineExpose({ enterFullscreen: () => { fullscreen.value = true }, focusEvent })
 
 const referenceYear = computed(() => {
   const years = props.events.filter(event => event.scriptId === props.scriptId && event.confirmed && /^\d{4}-/.test(event.startsAt)).map(event => Number(event.startsAt.slice(0, 4)))
@@ -45,7 +46,38 @@ const yearlessCount = computed(() => allEvents.value.length - datedCount.value)
 const eventSides = computed(() => new Map([...allEvents.value].sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id)).map((event, index) => [event.id, sides[index % 2]])))
 const selectedEvent = computed(() => visibleEvents.value.find(event => event.id === selectedId.value))
 const selectedPeople = computed(() => props.people.filter(person => selectedEvent.value?.personIds.includes(person.id)))
-const selectedClue = computed(() => props.clues.find(clue => clue.id === selectedEvent.value?.clueId))
+const viewCacheKey = computed(() => `cluevault:timeline-view:${encodeURIComponent(props.scriptId)}:${referenceYear.value}`)
+const selectedEvidence = computed(() => {
+  const event = selectedEvent.value
+  if (!event || event.scriptId !== props.scriptId) return []
+  const evidence = (event.evidence || []).flatMap(item => {
+    const clue = props.clues.find(clue => clue.scriptId === props.scriptId && clue.id === item.clueId && clue.number === item.sourceNo)
+    return clue && item.quote && clue.ocrText.includes(item.quote) ? [{ clue, quote: item.quote }] : []
+  })
+  if (!evidence.length && event.clueId) {
+    const clue = props.clues.find(item => item.scriptId === props.scriptId && item.id === event.clueId)
+    if (clue) evidence.push({ clue, quote: '' })
+  }
+  return evidence.filter((item, index) => evidence.findIndex(other => other.clue.id === item.clue.id && other.quote === item.quote) === index)
+})
+function persistView() {
+  if (!activeCacheKey) return
+  try { sessionStorage.setItem(activeCacheKey, JSON.stringify({ start: timeWindow.value?.start.getTime(), end: timeWindow.value?.end.getTime(), dimensional: dimensional.value })) } catch { /* Storage can be unavailable in private contexts. */ }
+}
+function restoreView() {
+  activeCacheKey = viewCacheKey.value
+  timeWindow.value = null; dimensional.value = true
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(activeCacheKey) || 'null')
+    if (!saved || typeof saved !== 'object') return
+    if (typeof saved.dimensional === 'boolean') dimensional.value = saved.dimensional
+    if (typeof saved.start === 'number' && typeof saved.end === 'number' && Number.isFinite(saved.start) && Number.isFinite(saved.end) && saved.end > saved.start) timeWindow.value = { start: new Date(saved.start), end: new Date(saved.end) }
+  } catch { /* A missing or obsolete cache starts from the full timeline. */ }
+}
+function precisionLabel(event: TimelineRecord) {
+  const precision = event.precision || (/T\d{2}:\d{2}/.test(event.startsAt) ? 'minute' : /T\d{2}/.test(event.startsAt) ? 'hour' : 'date')
+  return precision === 'minute' ? '到分钟' : precision === 'hour' ? '仅到小时' : '仅日期'
+}
 
 function setChartElement(side: Side, element: unknown) {
   elements[side] = element instanceof HTMLElement ? element : null
@@ -75,11 +107,14 @@ function eventContent(event: TimelineRecord) {
   content.dataset.eventId = event.id
   const time = document.createElement('span')
   time.className = 'timeline-node-time'
-  time.textContent = dateLabel(event.startsAt)
+  time.textContent = `${event.approximate ? '约 ' : ''}${dateLabel(event.startsAt)}`
   const title = document.createElement('span')
   title.className = 'timeline-node-title'
   title.textContent = eventTitle(event)
-  content.append(time, title)
+  const precision = document.createElement('span')
+  precision.className = 'timeline-node-precision'
+  precision.textContent = `${event.approximate ? '约时 · ' : ''}${precisionLabel(event)}`
+  content.append(time, title, precision)
   return content
 }
 function fullWindow(scale = 1): TimeWindow {
@@ -104,6 +139,7 @@ function items(side: Side) {
 function applyWindow(range: TimeWindow) {
   timeWindow.value = range
   for (const side of sides) instances[side]?.setWindow(range.start, range.end, { animation: false })
+  persistView()
 }
 function scheduleRedraw() {
   if (redrawFrame) cancelAnimationFrame(redrawFrame)
@@ -152,6 +188,7 @@ async function syncCharts() {
       if (!properties.byUser) return
       const next = { start: new Date(properties.start), end: new Date(properties.end) }
       timeWindow.value = next
+      persistView()
       instances[side === 'upper' ? 'lower' : 'upper']?.setWindow(next.start, next.end, { animation: false })
     })
   }
@@ -240,6 +277,19 @@ function selectEvent(id: string) {
   selectedId.value = id
   for (const side of sides) instances[side]?.setSelection(eventSides.value.get(id) === side ? [id] : [])
 }
+async function focusEvent(eventId: string): Promise<boolean> {
+  await nextTick()
+  const event = visibleEvents.value.find(item => item.id === eventId && item.scriptId === props.scriptId)
+  if (!event) return false
+  if (!timeWindow.value) await syncCharts()
+  const range = timeWindow.value ?? fullWindow(props.scale || 1)
+  const span = range.end.getTime() - range.start.getTime()
+  const center = eventTime(event)
+  applyWindow({ start: new Date(center - span / 2), end: new Date(center + span / 2) })
+  selectEvent(event.id)
+  scheduleRedraw()
+  return true
+}
 function selectChartEvent(event: MouseEvent) {
   if (chartPointer?.moved) { chartPointer = null; return }
   chartPointer = null
@@ -260,11 +310,14 @@ watch(() => props.scale, next => {
   if (!Number.isFinite(next) || next <= 0) return
   zoom(next / appliedScale); appliedScale = next
 })
-watch(() => [props.scriptId, referenceYear.value], async () => {
+watch(viewCacheKey, async () => {
+  persistView()
   for (const side of sides) { instances[side]?.destroy(); instances[side] = null }
-  timeWindow.value = null; selectedId.value = ''; appliedScale = props.scale || 1
+  selectedId.value = ''; appliedScale = props.scale || 1
+  restoreView()
   await syncCharts()
 })
+watch(dimensional, persistView)
 watch([dimensional, selectedId], async () => { await nextTick(); scheduleRedraw() })
 watch(fullscreen, async active => {
   emit('fullscreen-change', active)
@@ -276,12 +329,14 @@ watch(fullscreen, async active => {
   scheduleRedraw()
 })
 onMounted(async () => {
+  restoreView()
   await syncCharts()
   resizeObserver = new ResizeObserver(scheduleRedraw)
   if (rootElement.value) resizeObserver.observe(rootElement.value)
   document.addEventListener('keydown', onKeydown)
 })
 onUnmounted(() => {
+  persistView()
   for (const side of sides) instances[side]?.destroy()
   resizeObserver?.disconnect()
   if (redrawFrame) cancelAnimationFrame(redrawFrame)
@@ -319,8 +374,9 @@ onUnmounted(() => {
       <div v-else class="explorer-empty"><span><UiIcon name="timeline" :size="34" /></span><strong>还没有已确认的时间事件</strong><p>添加时间节点，或从整理建议中录入事件。</p></div>
       <aside v-if="selectedEvent" class="event-detail" aria-live="polite">
         <button class="detail-close" aria-label="收起事件详情" @click="closeDetail"><UiIcon name="close" :size="18" /></button>
-        <div class="detail-main"><div class="detail-time"><UiIcon name="clock" :size="17" /><strong>{{ dateLabel(selectedEvent.startsAt) }}</strong><span v-if="selectedEvent.startsAt.startsWith('--') && !selectedEvent.yearlessMarkerIgnored" class="yearless-badge">无年份</span></div><h3>{{ eventTitle(selectedEvent) }}</h3><div class="detail-people"><span v-for="person in selectedPeople" :key="person.id"><UiIcon name="person" :size="13" />{{ person.name }}</span><button v-if="selectedEvent.startsAt.startsWith('--')" class="marker-button" @click="emit('toggle-marker', selectedEvent)">{{ selectedEvent.yearlessMarkerIgnored ? '恢复无年份标记' : '忽略无年份标记' }}</button></div></div>
-        <div class="detail-actions"><button v-if="selectedClue" class="explorer-button" @click="emit('open-clue', selectedClue.id)"><UiIcon name="image" :size="17" />原线索 #{{ String(selectedClue.number).padStart(3, '0') }}</button><button class="explorer-button edit-button" @click="emit('edit-event', selectedEvent)"><UiIcon name="edit" :size="17" />编辑事件</button></div>
+        <div class="detail-main"><div class="detail-time"><UiIcon name="clock" :size="17" /><strong>{{ selectedEvent.approximate ? '约 ' : '' }}{{ dateLabel(selectedEvent.startsAt) }}</strong><span v-if="selectedEvent.startsAt.startsWith('--') && !selectedEvent.yearlessMarkerIgnored" class="yearless-badge">无年份</span></div><h3>{{ eventTitle(selectedEvent) }}</h3><div class="detail-people"><span class="precision-badge">{{ selectedEvent.approximate ? '约时 · ' : '' }}{{ precisionLabel(selectedEvent) }}</span><span v-for="person in selectedPeople" :key="person.id"><UiIcon name="person" :size="13" />{{ person.name }}</span><button v-if="selectedEvent.startsAt.startsWith('--')" class="marker-button" @click="emit('toggle-marker', selectedEvent)">{{ selectedEvent.yearlessMarkerIgnored ? '恢复无年份标记' : '忽略无年份标记' }}</button></div></div>
+        <div class="detail-evidence" v-if="selectedEvidence.length"><div v-for="source in selectedEvidence" :key="`${source.clue.id}:${source.quote}`" class="evidence-entry"><button class="explorer-button" @click="emit('open-clue', source.clue.id, source.quote || undefined)"><UiIcon name="image" :size="16" />原线索 #{{ String(source.clue.number).padStart(3, '0') }}</button><blockquote v-if="source.quote">{{ source.quote }}</blockquote></div></div>
+        <div class="detail-actions"><button class="explorer-button edit-button" @click="emit('edit-event', selectedEvent)"><UiIcon name="edit" :size="17" />编辑事件</button></div>
       </aside>
     </section>
   </Teleport>
@@ -388,7 +444,10 @@ onUnmounted(() => {
 .explorer-empty strong { font-size: 15px; }
 .explorer-empty p { margin: 0; color: #94a08e; font-size: 12px; }
 .event-detail { position: absolute; z-index: 4; left: 14px; right: 14px; bottom: 12px; display: flex; align-items: center; gap: 18px; flex-shrink: 0; max-height: 32%; padding: 14px 48px 14px 20px; border: 1px solid #d9e4d6; border-radius: 14px; background: #fffffffa; box-shadow: 0 8px 32px #28432a16; overflow: auto; animation: detail-appear .18s ease-out; }
-.detail-main { flex: 1; min-width: 0; }
+.detail-main { flex: 1; min-width: 160px; }
+.detail-evidence { display: flex; flex-direction: column; gap: 9px; flex: 1; min-width: 150px; max-width: 45%; }
+.evidence-entry { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.evidence-entry blockquote { margin: 0; padding-left: 9px; border-left: 2px solid #d9e4d6; color: #7b8978; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .detail-time { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 12px; color: #47614d; }
 .yearless-badge { padding: 2px 6px; border-radius: 5px; background: #f7eee5; color: #a87b58; font-size: 10px; }
 .detail-main h3 { margin: 7px 0; color: #294432; font-size: 15px; font-weight: 600; line-height: 1.45; }
@@ -405,6 +464,7 @@ onUnmounted(() => {
 .explorer-vis-host :deep(.vis-item.vis-box) { border: 1px solid #99b198 !important; border-radius: 10px !important; color: #345c3d !important; background: #f0f6eb !important; font-size: 12px !important; }
 .explorer-vis-host :deep(.vis-item .vis-item-content) { padding: 9px 12px; }
 .explorer-vis-host :deep(.timeline-node-time) { display: block; margin-bottom: 4px; color: #7c936f; font-size: 9px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.explorer-vis-host :deep(.timeline-node-precision) { display: block; margin-top: 5px; color: #89947f; font-size: 9px; }
 .explorer-vis-host :deep(.timeline-node-title) { display: block; max-width: 260px; white-space: normal; line-height: 1.5; }
 .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box) { color: #8f6346 !important; background: #fbf3e8 !important; border-color: #cfad8e !important; }
 .explorer-vis-host :deep(.timeline-node-yearless .timeline-node-time) { color: #af8d6c; }
@@ -428,6 +488,6 @@ onUnmounted(() => {
 .is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-selected.vis-box) { border-color: #b28460 !important; background: linear-gradient(145deg, #fffaf2, #f8e5ce) !important; box-shadow: inset 0 1px 0 #fff, 0 0 0 2px #bd947430, 0 3px 0 #d6b698, 0 5px 0 #e6cdb5, 0 12px 22px #795b3024; }
 @keyframes detail-appear { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 950px) { .explorer-toolbar { gap: 7px; padding: 11px 12px 8px; } .explorer-heading { gap: 6px; } .explorer-heading-icon { width: 32px; height: 32px; border-radius: 9px; } .explorer-heading strong { font-size: 13px; } .person-filter { min-width: 112px; } .explorer-button { padding: 0 9px; font-size: 11px; } .explorer-view-toggle button { padding: 0 8px; font-size: 11px; } .explorer-scale-row { padding: 0 12px 8px; } .explorer-hint { font-size: 10px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 12px; } .timeline-reference { padding-inline: 12px; } .unified-chart { margin-inline: 10px; } .lane-overview { margin-inline: 10px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
-@media (max-width: 650px) { .explorer-heading { width: calc(100% - 125px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-scale { max-width: 100%; width: 100%; } .explorer-hint { display: none; } .lane-heading { gap: 6px 10px; } .timeline-legend { font-size: 9px; } .timeline-reference { font-size: 9px; } .shared-axis-tick > span { font-size: 9px; } .shared-axis-tick > small { font-size: 8px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail { gap: 10px; padding: 12px 38px 12px 14px; } .detail-actions { max-width: 115px; } .detail-main h3 { font-size: 13px; } }
+@media (max-width: 650px) { .explorer-heading { width: calc(100% - 125px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-scale { max-width: 100%; width: 100%; } .explorer-hint { display: none; } .lane-heading { gap: 6px 10px; } .timeline-legend { font-size: 9px; } .timeline-reference { font-size: 9px; } .shared-axis-tick > span { font-size: 9px; } .shared-axis-tick > small { font-size: 8px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail { gap: 10px; flex-wrap: wrap; padding: 12px 38px 12px 14px; } .detail-evidence { order: 3; flex-basis: 100%; max-width: none; } .detail-actions { max-width: 115px; } .detail-main h3 { font-size: 13px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button { transition: none; } }
 </style>

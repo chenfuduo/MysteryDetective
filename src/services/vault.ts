@@ -11,15 +11,23 @@ export type ClueRecord = { id: string; scriptId: string; number: number; title: 
 export type CluePhotoImportResult = { clues: ClueRecord[]; skippedDuplicates: number }
 export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
-export type TimelineRecord = { id: string; scriptId: string; title: string; startsAt: string; personIds: string[]; clueId: string; confirmed: boolean; yearlessMarkerIgnored?: boolean }
+export type OrganizationEvidence = { clueId: string; sourceNo: number; quote: string }
+export type TimelineRecord = { id: string; scriptId: string; title: string; startsAt: string; personIds: string[]; clueId: string; confirmed: boolean; yearlessMarkerIgnored?: boolean; evidence?: OrganizationEvidence[]; precision?: 'date' | 'hour' | 'minute'; approximate?: boolean }
 export type BoardItemRecord = { id: string; scriptId: string; kind: 'clue' | 'person' | 'note' | 'photo'; refId: string; text: string; x: number; y: number; color: string; group: string }
 export type BoardLinkRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
 export type NoteRecord = { id: string; scriptId: string; clueId: string; personId: string; text: string; createdAt: string }
 export type OrganizationPersonSuggestion = { id: string; name: string; aliases: string[]; sourceNo: number; quote: string }
 export type OrganizationRelationshipSuggestion = { id: string; from: string; to: string; label: string; sourceNo: number; quote: string }
-export type OrganizationTimelineSuggestion = { id: string; title: string; startsAt: string; people: string[]; sourceNo: number; quote: string; requiresTitle?: boolean }
+export type OrganizationTimelineSuggestion = { id: string; title: string; startsAt: string; people: string[]; sourceNo: number; quote: string; requiresTitle?: boolean; evidence?: OrganizationEvidence[]; precision?: 'date' | 'hour' | 'minute'; approximate?: boolean }
 export type OrganizationCluePointSuggestion = { id: string; title: string; category: string; tags: string[]; sourceNo: number; quote: string }
-export type OrganizationSnapshot = { id: string; scriptId: string; updatedAt: string; people: OrganizationPersonSuggestion[]; relationships: OrganizationRelationshipSuggestion[]; timeline: OrganizationTimelineSuggestion[]; cluePoints: OrganizationCluePointSuggestion[] }
+export type OrganizationSnapshot = { id: string; scriptId: string; updatedAt: string; people: OrganizationPersonSuggestion[]; relationships: OrganizationRelationshipSuggestion[]; timeline: OrganizationTimelineSuggestion[]; cluePoints: OrganizationCluePointSuggestion[]; processedClues?: Record<string, string>; resolvedKeys?: string[]; timelineAudit?: { sourceNo: number; clocks: number; covered: number; status: 'complete' | 'review'; message: string }[]; analysis?: { provider: 'deepseek' | 'openai' | 'local'; localReason?: 'offline' | 'quota'; reviewed: boolean } }
+export type OrganizationSuggestionKind = 'people' | 'relationships' | 'timeline' | 'cluePoints'
+export function organizationTextKey(value: string): string { return value.normalize('NFKC').toLocaleLowerCase().replace(/[\s“”‘’]/g, '') }
+export function suggestionKey(kind: OrganizationSuggestionKind, item: OrganizationSnapshot[OrganizationSuggestionKind][number]): string {
+  const value = item as OrganizationPersonSuggestion & OrganizationRelationshipSuggestion & OrganizationTimelineSuggestion & OrganizationCluePointSuggestion
+  const content = kind === 'people' ? value.name : kind === 'relationships' ? [value.from, value.to, value.label].join('|') : kind === 'timeline' ? [value.startsAt, value.title].join('|') : value.title
+  return JSON.stringify([kind, value.sourceNo, organizationTextKey(value.quote), organizationTextKey(content)])
+}
 export type AnnotationRecord = { id: string; clueId: string; strokes: unknown[] }
 
 type Table = 'scripts' | 'clues' | 'people' | 'relationships' | 'timeline' | 'board_items' | 'board_links' | 'notes' | 'annotations' | 'organization'
@@ -333,7 +341,12 @@ export async function updateClue(id: string, patch: Partial<ClueRecord>): Promis
 export async function deleteClue(id: string): Promise<void> {
   const clue = await getRecord<ClueRecord>('clues', id)
   if (!clue) return
-  for (const item of await listTimelineEvents(clue.scriptId)) if (item.clueId === id) await deleteTimelineEvent(item.id)
+  for (const item of await listTimelineEvents(clue.scriptId)) {
+    if (item.clueId !== id && !item.evidence?.some(source => source.clueId === id)) continue
+    const evidence = (item.evidence || []).filter(source => source.clueId !== id)
+    if (item.clueId !== id || evidence.length) await updateTimelineEvent(item.id, { evidence, clueId: item.clueId === id ? evidence[0]!.clueId : item.clueId })
+    else await deleteTimelineEvent(item.id)
+  }
   for (const item of await listBoardItems(clue.scriptId)) if (item.kind === 'clue' && item.refId === id) await deleteBoardItem(item.id)
   for (const item of await listNotes(clue.scriptId)) if (item.clueId === id) await deleteNote(item.id)
   const annotation = await getAnnotation(id)
@@ -364,6 +377,11 @@ export async function updatePerson(id: string, patch: Partial<PersonRecord>): Pr
   if (photoPath && photoPath !== existing.photoPath) await deleteImage(existing.photoPath)
   return putRecord('people', { ...existing, ...patch, photoPath: photoPath ?? existing.photoPath, id, scriptId: existing.scriptId })
 }
+export async function restorePerson(record: PersonRecord): Promise<PersonRecord> {
+  const existing = await getRecord<PersonRecord>('people', record.id)
+  if (existing && existing.scriptId !== record.scriptId) throw new Error('人物不属于当前剧本')
+  return putRecord('people', { ...record })
+}
 export async function deletePerson(id: string): Promise<void> {
   const person = await getRecord<PersonRecord>('people', id)
   if (!person) return
@@ -382,13 +400,49 @@ export async function listRelationships(scriptId: string): Promise<RelationshipR
 export async function createRelationship(scriptId: string, input: Partial<RelationshipRecord>): Promise<RelationshipRecord> {
   return putRecord('relationships', { id: uid(), scriptId, fromId: input.fromId || '', toId: input.toId || '', label: input.label || '' })
 }
+export async function restoreRelationship(record: RelationshipRecord): Promise<RelationshipRecord> {
+  const existing = await getRecord<RelationshipRecord>('relationships', record.id)
+  if (existing && existing.scriptId !== record.scriptId) throw new Error('关系不属于当前剧本')
+  return putRecord('relationships', { ...record })
+}
 export async function deleteRelationship(id: string): Promise<void> { await removeRecord('relationships', id) }
 
 export async function listTimelineEvents(scriptId: string): Promise<TimelineRecord[]> {
   return (await listRecords<TimelineRecord>('timeline', scriptId)).sort((a, b) => a.startsAt.localeCompare(b.startsAt))
 }
+function timelineIdentity(item: Pick<TimelineRecord, 'title' | 'startsAt' | 'personIds'>): string {
+  return JSON.stringify([organizationTextKey(item.title), item.startsAt, [...new Set(item.personIds)].sort()])
+}
+async function timelineEvidence(scriptId: string, input: Partial<TimelineRecord>): Promise<OrganizationEvidence[]> {
+  const clues = await listClues(scriptId)
+  const sources = new Map(clues.map(clue => [clue.id, clue]))
+  const evidence = new Map<string, OrganizationEvidence>()
+  for (const source of input.evidence || []) {
+    const clue = sources.get(source.clueId)
+    if (clue) evidence.set(JSON.stringify([clue.id, source.quote]), { clueId: clue.id, sourceNo: clue.number, quote: source.quote })
+  }
+  if (input.clueId && sources.has(input.clueId) && ![...evidence.values()].some(item => item.clueId === input.clueId)) {
+    evidence.set(JSON.stringify([input.clueId, '']), { clueId: input.clueId, sourceNo: sources.get(input.clueId)!.number, quote: '' })
+  }
+  return [...evidence.values()]
+}
+export async function mergeTimelineEvidence(existing: TimelineRecord, input: Partial<TimelineRecord>): Promise<TimelineRecord> {
+  const evidence = await timelineEvidence(existing.scriptId, { clueId: existing.clueId || input.clueId, evidence: [...(existing.evidence || []), ...(input.evidence || [])] })
+  if (input.clueId && input.clueId !== existing.clueId && !evidence.some(item => item.clueId === input.clueId)) evidence.push(...await timelineEvidence(existing.scriptId, { clueId: input.clueId }))
+  return putRecord('timeline', { ...existing, evidence, clueId: existing.clueId || evidence[0]?.clueId || '', precision: existing.precision || input.precision, approximate: existing.approximate ?? input.approximate })
+}
 export async function createTimelineEvent(scriptId: string, input: Partial<TimelineRecord>): Promise<TimelineRecord> {
-  return putRecord('timeline', { id: uid(), scriptId, title: input.title || '', startsAt: input.startsAt || '', personIds: input.personIds || [], clueId: input.clueId || '', confirmed: input.confirmed ?? true, yearlessMarkerIgnored: input.yearlessMarkerIgnored ?? false })
+  const record: TimelineRecord = { id: uid(), scriptId, title: input.title || '', startsAt: input.startsAt || '', personIds: input.personIds || [], clueId: input.clueId || '', confirmed: input.confirmed ?? true, yearlessMarkerIgnored: input.yearlessMarkerIgnored ?? false, evidence: await timelineEvidence(scriptId, input), precision: input.precision, approximate: input.approximate }
+  if (record.title && !/待确认|待补充/.test(record.title)) {
+    const duplicate = (await listTimelineEvents(scriptId)).find(event => event.confirmed === record.confirmed && timelineIdentity(event) === timelineIdentity(record))
+    if (duplicate) return mergeTimelineEvidence(duplicate, record)
+  }
+  return putRecord('timeline', record)
+}
+export async function restoreTimelineEvent(record: TimelineRecord): Promise<TimelineRecord> {
+  const existing = await getRecord<TimelineRecord>('timeline', record.id)
+  if (existing && existing.scriptId !== record.scriptId) throw new Error('时间节点不属于当前剧本')
+  return putRecord('timeline', { ...record })
 }
 export async function updateTimelineEvent(id: string, patch: Partial<TimelineRecord>): Promise<TimelineRecord> {
   const existing = await getRecord<TimelineRecord>('timeline', id)
@@ -421,10 +475,16 @@ export async function getOrganization(scriptId: string): Promise<OrganizationSna
 export async function saveOrganization(scriptId: string, result: OrganizationSnapshot): Promise<OrganizationSnapshot> {
   return putRecord('organization', { ...result, id: `organization-${scriptId}`, scriptId, updatedAt: now() })
 }
-export async function resolveOrganizationSuggestion(scriptId: string, kind: 'people' | 'relationships' | 'timeline' | 'cluePoints', id: string): Promise<void> {
+export async function resolveOrganizationSuggestion(scriptId: string, kind: OrganizationSuggestionKind, id: string): Promise<void> {
   const result = await getOrganization(scriptId)
   if (!result) return
-  await saveOrganization(scriptId, { ...result, [kind]: result[kind].filter(item => item.id !== id) })
+  const item = result[kind].find(value => value.id === id)
+  const keys = new Set(result.resolvedKeys || [])
+  if (item) {
+    keys.add(suggestionKey(kind, item))
+    if (kind === 'timeline') for (const source of (item as OrganizationTimelineSuggestion).evidence || []) keys.add(suggestionKey(kind, { ...item, sourceNo: source.sourceNo, quote: source.quote }))
+  }
+  await saveOrganization(scriptId, { ...result, resolvedKeys: [...keys], [kind]: result[kind].filter(item => item.id !== id) })
 }
 
 export async function createNote(scriptId: string, input: Partial<NoteRecord>): Promise<NoteRecord> {

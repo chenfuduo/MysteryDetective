@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type {
   ClueRecord,
   OrganizationCluePointSuggestion,
@@ -28,20 +28,27 @@ const props = defineProps<{
   autoOrganize: boolean
   apiConfigured: boolean
   apiProvider: string
+  canUndo?: boolean
+  progress?: string
 }>()
 const emit = defineEmits<{
   analyze: []
   navigate: [view: 'clues' | 'people' | 'timeline' | 'board' | 'notes' | 'compare' | 'settings', section?: 'profiles' | 'relationships']
-  openClue: [sourceNo: number]
+  openClue: [sourceNo: number, quote?: string]
   acceptPerson: [id: string]
   acceptRelationship: [id: string]
   acceptTimeline: [id: string]
   acceptCluePoint: [id: string]
   clearSuggestions: []
+  bulkAccept: [selection: { kind: Suggestion['kind']; id: string }[]]
+  bulkIgnore: [selection: { kind: Suggestion['kind']; id: string }[]]
+  undo: []
 }>()
 const activeFilter = ref('all')
 const expandedIds = ref<string[]>([])
 const reviewElement = ref<HTMLElement | null>(null)
+const selectedKeys = ref<string[]>([])
+const selectionKey = (suggestion: Suggestion) => `${suggestion.kind}:${suggestion.item.id}`
 function focusSuggestions() {
   activeFilter.value = 'all'
   reviewElement.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -68,6 +75,39 @@ const filters = computed(() => [
 const visibleSuggestions = computed(() => activeFilter.value === 'all'
   ? allSuggestions.value
   : allSuggestions.value.filter(item => item.kind === activeFilter.value))
+const selectedSuggestions = computed(() => allSuggestions.value.filter(item => selectedKeys.value.includes(selectionKey(item))))
+const selectedCount = computed(() => selectedSuggestions.value.length)
+const allVisibleSelected = computed(() => visibleSuggestions.value.length > 0 && visibleSuggestions.value.every(item => selectedKeys.value.includes(selectionKey(item))))
+const incompleteSelected = computed(() => selectedSuggestions.value.filter(item => item.kind === 'timeline' && (item.item.requiresTitle || !item.item.title.trim())).length)
+watch(allSuggestions, items => {
+  const available = new Set(items.map(selectionKey))
+  selectedKeys.value = selectedKeys.value.filter(key => available.has(key))
+})
+function selectSuggestion(suggestion: Suggestion) {
+  if (props.busy) return
+  const key = selectionKey(suggestion)
+  selectedKeys.value = selectedKeys.value.includes(key) ? selectedKeys.value.filter(value => value !== key) : [...selectedKeys.value, key]
+}
+function selectVisible() {
+  if (props.busy) return
+  const visible = new Set(visibleSuggestions.value.map(selectionKey))
+  selectedKeys.value = allVisibleSelected.value ? selectedKeys.value.filter(key => !visible.has(key)) : [...new Set([...selectedKeys.value, ...visible])]
+}
+function bulk(action: 'accept' | 'ignore') {
+  if (props.busy || !selectedCount.value) return
+  const selection = selectedSuggestions.value.map(item => ({ kind: item.kind, id: item.item.id }))
+  if (action === 'accept') emit('bulkAccept', selection)
+  else emit('bulkIgnore', selection)
+}
+const auditTotals = computed(() => (props.organization?.timelineAudit || []).reduce((total, audit) => ({ clocks: total.clocks + audit.clocks, covered: total.covered + audit.covered, review: total.review + (audit.status === 'review' ? 1 : 0) }), { clocks: 0, covered: 0, review: 0 }))
+const analysisLabel = computed(() => {
+  const analysis = props.organization?.analysis
+  if (!analysis) return ''
+  const provider = analysis.provider === 'local' ? `本地整理${analysis.localReason === 'offline' ? '（网络不可用）' : analysis.localReason === 'quota' ? '（API 余额不足）' : ''}` : analysis.provider === 'openai' ? 'GPT' : 'DeepSeek'
+  return `${provider} · ${analysis.reviewed ? '已复核时间覆盖' : '时间覆盖待核对'}`
+})
+const auditOriginal = (sourceNo: number) => props.clues.find(clue => clue.number === sourceNo)?.ocrText || '当前线索暂无 OCR 原文。'
+const precisionLabel = (item: OrganizationTimelineSuggestion) => ({ date: '仅日期', hour: '精确到时', minute: '精确到分' })[item.precision || (/T\d{2}:\d{2}$/.test(item.startsAt) ? 'minute' : /T\d{2}$/.test(item.startsAt) ? 'hour' : 'date')]
 const dateLabel = (value: string) => {
   const partial = value.match(/^--(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
   if (partial) return `${Number(partial[1])}月${Number(partial[2])}日${partial[3] ? ` ${partial[4] ? `${partial[3]}:${partial[4]}` : `${partial[3]}时`}` : ''}`
@@ -84,10 +124,11 @@ const title = (suggestion: Suggestion) => {
   return `${suggestion.item.title}${suggestion.item.category ? ` · ${suggestion.item.category}` : ''}`
 }
 const actionLabel = (suggestion: Suggestion) => {
-  if (suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')) return '录入无年份'
-  if (suggestion.kind === 'timeline' && (suggestion.item.requiresTitle || !/T\d{2}:\d{2}$/.test(suggestion.item.startsAt))) return '补充并确认'
-  return ({ people: '加入人物', relationships: '确认关系', timeline: '加入时间线', cluePoints: '应用到线索' })[suggestion.kind]
+  if (suggestion.kind === 'timeline' && (suggestion.item.requiresTitle || suggestion.item.title === '待补充事件')) return '补充事件'
+  if (suggestion.kind === 'timeline') return '直接录入'
+  return ({ people: '加入人物', relationships: '确认关系', cluePoints: '应用到线索' })[suggestion.kind]
 }
+
 const isLongQuote = (item: Suggestion['item']) => item.quote.length > 115
 function toggleQuote(id: string) {
   expandedIds.value = expandedIds.value.includes(id) ? expandedIds.value.filter(value => value !== id) : [...expandedIds.value, id]
@@ -120,7 +161,8 @@ function accept(suggestion: Suggestion) {
 
     <div class="organize-status" :class="{ ready: apiConfigured }">
       <span class="status-dot" :class="{ processing: busy }"></span>
-      <span v-if="busy" role="status" aria-live="polite">正在整理 OCR 文字，完成后建议会显示在下方。</span>
+      <span v-if="progress || busy" role="status" aria-live="polite">{{ progress || '正在整理 OCR 文字，完成后建议会显示在下方。' }}</span>
+      <span v-else-if="analysisLabel">{{ analysisLabel }} · 只整理 OCR 文字，照片保存在本机。</span>
       <span v-else-if="!apiConfigured">照片和 OCR 保存在本机；AI 整理尚未配置。</span>
       <span v-else-if="autoOrganize">自动整理已开启 · OCR 文字发送到 {{ apiProvider }}，照片留在 iPad。</span>
       <span v-else>手动整理 · OCR 文字发送到 {{ apiProvider }}，照片留在 iPad。</span>
@@ -151,19 +193,37 @@ function accept(suggestion: Suggestion) {
       </div>
     </nav>
 
+    <details v-if="organization?.timelineAudit?.length" class="timeline-audit">
+      <summary><span class="audit-summary-title">时间提取核对</span><span class="audit-total">{{ auditTotals.covered }} / {{ auditTotals.clocks }} 处时间已覆盖</span><span class="audit-state" :class="{ 'needs-review': auditTotals.review }">{{ auditTotals.review ? `${auditTotals.review} 条线索需核对` : '覆盖完整' }}</span><span class="audit-expand">展开 ›</span></summary>
+      <div class="audit-items">
+        <article v-for="audit in organization.timelineAudit" :key="audit.sourceNo" class="audit-row">
+          <div class="audit-row-heading"><button class="source-link" @click="emit('openClue', audit.sourceNo, auditOriginal(audit.sourceNo))">原线索 #{{ String(audit.sourceNo).padStart(3, '0') }} ›</button><span class="audit-state" :class="{ 'needs-review': audit.status === 'review' }">{{ audit.status === 'review' ? '需核对' : '覆盖完整' }}</span><span>{{ audit.covered }} / {{ audit.clocks }} 处</span></div>
+          <p>{{ audit.message }}</p>
+          <details class="audit-source"><summary>展开 OCR 原文</summary><p>{{ auditOriginal(audit.sourceNo) }}</p></details>
+        </article>
+      </div>
+    </details>
+
     <section ref="reviewElement" class="review-section">
       <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><div class="review-heading-actions"><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
       <nav class="review-filters" aria-label="筛选整理建议">
         <button v-for="filter in filters" :key="filter.id" :class="{ active: activeFilter === filter.id }" :aria-pressed="activeFilter === filter.id" @click="activeFilter = filter.id">{{ filter.label }} <span>{{ filter.count }}</span></button>
       </nav>
+      <div v-if="pendingCount || canUndo" class="review-batch">
+        <label v-if="visibleSuggestions.length" class="batch-select"><input type="checkbox" :checked="allVisibleSelected" :disabled="busy" @change="selectVisible" /><span>全选当前 {{ visibleSuggestions.length }} 项</span></label>
+        <span class="batch-count" role="status">共选 {{ selectedCount }} 项<span v-if="activeFilter !== 'all' && selectedCount">（含其他分类）</span></span>
+        <div class="batch-actions"><button :disabled="busy || !selectedCount" class="batch-accept" @click="bulk('accept')">录入所选{{ selectedCount ? ` ${selectedCount}` : '' }}</button><button :disabled="busy || !selectedCount" @click="bulk('ignore')">忽略所选{{ selectedCount ? ` ${selectedCount}` : '' }}</button><button :disabled="busy || !canUndo" @click="emit('undo')">撤销上一步</button></div>
+        <p v-if="incompleteSelected" class="batch-incomplete">所选 {{ incompleteSelected }} 项时间尚缺事件说明，批量录入后会保留，补充事件后可单独录入。</p>
+      </div>
       <div v-if="!organization" class="review-empty"><strong>还没有整理结果</strong><p>点击右上角“整理线索”生成待核对建议。</p></div>
       <div v-else-if="!visibleSuggestions.length" class="review-empty"><strong>{{ pendingCount ? '这个分类暂时没有建议' : '没有待确认的建议' }}</strong><p>{{ pendingCount ? '切换分类查看其他建议。' : '录入新线索后可以再次整理。' }}</p></div>
       <div v-else class="suggestion-list">
-        <article v-for="suggestion in visibleSuggestions" :key="suggestion.item.id" class="suggestion-row">
+        <article v-for="suggestion in visibleSuggestions" :key="suggestion.item.id" class="suggestion-row" :class="{ 'is-selected': selectedKeys.includes(selectionKey(suggestion)) }">
+          <label class="suggestion-select"><input type="checkbox" :checked="selectedKeys.includes(selectionKey(suggestion))" :disabled="busy" :aria-label="`选择${title(suggestion)}`" @change="selectSuggestion(suggestion)" /></label>
           <div class="suggestion-main">
-            <div class="suggestion-title"><span class="kind-pill" :class="`kind-${suggestion.kind}`">{{ kindLabel(suggestion.kind) }}</span><strong>{{ title(suggestion) }}</strong><span v-if="suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')" class="yearless-pill">无年份</span></div>
+            <div class="suggestion-title"><span class="kind-pill" :class="`kind-${suggestion.kind}`">{{ kindLabel(suggestion.kind) }}</span><strong>{{ title(suggestion) }}</strong><span v-if="suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')" class="yearless-pill">无年份</span><span v-if="suggestion.kind === 'timeline'" class="precision-pill">{{ precisionLabel(suggestion.item) }}</span><span v-if="suggestion.kind === 'timeline' && suggestion.item.approximate" class="precision-pill is-approximate">约时</span><span v-if="suggestion.kind === 'timeline' && (suggestion.item.requiresTitle || !suggestion.item.title.trim())" class="needs-title-pill">需补充事件</span></div>
             <p :class="['evidence-quote', { expanded: expandedIds.includes(suggestion.item.id) }]">{{ quote(suggestion.item) }}</p>
-            <div class="suggestion-meta"><button class="source-link" @click="emit('openClue', sourceNo(suggestion.item))">原线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button><button v-if="isLongQuote(suggestion.item)" class="quote-toggle" :aria-expanded="expandedIds.includes(suggestion.item.id)" @click="toggleQuote(suggestion.item.id)">{{ expandedIds.includes(suggestion.item.id) ? '收起摘录' : '展开摘录' }}</button></div>
+            <div class="suggestion-meta"><button class="source-link" @click="emit('openClue', sourceNo(suggestion.item), quote(suggestion.item))">原线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button><template v-if="suggestion.kind === 'timeline'"><button v-for="source in suggestion.item.evidence?.filter(item => item.sourceNo !== suggestion.item.sourceNo || item.quote !== suggestion.item.quote) || []" :key="`${source.clueId}:${source.quote}`" class="source-link" @click="emit('openClue', source.sourceNo, source.quote)">另见 #{{ String(source.sourceNo).padStart(3, '0') }} <span>›</span></button></template><button v-if="isLongQuote(suggestion.item)" class="quote-toggle" :aria-expanded="expandedIds.includes(suggestion.item.id)" @click="toggleQuote(suggestion.item.id)">{{ expandedIds.includes(suggestion.item.id) ? '收起摘录' : '展开摘录' }}</button></div>
           </div>
           <button class="suggestion-action" :disabled="busy" @click="accept(suggestion)">{{ actionLabel(suggestion) }}</button>
         </article>
@@ -175,6 +235,9 @@ function accept(suggestion: Suggestion) {
 
 <style scoped>
 .organization-page {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -243,6 +306,34 @@ function accept(suggestion: Suggestion) {
 .source-link span { color: #8ea695; font-size: 18px; }
 .quote-toggle { color: #a0aaa3; }
 .suggestion-action { flex: 0 0 auto; min-height: 42px; padding: 0 15px; border: 1px solid #d4e2d7; border-radius: 10px; background: #edf4ee; color: #315c48; font-size: 13px; font-weight: 620; white-space: nowrap; transition: background .18s ease, transform .18s ease; }
+.timeline-audit { border: 1px solid #e2e9df; border-radius: 13px; background: #fbfcf9; color: #53695a; font-size: 12px; }
+.timeline-audit > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; min-height: 48px; padding: 10px 16px; cursor: pointer; list-style: none; }
+.timeline-audit > summary::-webkit-details-marker { display: none; }
+.audit-summary-title { color: #38543f; font-weight: 650; }
+.audit-total { color: #758277; font-variant-numeric: tabular-nums; }
+.audit-expand { margin-left: auto; color: #7f9082; }
+.timeline-audit[open] .audit-expand { transform: rotate(90deg); }
+.audit-state { display: inline-flex; padding: 3px 7px; border-radius: 6px; background: #edf4ed; color: #52755a; font-size: 11px; white-space: nowrap; }
+.audit-state.needs-review { background: #fbf0e5; color: #ad7548; }
+.audit-items { padding: 0 16px; border-top: 1px solid #e7ede3; }
+.audit-row { padding: 10px 0 12px; border-bottom: 1px solid #e8ede4; }
+.audit-row:last-child { border-bottom: none; }
+.audit-row-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-variant-numeric: tabular-nums; }
+.audit-row > p { margin: 3px 0 8px; color: #7b877e; line-height: 1.6; }
+.audit-source > summary { color: #64836a; cursor: pointer; min-height: 32px; line-height: 32px; }
+.audit-source > p { max-height: 260px; margin: 8px 0 0; padding: 12px; overflow: auto; border-radius: 9px; background: #f2f6ef; color: #657569; white-space: pre-wrap; line-height: 1.8; }
+.review-batch { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 21px; border-bottom: 1px solid #e7eee5; background: #f8fbf6; }
+.batch-select { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; color: #536f58; font-size: 12px; cursor: pointer; }
+.batch-select input, .suggestion-select input { width: 19px; height: 19px; margin: 0; accent-color: #3f7052; cursor: pointer; }
+.batch-count { color: #7b8d7e; font-size: 11px; }
+.batch-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-left: auto; }
+.batch-actions button { min-height: 36px; padding: 0 11px; border: 1px solid #dbe5d7; border-radius: 8px; background: #fff; color: #5c765f; font-size: 12px; }
+.batch-actions .batch-accept { border-color: #3a654a; background: #3a654a; color: #fff; }
+.batch-incomplete { flex: 0 0 100%; margin: 0; color: #a47649; font-size: 11px; line-height: 1.6; }
+.suggestion-select { display: flex; align-items: center; justify-content: center; align-self: stretch; flex: 0 0 28px; min-width: 28px; cursor: pointer; }
+.suggestion-row.is-selected .suggestion-title strong { color: #2f6842; }
+.precision-pill, .needs-title-pill { display: inline-flex; align-items: center; padding: 3px 6px; border-radius: 5px; background: #f0f4f6; color: #7b8b96; font-size: 10px; white-space: nowrap; }
+.precision-pill.is-approximate, .needs-title-pill { background: #fcf2e7; color: #b18452; }
 .review-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 190px; padding: 25px; text-align: center; }
 .review-empty strong { color: #4c6253; font-size: 15px; font-weight: 620; }
 .review-empty p { margin: 9px 0 0; color: #94a097; font-size: 13px; line-height: 1.6; }
@@ -284,7 +375,10 @@ button:focus-visible { outline: 2px solid #638772; outline-offset: 3px; }
   .review-filters { padding: 0 12px 10px; }
   .review-filters button { gap: 5px; padding: 0 10px; font-size: 12px; }
   .suggestion-list { padding: 0 16px; }
-  .suggestion-row { gap: 13px; padding: 17px 0; }
+  .suggestion-row { gap: 9px; padding: 17px 0; }
+  .review-batch { padding: 10px 16px; gap: 7px; }
+  .batch-actions { flex-basis: 100%; margin-left: 27px; }
+  .suggestion-select { flex-basis: 22px; min-width: 22px; }
   .suggestion-title strong { font-size: 14px; }
   .suggestion-action { padding: 0 11px; font-size: 12px; }
 }

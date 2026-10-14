@@ -13,18 +13,22 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   'open-person': [personId: string]
+  'view-person': [personId: string]
   'view-clues': [personId: string]
   'remove-relationship': [relationshipId: string]
   'add-relationship': [fromId?: string, toId?: string]
 }>()
 
 type Point = { x: number; y: number }
-type Gesture = { kind: 'pan' | 'person' | 'connect'; start: Point; pan: Point; personId?: string; position?: Point; moved: boolean }
+type Gesture = { kind: 'pan' | 'person' | 'connect'; start: Point; pan: Point; personId?: string; position?: Point; beforePositions?: Record<string, Point>; moved: boolean }
 type Pinch = { distance: number; zoom: number; anchor: Point }
 const stage = ref<HTMLElement | null>(null)
 const positions = ref<Record<string, Point>>({})
 const pan = ref<Point>({ x: 0, y: 0 })
 const zoom = ref(1)
+const moveHistory = ref<Record<string, Point>[]>([])
+let activeScriptId = props.scriptId
+let viewReady = false
 const spatial = ref(true)
 const fullscreen = ref(false)
 const selectedId = ref('')
@@ -136,6 +140,35 @@ function personStyle(person: PersonRecord, index: number) {
   return { left: `${point.x}px`, top: `${point.y}px`, '--card-depth': `${index % 3 * 4}px` }
 }
 function layoutKey(): string { return `clue-vault:relationship-layout:${props.scriptId}:v1` }
+function viewKey() { return `clue-vault:relationship-view:${activeScriptId}:v1` }
+function persistView() {
+  if (!viewReady) return
+  try { sessionStorage.setItem(viewKey(), JSON.stringify({ pan: pan.value, zoom: zoom.value, spatial: spatial.value, viewport: viewport.value })) } catch { /* The current view remains usable without storage. */ }
+}
+function restoreView() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(viewKey()) || 'null')
+    if (!saved || !Number.isFinite(saved.pan?.x) || !Number.isFinite(saved.pan?.y) || !Number.isFinite(saved.zoom) || saved.zoom <= 0) return false
+    zoom.value = Math.max(.06, Math.min(3, saved.zoom))
+    spatial.value = typeof saved.spatial === 'boolean' ? saved.spatial : true
+    pan.value = { x: saved.pan.x + (viewport.value.width - (saved.viewport?.width || viewport.value.width)) / 2, y: saved.pan.y + (viewport.value.height - (saved.viewport?.height || viewport.value.height)) / 2 }
+    return true
+  } catch { return false }
+}
+function finishPersonMove() {
+  if (gesture?.kind !== 'person' || !gesture.personId || !gesture.position || !gesture.beforePositions) return
+  const current = positions.value[gesture.personId]
+  if (!current || (current.x === gesture.position.x && current.y === gesture.position.y)) return
+  moveHistory.value = [...moveHistory.value.slice(-19), gesture.beforePositions]
+  persistLayout()
+}
+function undoPersonMove() {
+  if (!moveHistory.value.length || linkSourceId.value || awaitingRelationship.value || pointers.size) return
+  const previous = moveHistory.value[moveHistory.value.length - 1]
+  moveHistory.value = moveHistory.value.slice(0, -1)
+  positions.value = Object.fromEntries(people.value.map(person => [person.id, previous[person.id] ? { ...previous[person.id] } : positions.value[person.id]]))
+  persistLayout()
+}
 function persistLayout() {
   try { localStorage.setItem(layoutKey(), JSON.stringify(positions.value)) } catch { /* The view remains usable when storage is full. */ }
 }
@@ -199,12 +232,14 @@ function measure() {
   const height = Math.max(1, rect.height)
   if (initialized && !linkSourceId.value) pan.value = { x: pan.value.x + (width - viewport.value.width) / 2, y: pan.value.y + (height - viewport.value.height) / 2 }
   viewport.value = { width, height }
+  persistView()
 }
 function localPoint(event: PointerEvent | WheelEvent): Point {
   const rect = stage.value!.getBoundingClientRect()
   return { x: event.clientX - rect.left, y: event.clientY - rect.top }
 }
 function startPinch() {
+  finishPersonMove()
   clearLongPress()
   linkSourceId.value = ''; linkTargetId.value = ''; linkEndpoint.value = null; awaitingRelationship.value = false
   const [a, b] = [...pointers.values()]
@@ -221,7 +256,7 @@ function pointerDown(event: PointerEvent) {
   stage.value?.setPointerCapture(event.pointerId)
   if (pointers.size >= 2) { startPinch(); return }
   const personId = (event.target as Element).closest<HTMLElement>('[data-person]')?.dataset.person
-  gesture = { kind: linkSourceId.value ? 'connect' : personId ? 'person' : 'pan', start: point, pan: { ...pan.value }, personId, position: personId ? { ...positions.value[personId] } : undefined, moved: false }
+  gesture = { kind: linkSourceId.value ? 'connect' : personId ? 'person' : 'pan', start: point, pan: { ...pan.value }, personId, position: personId ? { ...positions.value[personId] } : undefined, beforePositions: personId && !linkSourceId.value ? Object.fromEntries(Object.entries(positions.value).map(([id, position]) => [id, { ...position }])) : undefined, moved: false }
   dragging.value = !linkSourceId.value
   if (linkSourceId.value) updateConnection(event)
   else if (personId && people.value.length > 1) {
@@ -257,7 +292,7 @@ function pointerEnd(event: PointerEvent) {
   let targetId = ''
   if (connecting && !cancelled) { updateConnection(event); targetId = linkTargetId.value }
   else if (gesture?.kind === 'person') {
-    if (gesture.moved) persistLayout()
+    if (gesture.moved) finishPersonMove()
     else if (!cancelled) selectedId.value = gesture.personId || ''
   } else if (gesture?.kind === 'pan' && !gesture.moved && !cancelled) selectedId.value = ''
   pointers.delete(event.pointerId)
@@ -278,17 +313,23 @@ function wheel(event: WheelEvent) {
   else pan.value = { x: pan.value.x - event.deltaX, y: pan.value.y - event.deltaY }
 }
 function onKey(event: KeyboardEvent) {
+  const target = event.target instanceof Element ? event.target : null
+  if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
+  if (target?.closest('[role="dialog"]') && !target.closest('.relationship-explorer')) return
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z' && !props.relationshipDialogOpen && moveHistory.value.length && !linkSourceId.value) { event.preventDefault(); undoPersonMove(); return }
   if (event.key !== 'Escape' || awaitingRelationship.value) return
   if (linkSourceId.value) cancelConnection()
   else if (fullscreen.value) fullscreen.value = false
 }
 watch(() => props.scriptId, async () => {
+  persistView(); viewReady = false; activeScriptId = props.scriptId; moveHistory.value = []
   cancelConnection(); selectedId.value = ''; search.value = ''; syncPeople(true)
-  await nextTick(); measure(); fit()
+  await nextTick(); measure(); if (!restoreView()) fit(); viewReady = true; persistView()
 })
+watch([pan, zoom, spatial], persistView, { deep: true, flush: 'sync' })
 watch(() => people.value.map(person => person.id).join('|'), async () => {
   if (linkSourceId.value && (!peopleById.value.has(linkSourceId.value) || (linkTargetId.value && !peopleById.value.has(linkTargetId.value)))) cancelConnection()
-  syncPeople(); await nextTick(); measure(); fit()
+  syncPeople(); await nextTick(); measure(); if (!initialized) fit()
 })
 watch(() => props.relationshipDialogOpen, (open, previous) => {
   if (previous && !open && awaitingRelationship.value) cancelConnection()
@@ -301,12 +342,13 @@ watch(fullscreen, async value => {
 onMounted(async () => {
   syncPeople(true)
   await nextTick()
-  measure(); fit(); initialized = true
+  measure(); if (!restoreView()) fit(); initialized = true; viewReady = true; persistView()
   observer = new ResizeObserver(measure)
   if (stage.value) observer.observe(stage.value)
   window.addEventListener('keydown', onKey)
 })
 onBeforeUnmount(() => {
+  persistView(); viewReady = false
   cancelConnection()
   observer?.disconnect()
   window.removeEventListener('keydown', onKey)
@@ -320,6 +362,7 @@ onBeforeUnmount(() => {
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>{{ people.length }} 位人物</strong><span>{{ relationships.length }} 条手动关系</span></div>
         <div class="graph-actions">
+          <button type="button" class="graph-icon-button graph-undo" title="撤销人物移动" aria-label="撤销人物移动" :disabled="!moveHistory.length || Boolean(linkSourceId) || Boolean(relationshipDialogOpen)" @click="undoPersonMove"><UiIcon name="arrowLeft" :size="19" /></button>
           <button type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" /><span>添加关系</span></button>
           <button type="button" class="graph-icon-button" :title="fullscreen ? '退出全屏' : '全屏查看'" :aria-label="fullscreen ? '退出全屏' : '全屏查看'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'restore' : 'fullscreen'" /></button>
           <button v-if="fullscreen" type="button" class="graph-icon-button" aria-label="关闭全屏" @click="fullscreen = false"><UiIcon name="close" /></button>
@@ -359,6 +402,7 @@ onBeforeUnmount(() => {
           <div class="inspector-content">
             <div class="inspector-person"><div class="graph-person-avatar"><img v-if="imageFor(selected)" :src="imageFor(selected)" alt="" /><span v-else>{{ selected.name.slice(0, 1) }}</span></div><div><h3>{{ selected.name }}</h3><p>{{ selected.aliases.length ? selected.aliases.join(' · ') : '暂无别名' }}</p></div></div>
             <div class="inspector-actions"><button type="button" @click="emit('open-person', selected.id)"><UiIcon name="edit" :size="16" />编辑档案</button><button type="button" @click="emit('view-clues', selected.id)"><UiIcon name="archive" :size="16" />线索 {{ clueCounts[selected.id] || 0 }}</button></div>
+            <button type="button" class="inspector-workspace" @click="emit('view-person', selected.id)"><UiIcon name="person" :size="17" /><span>人物线索与事件</span><UiIcon name="chevron" :size="16" /></button>
             <p v-if="selected.notes" class="inspector-notes">{{ selected.notes }}</p>
             <div class="inspector-section-title"><strong>关联人物</strong><span>{{ selectedRelationships.length }}</span></div>
             <div v-for="relationship in selectedRelationships" :key="relationship.id" class="inspector-relation"><button type="button" class="relation-person" @click="focusPerson(relationship.fromId === selected.id ? relationship.toId : relationship.fromId)"><span>{{ relationship.label || '关联' }}</span><strong>{{ peopleById.get(relationship.fromId === selected.id ? relationship.toId : relationship.fromId)?.name }}</strong><UiIcon name="chevron" :size="16" /></button><button type="button" class="graph-icon-button relation-delete" :aria-label="`删除${relationship.label || '关联'}关系`" @click="emit('remove-relationship', relationship.id)"><UiIcon name="trash" :size="16" /></button></div>
@@ -384,6 +428,7 @@ onBeforeUnmount(() => {
 .graph-text-button, .graph-icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 40px; min-height: 40px; padding: 0 12px; border: 1px solid #e1e7df; border-radius: 11px; background: #fff; color: var(--graph-green); font: inherit; font-size: 13px; cursor: pointer; }
 .graph-text-button { border-color: var(--graph-green); background: var(--graph-green); color: #fff; font-weight: 600; }
 .graph-icon-button { padding: 0; }
+.graph-icon-button:disabled { opacity: .35; cursor: default; }
 .graph-layout { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
 .graph-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 30%, #fff 0%, #f6f8f4 75%); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
 .graph-stage.is-dragging { cursor: grabbing; }
@@ -464,6 +509,8 @@ onBeforeUnmount(() => {
 .inspector-person p { margin: 0; color: #96a18e; font-size: 11px; overflow-wrap: anywhere; }
 .inspector-actions { display: flex; gap: 7px; margin: 18px 0; }
 .inspector-actions button { display: inline-flex; align-items: center; justify-content: center; flex: 1; gap: 5px; min-height: 40px; padding: 5px; border: 1px solid #e2e9dc; border-radius: 9px; background: #f8faf5; color: var(--graph-green); font: inherit; font-size: 11px; }
+.inspector-workspace { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; margin: -6px 0 18px; padding: 9px 11px; border: 1px solid #d8e5d7; border-radius: 10px; background: #edf4ec; color: var(--graph-green); font: inherit; font-size: 12px; text-align: left; }
+.inspector-workspace span { flex: 1; }
 .inspector-notes { margin: 0 0 20px; padding: 11px; border-radius: 10px; background: #f5f7f1; color: #7e8d76; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .inspector-section-title { display: flex; align-items: center; justify-content: space-between; margin: 18px 0 8px; }
 .inspector-section-title strong { font-size: 12px; }

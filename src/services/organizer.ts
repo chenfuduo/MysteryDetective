@@ -115,8 +115,20 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
   for (const item of asArray(raw.timeline) as RawTimeline[]) {
     const source = sourceQuote(number(item.source), item.quote, clues)
     const title = text(item.title, 100)
-    const startsAt = validDate(item.startsAt, source?.quote || '')
+    let startsAt = validDate(item.startsAt, source?.quote || '')
     if (!source || !title || !startsAt) continue
+    if (!startsAt.includes('T')) {
+      const quoteTimes = extractExplicitTimeline([{ ...source.clue, ocrText: source.quote }])
+        .filter(candidate => candidate.startsAt.includes('T') && candidate.startsAt.slice(-5) === startsAt.slice(-5))
+        .filter(candidate => {
+          const suggestedYear = startsAt.startsWith('--') ? '' : startsAt.slice(0, 4)
+          const detectedYear = candidate.startsAt.startsWith('--') ? '' : candidate.startsAt.slice(0, 4)
+          return !suggestedYear || !detectedYear || suggestedYear === detectedYear
+        })
+      const distinctTimes = [...new Set(quoteTimes.map(candidate => candidate.startsAt))]
+      if (distinctTimes.length === 1) startsAt = distinctTimes[0]
+      else if (distinctTimes.length > 1) continue
+    }
     const names = Array.isArray(item.people) ? item.people.map(value => text(value, 60)).filter(value => value && source.quote.includes(value)).slice(0, 8) : []
     timeline.push({ id: crypto.randomUUID(), title, startsAt, people: names, sourceNo: source.clue.number, quote: source.quote })
   }
@@ -188,7 +200,7 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
 
   const system = `你是剧本杀线索的文字整理工具。只整理用户给出的 OCR 原文，不搜索外部资料，不推理剧情。
 只输出 JSON，格式为：{"people":[{"name":"原文明确出现的人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说的关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确写出的事件短句","startsAt":"YYYY-MM-DD 或 YYYY-MM-DDTHH:mm；原文未写年份时用 --MM-DD 或 --MM-DDTHH:mm","people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"这条线索的简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
-约束：逐条扫描全部 OCR 原文，不得漏掉同一条线索中的多个时间；每个明确出现的日期时间都单独输出一项 timeline，不得合并。人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；日期时间和事件必须在对应原文中明确出现；原文只写月日时，保留为 --MM-DD 格式，不得补年份；没有明确写出的时分不得补齐。线索主题只能简要归纳该原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
+约束：逐条扫描全部 OCR 原文，不得漏掉同一条线索中的多个时间；每个明确出现的日期时间都单独输出一项 timeline，不得合并。人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；日期时间和事件必须在对应原文中明确出现；原文只写月日时，保留为 --MM-DD 格式，不得补年份；原文明确写出几点几分时，startsAt 必须保留到 HH:mm；没有明确写出的时分不得补齐。线索主题只能简要归纳该原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
   const data = {
     model: 'deepseek-chat',
     stream: false,

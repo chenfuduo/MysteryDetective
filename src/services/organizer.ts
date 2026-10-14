@@ -117,18 +117,6 @@ function normalize(raw: RawResult, clues: ClueRecord[]): OrganizationSnapshot {
     const title = text(item.title, 100)
     let startsAt = validDate(item.startsAt, source?.quote || '')
     if (!source || !title || !startsAt) continue
-    if (!startsAt.includes('T')) {
-      const quoteTimes = extractExplicitTimeline([{ ...source.clue, ocrText: source.quote }])
-        .filter(candidate => candidate.startsAt.includes('T') && candidate.startsAt.split('T')[0].slice(-5) === startsAt.split('T')[0].slice(-5))
-        .filter(candidate => {
-          const suggestedYear = startsAt.startsWith('--') ? '' : startsAt.slice(0, 4)
-          const detectedYear = candidate.startsAt.startsWith('--') ? '' : candidate.startsAt.slice(0, 4)
-          return !suggestedYear || !detectedYear || suggestedYear === detectedYear
-        })
-      const distinctTimes = [...new Set(quoteTimes.map(candidate => candidate.startsAt))]
-      if (distinctTimes.length === 1) startsAt = distinctTimes[0]
-      else if (distinctTimes.length > 1) continue
-    }
     const names = Array.isArray(item.people) ? item.people.map(value => text(value, 60)).filter(value => value && source.quote.includes(value)).slice(0, 8) : []
     timeline.push({ id: crypto.randomUUID(), title, startsAt, people: names, sourceNo: source.clue.number, quote: source.quote })
   }
@@ -216,10 +204,29 @@ function extractExplicitTimeline(clues: ClueRecord[]): OrganizationSnapshot['tim
   }
   return suggestions
 }
+function localTimelineFallback(clues: ClueRecord[]): OrganizationSnapshot {
+  return {
+    id: '',
+    scriptId: '',
+    updatedAt: new Date().toISOString(),
+    people: [],
+    relationships: [],
+    timeline: extractExplicitTimeline(clues),
+    cluePoints: [],
+  }
+}
+
+function isNetworkUnavailable(error: unknown): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /(network|internet|offline|connection|load failed|failed to fetch|could not connect|not connected)/i.test(message)
+}
+
 export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSnapshot> {
-  const apiKey = await readApiKey()
   const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText.trim() }))
   if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return localTimelineFallback(clues)
+  const apiKey = await readApiKey()
 
   const system = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
 时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索都要从头扫描到尾，不能找到第一处时间就停止。
@@ -249,26 +256,31 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
 
   let status: number
   let responseData: unknown
-  if (Capacitor.isNativePlatform()) {
-    const response = await CapacitorHttp.post({
-      url: 'https://api.deepseek.com/chat/completions',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      data,
-    })
-    status = response.status
-    responseData = response.data
-  } else {
-    const response = await fetch('https://api.deepseek.com/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    })
-    status = response.status
-    responseData = await response.json().catch(() => null)
+  try {
+    if (Capacitor.isNativePlatform()) {
+      const response = await CapacitorHttp.post({
+        url: 'https://api.deepseek.com/chat/completions',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        data,
+      })
+      status = response.status
+      responseData = response.data
+    } else {
+      const response = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      })
+      status = response.status
+      responseData = await response.json().catch(() => null)
+    }
+  } catch (error) {
+    if (isNetworkUnavailable(error)) return localTimelineFallback(clues)
+    throw error
   }
+  if (status === 402) return localTimelineFallback(clues)
   if (status < 200 || status >= 300) {
     if (status === 401) throw new Error('DeepSeek API Key 无效，请在剧本管理中更新')
-    if (status === 402) throw new Error('DeepSeek 账户余额不足或额度不可用')
     throw new Error(`DeepSeek 整理失败（HTTP ${status}），请稍后重试`)
   }
   const body = responseData as { choices?: { finish_reason?: string; message?: { content?: string | null } }[] } | null
@@ -278,9 +290,5 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
   if (!content) throw new Error('DeepSeek 没有返回整理结果，请重试')
   let parsed: RawResult
   try { parsed = JSON.parse(content) as RawResult } catch { throw new Error('DeepSeek 返回内容格式异常，请重试') }
-  const normalized = normalize(parsed, clues)
-  const aiTimelineKeys = new Set(normalized.timeline.map(item => `${item.sourceNo}|${item.startsAt}`))
-  const explicitTimeline = extractExplicitTimeline(clues).filter(item => !aiTimelineKeys.has(`${item.sourceNo}|${item.startsAt}`))
-  normalized.timeline = [...normalized.timeline, ...explicitTimeline].sort((a, b) => a.sourceNo - b.sourceNo || a.startsAt.localeCompare(b.startsAt))
-  return normalized
+  return normalize(parsed, clues)
 }

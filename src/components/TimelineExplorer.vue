@@ -6,6 +6,8 @@ import type { ClueRecord, PersonRecord, TimelineRecord } from '../services/vault
 
 type Side = 'upper' | 'lower'
 type TimeWindow = { start: Date; end: Date }
+type DensityGroup = { id: string; side: Side; start: number; end: number; members: TimelineRecord[] }
+type VisibleDensityGroup = DensityGroup & { visibleMembers: TimelineRecord[] }
 const props = defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; scale: number }>()
 const emit = defineEmits<{
   'update:personId': [value: string]
@@ -22,12 +24,16 @@ const elements: Record<Side, HTMLElement | null> = { upper: null, lower: null }
 const instances: Record<Side, Timeline | null> = { upper: null, lower: null }
 const fullscreen = ref(false)
 const dimensional = ref(true)
+const densityEnabled = ref(true)
+const clusterPanel = ref<HTMLElement | null>(null)
+const selectedClusterId = ref('')
 const selectedId = ref('')
 const timeWindow = ref<TimeWindow | null>(null)
 const plotWidth = ref(800)
 let appliedScale = props.scale || 1
 let resizeObserver: ResizeObserver | null = null
 let redrawFrame = 0
+let densityFrame = 0
 let syncRequest = 0
 let previousOverflow = ''
 let returnFocus: HTMLElement | null = null
@@ -44,6 +50,33 @@ const visibleEvents = computed(() => allEvents.value.filter(event => !props.pers
 const datedCount = computed(() => allEvents.value.filter(event => !event.startsAt.startsWith('--')).length)
 const yearlessCount = computed(() => allEvents.value.length - datedCount.value)
 const eventSides = computed(() => new Map([...allEvents.value].sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id)).map((event, index) => [event.id, sides[index % 2]])))
+// Use the full script and a zoom bucket so person filters and panning never move group anchors.
+const densityTimePerPixel = computed(() => {
+  const range = timeWindow.value ?? fullWindow(props.scale || 1)
+  const value = Math.max(1, (range.end.getTime() - range.start.getTime()) / Math.max(200, plotWidth.value))
+  return Math.pow(1.12, Math.round(Math.log(value) / Math.log(1.12)))
+})
+const densityGroups = computed<DensityGroup[]>(() => {
+  const threshold = densityEnabled.value ? densityTimePerPixel.value * 170 : -1
+  const groups: DensityGroup[] = []
+  for (const side of sides) {
+    const members = [...allEvents.value].filter(event => eventSides.value.get(event.id) === side).sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id))
+    let group: DensityGroup | undefined
+    for (const event of members) {
+      const time = eventTime(event)
+      if (group && time - group.start <= threshold) { group.members.push(event); group.end = time }
+      else { group = { id: event.id, side, start: time, end: time, members: [event] }; groups.push(group) }
+    }
+  }
+  return groups.map(group => group.members.length > 1 ? { ...group, id: `timeline-cluster:${group.side}:${group.members.map(event => event.id).join(':')}` } : group)
+})
+const visibleDensityGroups = computed<VisibleDensityGroup[]>(() => densityGroups.value.map(group => ({ ...group, visibleMembers: group.members.filter(event => !props.personId || event.personIds.includes(props.personId)) })).filter(group => group.visibleMembers.length))
+const selectedCluster = computed(() => visibleDensityGroups.value.find(group => group.id === selectedClusterId.value && group.members.length > 1))
+const densitySummary = computed(() => {
+  if (!densityEnabled.value) return '已显示全部事件卡片'
+  const groups = visibleDensityGroups.value.filter(group => group.members.length > 1)
+  return groups.length ? `${groups.reduce((total, group) => total + group.visibleMembers.length, 0)} 个事件收拢为 ${groups.length} 组 · 点数量逐条查看` : '当前间距无需收拢 · 放大后自动展开'
+})
 const selectedEvent = computed(() => visibleEvents.value.find(event => event.id === selectedId.value))
 const selectedPeople = computed(() => props.people.filter(person => selectedEvent.value?.personIds.includes(person.id)))
 const viewCacheKey = computed(() => `cluevault:timeline-view:${encodeURIComponent(props.scriptId)}:${referenceYear.value}`)
@@ -62,15 +95,16 @@ const selectedEvidence = computed(() => {
 })
 function persistView() {
   if (!activeCacheKey) return
-  try { sessionStorage.setItem(activeCacheKey, JSON.stringify({ start: timeWindow.value?.start.getTime(), end: timeWindow.value?.end.getTime(), dimensional: dimensional.value })) } catch { /* Storage can be unavailable in private contexts. */ }
+  try { sessionStorage.setItem(activeCacheKey, JSON.stringify({ start: timeWindow.value?.start.getTime(), end: timeWindow.value?.end.getTime(), dimensional: dimensional.value, densityEnabled: densityEnabled.value })) } catch { /* Storage can be unavailable in private contexts. */ }
 }
 function restoreView() {
   activeCacheKey = viewCacheKey.value
-  timeWindow.value = null; dimensional.value = true
+  timeWindow.value = null; dimensional.value = true; densityEnabled.value = true
   try {
     const saved = JSON.parse(sessionStorage.getItem(activeCacheKey) || 'null')
     if (!saved || typeof saved !== 'object') return
     if (typeof saved.dimensional === 'boolean') dimensional.value = saved.dimensional
+    if (typeof saved.densityEnabled === 'boolean') densityEnabled.value = saved.densityEnabled
     if (typeof saved.start === 'number' && typeof saved.end === 'number' && Number.isFinite(saved.start) && Number.isFinite(saved.end) && saved.end > saved.start) timeWindow.value = { start: new Date(saved.start), end: new Date(saved.end) }
   } catch { /* A missing or obsolete cache starts from the full timeline. */ }
 }
@@ -117,6 +151,36 @@ function eventContent(event: TimelineRecord) {
   content.append(time, title, precision)
   return content
 }
+function clusterLabel(group: DensityGroup) {
+  const first = dateLabel(group.members[0]!.startsAt)
+  const last = dateLabel(group.members[group.members.length - 1]!.startsAt)
+  return first === last ? first : `${first} — ${last}`
+}
+function clusterKinds(group: VisibleDensityGroup) {
+  const yearless = group.visibleMembers.filter(event => event.startsAt.startsWith('--')).length
+  return yearless === group.visibleMembers.length ? '无年份' : yearless === 0 ? '有年份' : `有年份 ${group.visibleMembers.length - yearless} · 无年份 ${yearless}`
+}
+function clusterContent(group: VisibleDensityGroup) {
+  const content = document.createElement('button')
+  content.type = 'button'
+  content.className = 'timeline-event-content timeline-cluster-content'
+  content.dataset.clusterId = group.id
+  content.setAttribute('aria-label', `${clusterLabel(group)}，${group.visibleMembers.length} 个事件，展开逐条查看`)
+  const time = document.createElement('span')
+  time.className = 'timeline-node-time'
+  time.textContent = clusterLabel(group)
+  const count = document.createElement('strong')
+  count.className = 'timeline-cluster-count'
+  count.textContent = `${group.visibleMembers.length} 个事件`
+  const hint = document.createElement('span')
+  hint.className = 'timeline-node-precision'
+  hint.textContent = `${clusterKinds(group)} · ${props.personId ? `全组 ${group.members.length} 条 · ` : ''}点击展开`
+  content.append(time, count, hint)
+  return content
+}
+function memberPeople(event: TimelineRecord) {
+  return props.people.filter(person => person.scriptId === props.scriptId && event.personIds.includes(person.id)).map(person => person.name).join('、')
+}
 function fullWindow(scale = 1): TimeWindow {
   const times = allEvents.value.map(eventTime)
   const first = times.length ? Math.min(...times) : Date.now()
@@ -131,10 +195,50 @@ function bounds() {
   return { min: new Date(range.start.getTime() - span * .35), max: new Date(range.end.getTime() + span * .35), zoomMin: 60_000, zoomMax: span * 1.7 }
 }
 function items(side: Side) {
-  return visibleEvents.value.filter(event => eventSides.value.get(event.id) === side).map(event => ({
-    id: event.id, start: new Date(eventTime(event)), content: eventContent(event),
-    className: `${event.startsAt.startsWith('--') ? 'timeline-node-yearless' : 'timeline-node-dated'}${event.yearlessMarkerIgnored ? ' timeline-marker-ignored' : ''}`,
-  }))
+  return visibleDensityGroups.value.filter(group => group.side === side).map(group => {
+    if (group.members.length > 1) {
+      const yearless = group.visibleMembers.filter(event => event.startsAt.startsWith('--')).length
+      return { id: group.id, start: new Date(group.start), content: clusterContent(group), className: `timeline-density-cluster ${yearless === group.visibleMembers.length ? 'timeline-node-yearless' : yearless ? 'timeline-node-mixed' : 'timeline-node-dated'}` }
+    }
+    const event = group.visibleMembers[0]!
+    return { id: event.id, start: new Date(eventTime(event)), content: eventContent(event), className: `${event.startsAt.startsWith('--') ? 'timeline-node-yearless' : 'timeline-node-dated'}${event.yearlessMarkerIgnored ? ' timeline-marker-ignored' : ''}` }
+  })
+}
+function selectRenderedItem(id: string) {
+  const group = visibleDensityGroups.value.find(item => item.id === id && item.members.length > 1)
+  if (group) openCluster(group.id)
+  else selectEvent(id)
+}
+function scheduleDensityRefresh() {
+  if (densityFrame) return
+  densityFrame = requestAnimationFrame(() => {
+    densityFrame = 0
+    for (const side of sides) instances[side]?.setItems(items(side))
+    if (selectedClusterId.value && !selectedCluster.value) selectedClusterId.value = ''
+    if (selectedEvent.value) selectEvent(selectedId.value)
+    else if (selectedCluster.value) for (const side of sides) instances[side]?.setSelection(selectedCluster.value.side === side ? [selectedCluster.value.id] : [])
+  })
+}
+async function openCluster(id: string) {
+  const group = visibleDensityGroups.value.find(item => item.id === id && item.members.length > 1)
+  if (!group) return
+  selectedId.value = ''
+  selectedClusterId.value = id
+  for (const side of sides) instances[side]?.setSelection(group.side === side ? [id] : [])
+  await nextTick()
+  clusterPanel.value?.focus()
+}
+function closeCluster() {
+  selectedClusterId.value = ''
+  if (!selectedId.value) for (const side of sides) instances[side]?.setSelection([])
+}
+function expandCluster() {
+  const group = selectedCluster.value
+  if (!group || group.end <= group.start) return
+  const span = Math.max(60_000, (group.end - group.start) * 1.8)
+  const center = (group.start + group.end) / 2
+  closeCluster()
+  applyWindow({ start: new Date(center - span / 2), end: new Date(center + span / 2) })
 }
 function applyWindow(range: TimeWindow) {
   timeWindow.value = range
@@ -182,7 +286,7 @@ async function syncCharts() {
     instances[side] = instance
     instance.on('select', (properties: { items?: Array<string | number> }) => {
       const id = properties.items?.[0]
-      if (id !== undefined) selectEvent(String(id))
+      if (id !== undefined) selectRenderedItem(String(id))
     })
     instance.on('rangechange', (properties: { start: Date; end: Date; byUser: boolean }) => {
       if (!properties.byUser) return
@@ -275,7 +379,9 @@ function moveChartPointer(event: PointerEvent) {
 function selectEvent(id: string) {
   if (!visibleEvents.value.some(event => event.id === id)) return
   selectedId.value = id
-  for (const side of sides) instances[side]?.setSelection(eventSides.value.get(id) === side ? [id] : [])
+  selectedClusterId.value = ''
+  const group = visibleDensityGroups.value.find(item => item.visibleMembers.some(event => event.id === id))
+  for (const side of sides) instances[side]?.setSelection(eventSides.value.get(id) === side ? [group?.id ?? id] : [])
 }
 async function focusEvent(eventId: string): Promise<boolean> {
   await nextTick()
@@ -295,7 +401,8 @@ function selectChartEvent(event: MouseEvent) {
   chartPointer = null
   const target = event.target as HTMLElement
   const content = target?.closest<HTMLElement>('.timeline-event-content') ?? target?.closest('.vis-item')?.querySelector<HTMLElement>('.timeline-event-content')
-  if (content?.dataset.eventId) selectEvent(content.dataset.eventId)
+  if (content?.dataset.clusterId) void openCluster(content.dataset.clusterId)
+  else if (content?.dataset.eventId) selectEvent(content.dataset.eventId)
 }
 function closeDetail() {
   selectedId.value = ''
@@ -303,9 +410,10 @@ function closeDetail() {
   scheduleRedraw()
 }
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') { if (selectedId.value) closeDetail(); else if (fullscreen.value) fullscreen.value = false }
+  if (event.key === 'Escape') { if (selectedClusterId.value) closeCluster(); else if (selectedId.value) closeDetail(); else if (fullscreen.value) fullscreen.value = false }
 }
 watch(() => [props.events, props.personId], syncCharts, { deep: true })
+watch(() => visibleDensityGroups.value.map(group => `${group.id}:${group.visibleMembers.map(event => event.id).join(',')}`).join('|'), scheduleDensityRefresh)
 watch(() => props.scale, next => {
   if (!Number.isFinite(next) || next <= 0) return
   zoom(next / appliedScale); appliedScale = next
@@ -313,11 +421,11 @@ watch(() => props.scale, next => {
 watch(viewCacheKey, async () => {
   persistView()
   for (const side of sides) { instances[side]?.destroy(); instances[side] = null }
-  selectedId.value = ''; appliedScale = props.scale || 1
+  selectedId.value = ''; selectedClusterId.value = ''; appliedScale = props.scale || 1
   restoreView()
   await syncCharts()
 })
-watch(dimensional, persistView)
+watch([dimensional, densityEnabled], persistView)
 watch([dimensional, selectedId], async () => { await nextTick(); scheduleRedraw() })
 watch(fullscreen, async active => {
   emit('fullscreen-change', active)
@@ -340,6 +448,7 @@ onUnmounted(() => {
   for (const side of sides) instances[side]?.destroy()
   resizeObserver?.disconnect()
   if (redrawFrame) cancelAnimationFrame(redrawFrame)
+  if (densityFrame) cancelAnimationFrame(densityFrame)
   document.removeEventListener('keydown', onKeydown)
   if (fullscreen.value) document.body.style.overflow = previousOverflow
 })
@@ -359,6 +468,7 @@ onUnmounted(() => {
         <div class="explorer-scale"><span>时间间距</span><button aria-label="缩小时间线" @click="emit('update:scale', Math.max(.25, scale / 1.3))"><UiIcon name="zoomOut" :size="18" /></button><input type="range" min="0.25" max="4" step="0.05" :value="scale" aria-label="时间线间距缩放" @input="emit('update:scale', Number(($event.target as HTMLInputElement).value))" /><button aria-label="放大时间线" @click="emit('update:scale', Math.min(4, scale * 1.3))"><UiIcon name="zoomIn" :size="18" /></button><output>{{ Math.round(scale * 100) }}%</output></div>
         <span class="explorer-hint"><UiIcon name="move" :size="15" />拖动平移 · 双指缩放 · 点事件看详情</span>
       </div>
+      <div v-if="allEvents.length" class="density-controls"><label class="density-toggle"><input v-model="densityEnabled" type="checkbox" />收拢密集事件</label><span aria-live="polite">{{ densitySummary }}</span></div>
       <div v-if="allEvents.length" class="explorer-stage">
         <article class="timeline-lane unified-lane">
           <div class="lane-heading"><strong>事件时间线</strong><span class="timeline-legend"><i class="dated-swatch"></i>有年份 {{ datedCount }}<i class="yearless-swatch"></i>无年份 {{ yearlessCount }}</span><small>{{ visibleEvents.length }} 个事件</small></div>
@@ -372,6 +482,12 @@ onUnmounted(() => {
         </article>
       </div>
       <div v-else class="explorer-empty"><span><UiIcon name="timeline" :size="34" /></span><strong>还没有已确认的时间事件</strong><p>添加时间节点，或从整理建议中录入事件。</p></div>
+      <aside v-if="selectedCluster" ref="clusterPanel" class="event-cluster-panel" role="dialog" aria-label="密集事件列表" tabindex="-1">
+        <header><div><strong>{{ selectedCluster.visibleMembers.length }} 个事件</strong><p>{{ clusterLabel(selectedCluster) }}</p><span>{{ clusterKinds(selectedCluster) }}<template v-if="personId"> · 全组 {{ selectedCluster.members.length }} 个，当前筛选 {{ selectedCluster.visibleMembers.length }} 个</template></span></div><button class="detail-close" aria-label="关闭密集事件列表" @click="closeCluster"><UiIcon name="close" :size="18" /></button></header>
+        <p class="cluster-explanation">{{ selectedCluster.start === selectedCluster.end ? '这些事件位于同一时刻，可逐条查看；收拢未合并或删除事件。' : '事件按原时间顺序保留，筛选只隐藏成员，不改变本组在时间轴的位置。' }}</p>
+        <ol class="cluster-members"><li v-for="event in selectedCluster.visibleMembers" :key="event.id"><button @click="selectEvent(event.id)"><span class="cluster-member-time">{{ event.approximate ? '约 ' : '' }}{{ dateLabel(event.startsAt) }}<small :class="{ 'is-yearless': event.startsAt.startsWith('--') }">{{ event.startsAt.startsWith('--') ? '无年份' : '有年份' }}</small></span><strong>{{ eventTitle(event) }}</strong><span>{{ precisionLabel(event) }}<template v-if="memberPeople(event)"> · {{ memberPeople(event) }}</template></span><em>查看详情与原始线索 ›</em></button></li></ol>
+        <footer v-if="selectedCluster.end > selectedCluster.start"><button class="explorer-button" @click="expandCluster"><UiIcon name="zoomIn" :size="16" />放大这一段</button></footer>
+      </aside>
       <aside v-if="selectedEvent" class="event-detail" aria-live="polite">
         <button class="detail-close" aria-label="收起事件详情" @click="closeDetail"><UiIcon name="close" :size="18" /></button>
         <div class="detail-main"><div class="detail-time"><UiIcon name="clock" :size="17" /><strong>{{ selectedEvent.approximate ? '约 ' : '' }}{{ dateLabel(selectedEvent.startsAt) }}</strong><span v-if="selectedEvent.startsAt.startsWith('--') && !selectedEvent.yearlessMarkerIgnored" class="yearless-badge">无年份</span></div><h3>{{ eventTitle(selectedEvent) }}</h3><div class="detail-people"><span class="precision-badge">{{ selectedEvent.approximate ? '约时 · ' : '' }}{{ precisionLabel(selectedEvent) }}</span><span v-for="person in selectedPeople" :key="person.id"><UiIcon name="person" :size="13" />{{ person.name }}</span><button v-if="selectedEvent.startsAt.startsWith('--')" class="marker-button" @click="emit('toggle-marker', selectedEvent)">{{ selectedEvent.yearlessMarkerIgnored ? '恢复无年份标记' : '忽略无年份标记' }}</button></div></div>
@@ -406,6 +522,28 @@ onUnmounted(() => {
 .explorer-scale input { width: 100%; min-width: 30px; height: 28px; margin: 0; padding: 0; border: 0; box-shadow: none; accent-color: var(--explorer-green); }
 .explorer-scale output { min-width: 37px; color: #46674f; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
 .explorer-hint { display: flex; align-items: center; gap: 5px; color: #94a095; font-size: 11px; }
+.density-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 14px; flex-shrink: 0; padding: 7px 18px; border-bottom: 1px solid #e7ece4; background: #fff; }
+.density-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: #45634d; font-size: 11px; cursor: pointer; }
+.density-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--explorer-green); }
+.density-controls > span { color: #8a9785; font-size: 10px; }
+.event-cluster-panel { position: absolute; z-index: 5; top: 150px; right: 20px; bottom: 22px; display: flex; flex-direction: column; width: min(370px, calc(100% - 40px)); max-height: calc(100% - 174px); min-height: 0; overflow: hidden; border: 1px solid #d9e4d6; border-radius: 15px; background: #fffffffc; box-shadow: 0 8px 30px #28432a25; outline: none; }
+.event-cluster-panel > header { position: relative; padding: 16px 42px 10px 16px; border-bottom: 1px solid #e9eee5; }
+.event-cluster-panel header strong { color: #35543c; font-size: 15px; }
+.event-cluster-panel header p { margin: 6px 0; color: #586d50; font-size: 11px; line-height: 1.5; }
+.event-cluster-panel header span { color: #89967f; font-size: 10px; }
+.cluster-explanation { flex-shrink: 0; margin: 0; padding: 9px 16px; color: #8a967e; background: #f6f8f2; font-size: 10px; line-height: 1.6; }
+.cluster-members { flex: 1; min-height: 0; margin: 0; padding: 0 12px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; list-style: none; }
+.cluster-members li + li { border-top: 1px solid #e9eee5; }
+.cluster-members button { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: 100%; padding: 13px 4px; border: 0; background: transparent; color: #45613e; font: inherit; text-align: left; cursor: pointer; }
+.cluster-members button:focus-visible { outline: 2px solid #62895d; outline-offset: -2px; border-radius: 8px; }
+.cluster-member-time { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.cluster-member-time small { padding: 2px 5px; border-radius: 4px; background: #edf4e6; color: #7c946e; font-size: 9px; }
+.cluster-member-time small.is-yearless { color: #a87b58; background: #f7eee5; }
+.cluster-members strong { font-size: 12px; line-height: 1.55; font-weight: 600; }
+.cluster-members button > span:last-of-type { color: #8b977f; font-size: 10px; }
+.cluster-members em { display: flex; align-items: center; gap: 2px; color: #638355; font-size: 10px; font-style: normal; }
+.event-cluster-panel footer { padding: 8px 16px; border-top: 1px solid #e9eee5; }
+.event-cluster-panel footer button { width: 100%; }
 .explorer-stage { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; padding: 14px; overflow: hidden; }
 .timeline-lane { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid #dfe7db; border-radius: 16px; background: #fcfdfb; }
 .lane-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; flex-shrink: 0; padding: 13px 16px 5px; color: #405e48; }
@@ -466,6 +604,12 @@ onUnmounted(() => {
 .explorer-vis-host :deep(.timeline-node-time) { display: block; margin-bottom: 4px; color: #7c936f; font-size: 9px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .explorer-vis-host :deep(.timeline-node-precision) { display: block; margin-top: 5px; color: #89947f; font-size: 9px; }
 .explorer-vis-host :deep(.timeline-node-title) { display: block; max-width: 260px; white-space: normal; line-height: 1.5; }
+.explorer-vis-host :deep(.timeline-cluster-content) { display: block; max-width: 250px; margin: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; white-space: normal; }
+.explorer-vis-host :deep(.timeline-cluster-count) { display: block; font-size: 15px; line-height: 1.4; }
+.explorer-vis-host :deep(.timeline-cluster-content:focus-visible) { outline: 2px solid currentColor; outline-offset: 5px; border-radius: 4px; }
+.explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-box) { border-color: #a9b1b7 !important; color: #526672 !important; background: #f1f4f6 !important; }
+.explorer-vis-host :deep(.timeline-node-mixed .timeline-node-time) { color: #8594a0; }
+.explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-line) { border-left-color: #a4b1ba !important; }
 .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box) { color: #8f6346 !important; background: #fbf3e8 !important; border-color: #cfad8e !important; }
 .explorer-vis-host :deep(.timeline-node-yearless .timeline-node-time) { color: #af8d6c; }
 .explorer-vis-host :deep(.vis-item.vis-selected.vis-box) { background: #e1efda !important; border-color: #4d7d4d !important; box-shadow: 0 0 0 2px #668c5522; }
@@ -483,11 +627,12 @@ onUnmounted(() => {
 .is-dimensional .shared-axis-dot.is-yearless.is-selected, .is-dimensional .shared-axis-dot.timeline-node-yearless.is-selected { border-color: #ac7753; box-shadow: 0 0 0 4px #b7835a2b, 0 3px 6px #6a4f2c22; }
 .is-dimensional .explorer-vis-host :deep(.vis-item.vis-box) { border-color: #a2b99a !important; background: linear-gradient(145deg, #ffffff 0%, #f6faef 52%, #eaf3e2 100%) !important; box-shadow: inset 0 1px 0 #fffffffa, inset 0 -1px 0 #d7e4ce80, 0 3px 0 #c7d6bc, 0 5px 0 #e0e9d8, 0 10px 16px #324a281b; }
 .is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box) { border-color: #cfad8e !important; background: linear-gradient(145deg, #fffdf9 0%, #fcf5e9 52%, #f7ead8 100%) !important; box-shadow: inset 0 1px 0 #fffffffa, inset 0 -1px 0 #ead5bb80, 0 3px 0 #dfc5a7, 0 5px 0 #eddecb, 0 10px 16px #6b46201b; }
+.is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-box) { border-color: #abb9c0 !important; background: linear-gradient(145deg, #fff, #eef2f6) !important; box-shadow: inset 0 1px 0 #fff, 0 3px 0 #c8d2d9, 0 5px 0 #e1e6eb, 0 10px 16px #324a451b; }
 .is-dimensional .explorer-vis-host :deep(.vis-item.vis-line) { border-left-width: 2px !important; filter: drop-shadow(2px 1px 0 #809c6e1f); }
 .is-dimensional .explorer-vis-host :deep(.vis-item.vis-selected.vis-box) { border-color: #557d47 !important; background: linear-gradient(145deg, #f9fff3, #e4f0da) !important; box-shadow: inset 0 1px 0 #fff, 0 0 0 2px #668c5530, 0 3px 0 #adc399, 0 5px 0 #c4d5b7, 0 12px 22px #365e2a24; }
 .is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-selected.vis-box) { border-color: #b28460 !important; background: linear-gradient(145deg, #fffaf2, #f8e5ce) !important; box-shadow: inset 0 1px 0 #fff, 0 0 0 2px #bd947430, 0 3px 0 #d6b698, 0 5px 0 #e6cdb5, 0 12px 22px #795b3024; }
 @keyframes detail-appear { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 950px) { .explorer-toolbar { gap: 7px; padding: 11px 12px 8px; } .explorer-heading { gap: 6px; } .explorer-heading-icon { width: 32px; height: 32px; border-radius: 9px; } .explorer-heading strong { font-size: 13px; } .person-filter { min-width: 112px; } .explorer-button { padding: 0 9px; font-size: 11px; } .explorer-view-toggle button { padding: 0 8px; font-size: 11px; } .explorer-scale-row { padding: 0 12px 8px; } .explorer-hint { font-size: 10px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 12px; } .timeline-reference { padding-inline: 12px; } .unified-chart { margin-inline: 10px; } .lane-overview { margin-inline: 10px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
-@media (max-width: 650px) { .explorer-heading { width: calc(100% - 125px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-scale { max-width: 100%; width: 100%; } .explorer-hint { display: none; } .lane-heading { gap: 6px 10px; } .timeline-legend { font-size: 9px; } .timeline-reference { font-size: 9px; } .shared-axis-tick > span { font-size: 9px; } .shared-axis-tick > small { font-size: 8px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail { gap: 10px; flex-wrap: wrap; padding: 12px 38px 12px 14px; } .detail-evidence { order: 3; flex-basis: 100%; max-width: none; } .detail-actions { max-width: 115px; } .detail-main h3 { font-size: 13px; } }
+@media (max-width: 650px) { .event-cluster-panel { top: 190px; right: 10px; bottom: 12px; max-height: calc(100% - 202px); width: calc(100% - 20px); } .density-controls { padding: 6px 12px; } .explorer-heading { width: calc(100% - 125px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-scale { max-width: 100%; width: 100%; } .explorer-hint { display: none; } .lane-heading { gap: 6px 10px; } .timeline-legend { font-size: 9px; } .timeline-reference { font-size: 9px; } .shared-axis-tick > span { font-size: 9px; } .shared-axis-tick > small { font-size: 8px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail { gap: 10px; flex-wrap: wrap; padding: 12px 38px 12px 14px; } .detail-evidence { order: 3; flex-basis: 100%; max-width: none; } .detail-actions { max-width: 115px; } .detail-main h3 { font-size: 13px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button { transition: none; } }
 </style>

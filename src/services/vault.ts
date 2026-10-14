@@ -288,7 +288,11 @@ async function deleteImage(path: string): Promise<void> {
 }
 export async function imageUrl(path: string): Promise<string> {
   if (!path || path.startsWith('data:')) return path
-  if (imageUrls.has(path)) return imageUrls.get(path)!
+  if (imageUrls.has(path)) {
+    const cached = imageUrls.get(path)!
+    imageUrls.delete(path); imageUrls.set(path, cached)
+    return cached
+  }
   let url: string
   if (native) {
     const { uri } = await Filesystem.getUri({ path, directory: Directory.Data })
@@ -298,6 +302,7 @@ export async function imageUrl(path: string): Promise<string> {
     url = `data:${mimeForPath(path)};base64,${base64}`
   }
   imageUrls.set(path, url)
+  while (imageUrls.size > 48) imageUrls.delete(imageUrls.keys().next().value!)
   return url
 }
 

@@ -5,7 +5,7 @@ import {
   type PersonRecord, type RelationshipRecord, type TimelineRecord,
 } from './vault'
 
-import type { OrganizationCheckpoint, OrganizationContext, OrganizationStage } from './organizer'
+import { OrganizationPausedError, organizationRun, type OrganizationCheckpoint, type OrganizationContext, type OrganizationStage } from './organizer'
 
 export type OrganizationProgress = { processed: number; total: number; clue: ClueRecord; stage?: OrganizationStage; message?: string }
 export type OrganizationTaskState = {
@@ -33,6 +33,7 @@ export type IncrementalOrganizationInput = {
   events: TimelineRecord[]
   previous: OrganizationSnapshot | null
   onProgress?: (progress: OrganizationProgress) => void
+  shouldPause?: () => boolean
 }
 
 
@@ -81,7 +82,7 @@ function snapshotFor(scriptId: string, previous: OrganizationSnapshot | null): O
 export async function organizeIncrementally(
   input: IncrementalOrganizationInput,
   analyze: (clues: ClueRecord[], context?: OrganizationContext) => Promise<OrganizationSnapshot>,
-): Promise<{ snapshot: OrganizationSnapshot; processed: number; skipped: number }> {
+): Promise<{ snapshot: OrganizationSnapshot; processed: number; skipped: number; total: number; paused: boolean; remaining: number }> {
   const { scriptId } = input
   const clues = input.clues.filter(clue => clue.scriptId === scriptId && clue.ocrText.trim())
   const sources = new Map(clues.map(clue => [clue.number, clue]))
@@ -160,6 +161,11 @@ export async function organizeIncrementally(
 
   await checkpoint()
   let processed = 0
+  const pausedResult = () => {
+    organizationRun.phase = 'paused'
+    organizationRun.message = `已暂停，已处理 ${processed}/${pending.length} 条线索；继续时接着处理`
+    return { snapshot, processed, skipped: clues.length - pending.length, total: pending.length, paused: true, remaining: pending.length - processed }
+  }
   for (const clue of pending) {
     const saved = checkpoints.get(clue.id)
     const taskKey = `organization-task:${clue.id}`
@@ -167,17 +173,28 @@ export async function organizeIncrementally(
       await saveLocalState<OrganizationTaskState>(scriptId, `organization-job:${clue.id}`, { clueId: clue.id, sourceNo: clue.number, fingerprint: fingerprints.get(clue.id)!, stage, message, updatedAt: new Date().toISOString() })
       input.onProgress?.({ processed, total: pending.length, clue, stage, message })
     }
+    if (input.shouldPause?.()) {
+      await saveTask('paused', saved ? '已暂停，已保存的结果将在继续时恢复' : '已暂停，尚未发起当前线索的 API 请求')
+      return pausedResult()
+    }
     await saveTask(saved ? 'checking' : 'extracting', saved ? '已恢复首轮结果，仅重试时间核对' : '正在提取 OCR 文字')
     let result: OrganizationSnapshot
+    let paused = false
     try {
       result = await analyze([clue], {
-        fingerprint: fingerprints.get(clue.id), checkpoint: saved,
+        fingerprint: fingerprints.get(clue.id), checkpoint: saved, shouldPause: input.shouldPause,
         onCheckpoint: async value => { await saveLocalState(scriptId, taskKey, value); checkpoints.set(clue.id, value) },
         onStage: saveTask,
       })
     } catch (error) {
-      await saveTask('failed', error instanceof Error ? error.message : String(error))
-      throw error
+      if (error instanceof OrganizationPausedError) {
+        if (!error.snapshot) { await saveTask('paused', error.message); return pausedResult() }
+        result = error.snapshot
+        paused = true
+      } else {
+        await saveTask('failed', error instanceof Error ? error.message : String(error))
+        throw error
+      }
     }
     if (result.scriptId && result.scriptId !== scriptId) throw new Error('整理结果不属于当前剧本')
     const validSource = (item: { sourceNo: number; quote: string }): boolean => item.sourceNo === clue.number && Boolean(item.quote.trim()) && clue.ocrText.includes(item.quote)
@@ -213,8 +230,12 @@ export async function organizeIncrementally(
     snapshot.processedClues![clue.id] = `${result.analysis?.provider === 'local' ? 'local:' : reviewed ? '' : 'review:'}${fingerprints.get(clue.id)!}`
     await checkpoint()
     if (reviewed) { await removeLocalState(scriptId, taskKey); checkpoints.delete(clue.id) }
+    if (paused) {
+      await saveTask('paused', '首轮整理已保存，继续时仅补做时间核对')
+      return pausedResult()
+    }
     processed += 1
     await saveTask(reviewed ? 'complete' : 'failed', reviewed ? '提取及时间核对已完成' : result.timelineAudit?.find(audit => audit.sourceNo === clue.number)?.message || '整理未完成，可继续重试')
   }
-  return { snapshot, processed, skipped: clues.length - pending.length }
+  return { snapshot, processed, skipped: clues.length - pending.length, total: pending.length, paused: false, remaining: 0 }
 }

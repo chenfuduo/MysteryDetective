@@ -7,6 +7,7 @@ import { Controls } from '@vue-flow/controls'
 import UiIcon from './components/UiIcon.vue'
 import AnnotationEditor from './components/AnnotationEditor.vue'
 import CluePhotoViewer from './components/CluePhotoViewer.vue'
+import ClueThumbnail from './components/ClueThumbnail.vue'
 import OrganizationOverview from './components/OrganizationOverview.vue'
 import RelationshipExplorer from './components/RelationshipExplorer.vue'
 import TimelineExplorer from './components/TimelineExplorer.vue'
@@ -39,8 +40,14 @@ const boardLinks = ref<BoardLinkRecord[]>([])
 const notes = ref<NoteRecord[]>([])
 const organization = ref<OrganizationSnapshot | null>(null)
 const organizationProgress = ref('')
+const organizationActive = ref(false)
+const organizationPauseRequested = ref(false)
+const organizationStartedAt = ref(0)
+const organizationElapsed = ref(0)
+const organizationPaused = ref(false)
+let organizationElapsedTimer: ReturnType<typeof setInterval> | undefined
 const taskStates = ref<OrganizationTaskState[]>([])
-const unfinishedTasks = computed(() => taskStates.value.filter(task => ['extracting', 'checking', 'failed', 'local'].includes(task.stage)))
+const unfinishedTasks = computed(() => taskStates.value.filter(task => ['extracting', 'checking', 'failed', 'local', 'paused'].includes(task.stage)))
 const captureRound = ref('1')
 const captureRoundReady = ref(false)
 const recentCaptureOpen = ref(false)
@@ -63,6 +70,7 @@ const selectedProviderLabel = computed(() => aiRoute.provider ? providerLabel(ai
 const aiStatusLabel = computed(() => {
   const run = organizer.organizationRun
   if (run.phase === 'extracting' || run.phase === 'checking') return `${providerLabel(run.provider === 'local' ? null : run.provider)} · ${run.phase === 'checking' ? '核对中' : '提取中'}`
+  if (run.phase === 'paused') return '整理已暂停'
   if (run.phase === 'local') return '本地整理'
   if (run.phase === 'error') return '整理未完成'
   if (aiRoute.phase === 'checking') return '检测中'
@@ -71,7 +79,7 @@ const aiStatusLabel = computed(() => {
   return apiKeyConfigured.value ? `已选 ${providerLabel(aiRoute.provider)}` : `${providerLabel(aiRoute.provider)} · 未配置`
 })
 const aiStatusTone = computed(() => {
-  if (organizer.organizationRun.phase === 'error' || organizer.organizationRun.phase === 'local') return 'warning'
+  if (organizer.organizationRun.phase === 'error' || organizer.organizationRun.phase === 'local' || organizer.organizationRun.phase === 'paused') return 'warning'
   if (aiRoute.phase === 'checking' || aiRoute.phase === 'offline') return 'muted'
   if (aiRoute.phase !== 'ready' || !aiRoute.provider || !apiKeyConfigured.value) return 'warning'
   return aiRoute.provider
@@ -94,6 +102,7 @@ const filterCategory = ref('')
 const filterTag = ref('')
 const clueSort = ref<'newest' | 'oldest' | 'number' | 'title'>('newest')
 const clueSelectionMode = ref(false)
+const cluePageSize = ref(60)
 const selectedClueIds = ref<string[]>([])
 const clueBatchOpen = ref(false)
 const reviewWorkbenchOpen = ref(false)
@@ -219,6 +228,16 @@ const visibleClues = computed(() => clues.value.filter(item => {
   }
   return true
 }).sort((a, b) => clueSort.value === 'number' ? a.number - b.number : clueSort.value === 'title' ? a.title.localeCompare(b.title, 'zh-CN', { numeric: true }) || a.number - b.number : (clueSort.value === 'oldest' ? a.createdAt.localeCompare(b.createdAt) || a.number - b.number : b.createdAt.localeCompare(a.createdAt) || b.number - a.number)))
+const displayedClues = computed(() => visibleClues.value.slice(0, cluePageSize.value))
+const elapsedLabel = computed(() => {
+  const seconds = Math.floor(organizationElapsed.value / 1000)
+  return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`
+})
+function requestOrganizationPause() {
+  if (!organizationActive.value || organizationPauseRequested.value) return
+  organizationPauseRequested.value = true
+  organizationProgress.value = '已请求暂停，当前请求结束并保存后停止，不再发送后续请求'
+}
 const hasClueFilters = computed(() => Boolean(query.value.trim() || filterRound.value || filterCategory.value || filterTag.value || filterPerson.value || favoriteOnly.value))
 const activeClueFilters = computed(() => [
   ...(query.value.trim() ? [{ kind: 'query', label: `搜索：${query.value.trim()}` }] : []),
@@ -380,16 +399,38 @@ function highlight(value: string) {
   if (!terms.length) return safe
   return safe.replace(new RegExp(`(${terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi'), '<mark>$1</mark>')
 }
+const pendingImageRequests = new Map<string, Promise<void>>()
+const recentFullImagePaths = new Set<string>()
+async function loadImagePath(path: string) {
+  if (!path || imageUrls[path]) return
+  const pending = pendingImageRequests.get(path)
+  if (pending) return pending
+  const request = vault.imageUrl(path).then(url => { imageUrls[path] = url }).finally(() => pendingImageRequests.delete(path))
+  pendingImageRequests.set(path, request)
+  return request
+}
+async function requestClueImage(path: string) {
+  if (!clues.value.some(clue => clue.scriptId === activeScriptId.value && (clue.imagePath === path || clue.displayImagePath === path))) return
+  try {
+    await loadImagePath(path)
+    recentFullImagePaths.delete(path); recentFullImagePaths.add(path)
+    while (recentFullImagePaths.size > 8) {
+      const oldest = recentFullImagePaths.values().next().value!
+      recentFullImagePaths.delete(oldest)
+      if (!clueDialog.value || selectedClue.value?.imagePath !== oldest) delete imageUrls[oldest]
+    }
+  } catch { /* The requesting viewer keeps its missing-image state. */ }
+}
 async function loadImages() {
-  const paths = [
-    ...scripts.value.map(item => item.coverPath),
-    ...clues.value.map(item => item.imagePath),
-    ...clues.value.map(item => item.displayImagePath),
-    ...people.value.map(item => item.photoPath),
-  ].filter(Boolean)
-  await Promise.all(paths.map(async path => {
-    if (imageUrls[path]) return
-    try { imageUrls[path] = await vault.imageUrl(path) } catch { /* File may have been removed outside the app. */ }
+  const paths = [...new Set([...scripts.value.map(item => item.coverPath), ...people.value.map(item => item.photoPath)].filter(Boolean))]
+  const keep = new Set([...paths, ...clues.value.flatMap(clue => [clue.imagePath, clue.displayImagePath])])
+  for (const path of Object.keys(imageUrls)) if (!keep.has(path)) delete imageUrls[path]
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(4, paths.length) }, async () => {
+    while (next < paths.length) {
+      const path = paths[next++]
+      try { await loadImagePath(path) } catch { /* File may have been removed outside the app. */ }
+    }
   }))
 }
 async function loadScripts() {
@@ -523,17 +564,25 @@ async function removeScript(script: ScriptRecord) {
 async function performOrganization() {
   const scriptId = activeScriptId.value
   if (!scriptId) throw new Error('请先打开一个剧本')
+  organizationActive.value = true
+  organizationPauseRequested.value = false
+  organizationPaused.value = false
+  organizationElapsed.value = 0
+  organizationStartedAt.value = Date.now()
+  if (organizationElapsedTimer) clearInterval(organizationElapsedTimer)
+  organizationElapsedTimer = setInterval(() => { organizationElapsed.value = Date.now() - organizationStartedAt.value }, 1000)
   organizationProgress.value = '正在检查新增与修改的 OCR 文字…'
   try {
     const result = await organizeIncrementally({
       scriptId, clues: clues.value, people: people.value, relationships: relationships.value, events: events.value,
-      previous: await vault.getOrganization(scriptId),
-      onProgress: ({ processed, total, clue, stage, message }) => { if (activeScriptId.value === scriptId) organizationProgress.value = `已完成 ${processed} / ${total} 条 · #${String(clue.number).padStart(3, '0')} ${message || (stage === 'checking' ? '正在核对时间' : '正在提取信息')}` },
+      previous: await vault.getOrganization(scriptId), shouldPause: () => organizationPauseRequested.value,
+      onProgress: ({ processed, total, clue, stage, message }) => { if (activeScriptId.value === scriptId) organizationProgress.value = organizationPauseRequested.value ? '已请求暂停，当前请求结束并保存后停止' : `已完成 ${processed} / ${total} 条 · #${String(clue.number).padStart(3, '0')} ${message || (stage === 'checking' ? '正在核对时间' : '正在提取信息')}` },
     }, organizer.organizeClues)
     if (activeScriptId.value === scriptId) {
       organization.value = result.snapshot
       events.value = await vault.listTimelineEvents(scriptId)
-      organizationProgress.value = result.processed ? `本次整理 ${result.processed} 条，跳过 ${result.skipped} 条未变更线索` : '没有新增或修改的 OCR，已有整理结果已保留'
+      organizationPaused.value = result.paused
+      organizationProgress.value = result.paused ? `整理已暂停，已完成 ${result.processed} / ${result.total} 条，剩余 ${result.remaining} 条；当前结果已保存` : result.processed ? `本次整理 ${result.processed} 条，跳过 ${result.skipped} 条未变更线索` : '没有新增或修改的 OCR，已有整理结果已保留'
     }
   } catch (error) {
     if (activeScriptId.value === scriptId) {
@@ -542,13 +591,17 @@ async function performOrganization() {
     }
     throw error
   } finally {
+    organizationActive.value = false
+    organizationElapsed.value = Date.now() - organizationStartedAt.value
+    if (organizationElapsedTimer) clearInterval(organizationElapsedTimer)
+    organizationElapsedTimer = undefined
     const states = await getOrganizationTaskStates(scriptId, await vault.listClues(scriptId))
     if (activeScriptId.value === scriptId) taskStates.value = states
   }
 }
 async function runOrganization() {
   if (!clues.value.some(item => item.ocrText.trim())) return notify('当前剧本没有可整理的 OCR 文字')
-  await action(performOrganization, '整理建议已更新')
+  await action(async () => { await performOrganization(); notify(organizationPaused.value ? '进度已保存，整理已暂停' : '整理建议已更新') })
 }
 async function capture() {
   if (!activeScriptId.value || busy.value) return
@@ -563,7 +616,7 @@ async function capture() {
     const missing = result.clues.filter(clue => !clue.ocrText.trim()).length
     message = missing ? '照片已保存，识别未完成，可重试识别' : '照片已保存，可继续拍摄'
     if (autoOrganize.value && result.clues.some(clue => clue.ocrText.trim())) {
-      try { await performOrganization(); message = '照片已录入，整理建议已更新' }
+      try { await performOrganization(); message = organizationPaused.value ? '照片已录入，整理已暂停，可稍后继续' : '照片已录入，整理建议已更新' }
       catch (error) { message = `照片已保存，整理未完成：${error instanceof Error ? error.message : '请重试'}` }
     }
     completed = true
@@ -584,7 +637,7 @@ async function importPhotos() {
     const missing = imported.filter(clue => !clue.ocrText.trim()).length
     message = imported.length ? `已保存 ${imported.length} 张图片${missing ? `，${missing} 张待重新识别` : ''}${skipped}` : '所选图片均为重复线索，已跳过'
     if (imported.some(clue => clue.ocrText.trim()) && autoOrganize.value) {
-      try { await performOrganization(); message = `图片已录入，整理建议已更新${missing ? `，${missing} 张待重新识别` : ''}${skipped}` }
+      try { await performOrganization(); message = `图片已录入，${organizationPaused.value ? '整理已暂停' : '整理建议已更新'}${missing ? `，${missing} 张待重新识别` : ''}${skipped}` }
       catch (error) { message = `图片已保存，整理未完成：${error instanceof Error ? error.message : '请重试'}${skipped}` }
     }
     completed = true
@@ -708,6 +761,7 @@ async function openClue(clue: ClueRecord, quote = '') {
   clueDraftStatus.value = '没有未保存修改'
   clueDraftConflict.value = false
   try {
+    await requestClueImage(clue.imagePath)
     const draft = await getDraft<typeof clueForm>(scriptId, 'clue', clue.id)
     if (sequence !== clueDraftSequence || scriptId !== activeScriptId.value || detailId.value !== clue.id) return
     if (draft && JSON.stringify(draft.values) !== draft.baseline) {
@@ -1034,7 +1088,7 @@ function refreshAiRoutingOnVisibility() {
 function refreshAiRoutingOnNetwork() {
   void initializeAiRouting()
 }
-watch(activeScriptId, () => { captureRoundReady.value = false; flushEditorDrafts(); ++clueDraftSequence; ++noteDraftSequence; clueDialog.value = false; noteDialog.value = false; clueDraftContext = null; noteDraftContext = null; personWorkspaceId.value = ''; personMergeSourceId.value = ''; recoveryOpen.value = false; reviewUndo.value = null; taskStates.value = []; organizationProgress.value = ''; aiStatusOpen.value = false; workspaceSearchOpen.value = false; workspaceGuideOpen.value = false; clueSelectionMode.value = false; selectedClueIds.value = []; clueBatchOpen.value = false; reviewWorkbenchOpen.value = false; sourceLocationCount.value = 0; if (activeScriptId.value) { restoreWorkspaceLocation(activeScriptId.value); try { localStorage.setItem('clue-vault:last-script', activeScriptId.value) } catch {} } }, { flush: 'sync' })
+watch(activeScriptId, () => { captureRoundReady.value = false; flushEditorDrafts(); ++clueDraftSequence; ++noteDraftSequence; clueDialog.value = false; noteDialog.value = false; clueDraftContext = null; noteDraftContext = null; personWorkspaceId.value = ''; personMergeSourceId.value = ''; recoveryOpen.value = false; reviewUndo.value = null; taskStates.value = []; organizationProgress.value = ''; aiStatusOpen.value = false; workspaceSearchOpen.value = false; workspaceGuideOpen.value = false; clueSelectionMode.value = false; selectedClueIds.value = []; clueBatchOpen.value = false; reviewWorkbenchOpen.value = false; sourceLocationCount.value = 0; organizationPaused.value = false; cluePageSize.value = 60; if (activeScriptId.value) { restoreWorkspaceLocation(activeScriptId.value); try { localStorage.setItem('clue-vault:last-script', activeScriptId.value) } catch {} } }, { flush: 'sync' })
 watch(captureRound, (value, previous) => {
   if (captureRoundHydrating || !activeScriptId.value) return
   const round = value.trim() || '1', scriptId = activeScriptId.value
@@ -1067,6 +1121,7 @@ function updateTimelineOrientation() {
 watch(timelineSpacingScale, value => localStorage.setItem('clue-vault:timeline-scale', String(value)))
 watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize'; if (next !== 'timeline') timelineImmersive.value = false })
 watch(activeScriptId, async () => { timelineImmersive.value = false; await loadWorkspace() })
+watch(() => [query.value, filterRound.value, filterCategory.value, filterTag.value, filterPerson.value, favoriteOnly.value, clueSort.value, activeScriptId.value], () => { cluePageSize.value = 60 })
 watch(() => [view.value, query.value, filterRound.value, filterCategory.value, filterTag.value, clueSort.value, filterPerson.value, favoriteOnly.value, layout.value, timelinePersonFilter.value, relationGraph.value], saveWorkspaceLocation, { flush: 'sync' })
 watch([query, activeScriptId], async ([value, scriptId]) => {
   const sequence = ++searchSequence
@@ -1095,7 +1150,7 @@ onMounted(async () => {
   timelineOrientationQuery.addEventListener('change', updateTimelineOrientation)
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
 })
-onUnmounted(() => { document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
+onUnmounted(() => { if (organizationElapsedTimer) clearInterval(organizationElapsedTimer); organizationPauseRequested.value = true; document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -1112,19 +1167,20 @@ onUnmounted(() => { document.removeEventListener('keydown', handleWorkspaceShort
         <div class="sidebar-bottom"><div class="offline-chip"><span class="offline-dot"></span>本机保存 · AI 可选</div><button class="sidebar-small-button" @click="openScriptDialog()"><UiIcon name="plus" :size="16" />新建剧本</button></div>
       </aside>
       <main class="main-panel">
-        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><button v-if="activeScript" class="icon-button workspace-search-trigger" title="搜索当前剧本（⌘ / Ctrl + K）" aria-label="搜索当前剧本的线索、人物、事件和笔记" @click="openWorkspaceSearch"><UiIcon name="search" :size="20" /></button><button v-if="activeScript" class="icon-button workspace-guide-trigger" title="使用指南" aria-label="打开使用指南" @click="workspaceGuideOpen = true; aiStatusOpen = false"><UiIcon name="info" :size="19" /></button><div class="ai-service-menu"><button class="ai-route-indicator" :class="aiStatusTone" :title="aiStatusTitle" :aria-expanded="aiStatusOpen" @click="openAiStatus"><span class="ai-route-dot" aria-hidden="true"></span><span aria-live="polite">{{ aiStatusLabel }}</span></button><section v-if="aiStatusOpen" class="ai-service-popover" aria-label="AI 服务状态"><header><strong>AI 服务状态</strong><button aria-label="关闭服务状态" @click="aiStatusOpen = false"><UiIcon name="close" :size="17" /></button></header><dl><dt>当前选择</dt><dd>{{ selectedProviderLabel }} · {{ aiRoute.countryCode || '地区待检测' }}</dd><dt>整理状态</dt><dd>{{ organizer.organizationRun.message || aiRoute.message }}</dd></dl><p v-if="organizer.organizationRun.lastError" class="service-error">{{ organizer.organizationRun.lastError }}</p><p v-if="organization?.analysis?.provider === 'local'">{{ organization.analysis.localReason === 'quota' ? 'API 额度不足，本次使用本地整理。' : '网络不可用，本次使用本地整理。' }}</p><div><button :disabled="busy || aiRoute.phase === 'checking'" @click="retryAiService">重新检测</button><button :disabled="busy || !clues.length" @click="aiStatusOpen = false; runOrganization()">继续整理</button><button @click="aiStatusOpen = false; switchView('settings')">管理密钥</button></div></section></div><button v-if="reviewUndo && reviewUndo.scriptId === activeScriptId" class="secondary-button topbar-undo" :disabled="busy" :title="`撤销${reviewUndo.label}`" @click="undoLastChange"><UiIcon name="rotate" :size="17" />撤销</button><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
+        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><button v-if="activeScript" class="icon-button workspace-search-trigger" title="搜索当前剧本（⌘ / Ctrl + K）" aria-label="搜索当前剧本的线索、人物、事件和笔记" @click="openWorkspaceSearch"><UiIcon name="search" :size="20" /></button><button v-if="activeScript" class="icon-button workspace-guide-trigger" title="使用指南" aria-label="打开使用指南" @click="workspaceGuideOpen = true; aiStatusOpen = false"><UiIcon name="info" :size="19" /></button><div class="ai-service-menu"><button class="ai-route-indicator" :class="aiStatusTone" :title="aiStatusTitle" :aria-expanded="aiStatusOpen" @click="openAiStatus"><span class="ai-route-dot" aria-hidden="true"></span><span aria-live="polite">{{ aiStatusLabel }}</span></button><section v-if="aiStatusOpen" class="ai-service-popover" aria-label="AI 服务状态"><header><strong>AI 服务状态</strong><button aria-label="关闭服务状态" @click="aiStatusOpen = false"><UiIcon name="close" :size="17" /></button></header><dl><dt>当前选择</dt><dd>{{ selectedProviderLabel }} · {{ aiRoute.countryCode || '地区待检测' }}</dd><dt>整理状态</dt><dd>{{ organizer.organizationRun.message || aiRoute.message }}</dd></dl><p v-if="organizer.organizationRun.lastError" class="service-error">{{ organizer.organizationRun.lastError }}</p><p v-if="organization?.analysis?.provider === 'local'">{{ organization.analysis.localReason === 'quota' ? 'API 额度不足，本次使用本地整理。' : '网络不可用，本次使用本地整理。' }}</p><div><button :disabled="busy || aiRoute.phase === 'checking'" @click="retryAiService">重新检测</button><button :disabled="busy || !clues.length" @click="aiStatusOpen = false; runOrganization()">继续整理</button><button @click="aiStatusOpen = false; switchView('settings')">管理密钥</button></div></section></div><button v-if="reviewUndo && reviewUndo.scriptId === activeScriptId" class="secondary-button topbar-undo" :disabled="busy" :title="`撤销${reviewUndo.label}`" @click="undoLastChange"><UiIcon name="rotate" :size="17" />撤销</button><button v-if="organizationActive" class="organization-pause-button" :disabled="organizationPauseRequested" @click="requestOrganizationPause">{{ organizationPauseRequested ? '正在暂停' : '暂停整理' }}</button><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
         <div v-if="!activeScript" class="empty-home"><div class="empty-art"><div class="art-paper art-paper-one"></div><div class="art-paper art-paper-two"></div><div class="art-paper art-paper-three"><UiIcon name="search" :size="38" /></div></div><h1>从一个剧本开始</h1><p>拍下线索，OCR 文字在本机识别。需要时可选择 AI 整理。</p><div class="empty-home-actions"><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button><button class="secondary-button" @click="importArchive"><UiIcon name="upload" :size="18" />导入档案</button></div></div>
         <template v-else>
           <section v-if="view === 'clues'" class="page page-clues">
             <div class="page-header capture-header"><div><span class="capture-eyebrow">当前剧本</span><h1>线索库</h1><p>拍照录入，文字自动识别并保存。</p></div><div class="header-actions capture-actions"><label class="capture-round-control">当前轮次<select v-model="captureRound" :disabled="busy || !captureRoundReady" aria-label="当前搜证轮次"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select></label><button class="secondary-button" :disabled="busy || !captureRoundReady" @click="importPhotos"><UiIcon name="image" :size="18" />选照片</button><button class="primary-button capture-primary" :disabled="busy || !captureRoundReady" @click="capture"><UiIcon name="camera" :size="23" />拍照录入</button></div></div>
-            <details v-if="recentClues.length" class="recent-capture" :open="recentCaptureOpen" @toggle="recentCaptureOpen = ($event.target as HTMLDetailsElement).open"><summary>最近录入 <span>最近 {{ recentClues.length }} 张 · 快速查看和调整</span></summary><div class="recent-capture-list"><article v-for="clue in recentClues" :key="clue.id"><button class="recent-clue-source" @click="openClue(clue)"><img v-if="imageUrls[clue.displayImagePath || clue.imagePath]" :src="imageUrls[clue.displayImagePath || clue.imagePath]" :alt="clue.title" /><span><strong>#{{ String(clue.number).padStart(3, '0') }} {{ clue.title }}</strong><small>{{ clue.ocrStatus === 'failed' ? '识别失败' : clue.ocrStatus === 'pending' ? '等待识别' : clue.ocrText.trim() ? 'OCR 已保存' : '暂无识别文字' }}</small></span></button><select :value="clue.round" :disabled="busy" aria-label="调整线索轮次" @change="changeRecentRound(clue.id, ($event.target as HTMLSelectElement).value)"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select><button v-if="!clue.ocrText.trim()" class="text-button" :disabled="busy" @click="retryOcr(clue)">重试识别</button><button class="icon-button" aria-label="删除最近录入线索" :disabled="busy" @click="removeClue(clue)"><UiIcon name="trash" :size="17" /></button></article></div></details>
+            <details v-if="recentClues.length" class="recent-capture" :open="recentCaptureOpen" @toggle="recentCaptureOpen = ($event.target as HTMLDetailsElement).open"><summary>最近录入 <span>最近 {{ recentClues.length }} 张 · 快速查看和调整</span></summary><div class="recent-capture-list"><article v-for="clue in recentClues" :key="clue.id"><button class="recent-clue-source" @click="openClue(clue)"><ClueThumbnail class="recent-clue-thumbnail" :path="clue.displayImagePath || clue.imagePath" :alt="clue.title" :rotation="clue.rotation" /><span><strong>#{{ String(clue.number).padStart(3, '0') }} {{ clue.title }}</strong><small>{{ clue.ocrStatus === 'failed' ? '识别失败' : clue.ocrStatus === 'pending' ? '等待识别' : clue.ocrText.trim() ? 'OCR 已保存' : '暂无识别文字' }}</small></span></button><select :value="clue.round" :disabled="busy" aria-label="调整线索轮次" @change="changeRecentRound(clue.id, ($event.target as HTMLSelectElement).value)"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select><button v-if="!clue.ocrText.trim()" class="text-button" :disabled="busy" @click="retryOcr(clue)">重试识别</button><button class="icon-button" aria-label="删除最近录入线索" :disabled="busy" @click="removeClue(clue)"><UiIcon name="trash" :size="17" /></button></article></div></details>
             <div class="clue-toolbar"><label class="search-field"><UiIcon name="search" :size="19" /><input v-model="query" placeholder="搜索线索文字" aria-label="搜索线索" /><button v-if="query" class="text-clear" @click="query = ''"><UiIcon name="close" :size="15" /></button></label><details class="filter-disclosure"><summary>筛选</summary><div class="toolbar-selects"><select v-model="filterRound" aria-label="筛选轮次"><option value="">全部轮次</option><option v-for="round in rounds" :key="round" :value="round">{{ round }}</option></select><select v-model="filterCategory" aria-label="筛选分类"><option value="">全部分类</option><option v-for="category in categories" :key="category" :value="category">{{ category }}</option></select><select v-model="filterTag" aria-label="筛选标签"><option value="">全部标签</option><option v-for="tag in clueTags" :key="tag" :value="tag">{{ tag }}</option></select><select v-model="filterPerson" aria-label="筛选人物"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select><button :class="['filter-favorite', { active: favoriteOnly }]" @click="favoriteOnly = !favoriteOnly"><UiIcon name="heart" :size="17" />收藏</button></div></details></div>
-            <div class="round-quick-filter"><button :class="{ active: filterRound === captureRound }" @click="filterRound = captureRound">本轮</button><button :class="{ active: !filterRound }" @click="filterRound = ''">全部轮次</button></div><div v-if="hasClueFilters" class="active-clue-filters" aria-label="当前筛选条件"><button v-for="filter in activeClueFilters" :key="filter.kind" :aria-label="`移除${filter.label}筛选`" @click="clearClueFilter(filter.kind)">{{ filter.label }}<UiIcon name="close" :size="13" /></button><button class="clear-all-filters" @click="clearClueFilter()">清除全部</button></div><div class="result-bar"><span>{{ visibleClues.length }} 条线索<span v-if="query"> · 搜索「{{ query }}」</span></span><div class="clue-result-actions"><label class="clue-sort-control"><span class="visually-hidden">线索排序</span><select v-model="clueSort" aria-label="线索排序"><option value="newest">最新录入</option><option value="oldest">最早录入</option><option value="number">编号顺序</option><option value="title">标题顺序</option></select></label><button v-if="!clueSelectionMode" class="clue-select-trigger" :disabled="busy || !clues.length" @click="clueSelectionMode = true">多选</button><button v-else class="clue-select-trigger" :disabled="busy" @click="finishClueSelection">完成</button><div class="view-toggle"><button :class="{ active: layout === 'grid' }" title="网格视图" @click="layout = 'grid'"><UiIcon name="grid" :size="18" /></button><button :class="{ active: layout === 'list' }" title="列表视图" @click="layout = 'list'"><UiIcon name="list" :size="18" /></button></div></div></div>
+            <div class="round-quick-filter"><button :class="{ active: filterRound === captureRound }" @click="filterRound = captureRound">本轮</button><button :class="{ active: !filterRound }" @click="filterRound = ''">全部轮次</button></div><div v-if="hasClueFilters" class="active-clue-filters" aria-label="当前筛选条件"><button v-for="filter in activeClueFilters" :key="filter.kind" :aria-label="`移除${filter.label}筛选`" @click="clearClueFilter(filter.kind)">{{ filter.label }}<UiIcon name="close" :size="13" /></button><button class="clear-all-filters" @click="clearClueFilter()">清除全部</button></div><div class="result-bar"><span>{{ visibleClues.length }} 条线索<span v-if="visibleClues.length > displayedClues.length"> · 已显示 {{ displayedClues.length }} 条</span><span v-if="query"> · 搜索「{{ query }}」</span></span><div class="clue-result-actions"><label class="clue-sort-control"><span class="visually-hidden">线索排序</span><select v-model="clueSort" aria-label="线索排序"><option value="newest">最新录入</option><option value="oldest">最早录入</option><option value="number">编号顺序</option><option value="title">标题顺序</option></select></label><button v-if="!clueSelectionMode" class="clue-select-trigger" :disabled="busy || !clues.length" @click="clueSelectionMode = true">多选</button><button v-else class="clue-select-trigger" :disabled="busy" @click="finishClueSelection">完成</button><div class="view-toggle"><button :class="{ active: layout === 'grid' }" title="网格视图" @click="layout = 'grid'"><UiIcon name="grid" :size="18" /></button><button :class="{ active: layout === 'list' }" title="列表视图" @click="layout = 'list'"><UiIcon name="list" :size="18" /></button></div></div></div>
             <div v-if="clueSelectionMode" class="clue-selection-bar" role="region" aria-label="批量编辑已选线索"><div><strong>已选 {{ selectedBatchClues.length }} 条</strong><span v-if="hiddenSelectedClueCount">其中 {{ hiddenSelectedClueCount }} 条不在当前筛选内</span><span v-else>只处理当前剧本已勾选的线索</span></div><div><button :disabled="busy || !visibleClues.length" :aria-pressed="allVisibleCluesSelected" @click="toggleVisibleClueSelection">{{ allVisibleCluesSelected ? '取消当前结果' : '选择当前结果' }}</button><button :disabled="busy || !selectedBatchClues.length" @click="selectedClueIds = []">清空选择</button><button class="clue-batch-primary" :disabled="busy || !selectedBatchClues.length" @click="clueBatchOpen = true"><UiIcon name="edit" :size="16" />批量编辑</button></div></div>
             <div v-if="!visibleClues.length" class="section-empty"><div class="section-empty-icon"><UiIcon :name="clues.length ? 'search' : 'camera'" :size="31" /></div><h2>{{ clues.length ? '没有符合条件的线索' : '还没有线索' }}</h2><p>{{ clues.length ? '试着调整搜索词或筛选条件。' : '拍摄或导入第一张线索照片，文字会在本机自动识别。' }}</p><button v-if="clues.length && hasClueFilters" class="secondary-button" @click="clearClueFilter()">清除筛选，查看全部线索</button><button v-if="!clues.length" class="primary-button" @click="capture"><UiIcon name="camera" :size="18" />拍摄线索</button></div>
-            <div v-else :class="['clue-collection', layout]"><article v-for="clue in visibleClues" :key="clue.id" class="clue-card" :class="{ 'clue-card-selected': clueSelectionMode && selectedClueIds.includes(clue.id) }" @click="clueSelectionMode ? toggleClueSelection(clue.id) : openClue(clue)"><button v-if="clueSelectionMode" class="clue-selection-check" role="checkbox" :aria-checked="selectedClueIds.includes(clue.id)" :aria-label="`选择线索 #${clue.number} ${clue.title}`" :disabled="busy" @click.stop="toggleClueSelection(clue.id)"><UiIcon v-if="selectedClueIds.includes(clue.id)" name="check" :size="18" /></button><div class="clue-image"><img v-if="imageUrls[clue.displayImagePath || clue.imagePath]" :src="imageUrls[clue.displayImagePath || clue.imagePath]" :alt="clue.title" :style="{ transform: `rotate(${clue.rotation}deg)` }" /><UiIcon v-else name="image" :size="31" /><span class="clue-number">#{{ String(clue.number).padStart(3, '0') }}</span><button :class="['favorite-button', { active: clue.favorite }]" title="收藏线索" @click.stop="toggleFavorite(clue)"><UiIcon name="heart" :size="17" /></button></div><div class="clue-card-body"><div class="clue-card-meta"><span v-if="clue.round">{{ clue.round }}</span><span v-if="clue.category">{{ clue.category }}</span><button v-for="tag in clue.tags.slice(0, 3)" :key="tag" class="clue-tag-chip" :aria-label="`筛选标签${tag}`" @click.stop="filterTag = tag">{{ tag }}</button><span v-if="clue.tags.length > 3">+{{ clue.tags.length - 3 }}</span></div><h2 v-html="highlight(clue.title)"></h2><p v-if="clue.ocrText" v-html="highlight(shortText(clue.ocrText, layout === 'list' ? 165 : 74))"></p><p v-else class="muted">暂无识别文字</p><div class="clue-card-foot"><span>{{ dateLabel(clue.createdAt) }}</span><button :class="['compare-pick', { active: compareIds.includes(clue.id) }]" @click.stop="toggleCompare(clue.id)"><UiIcon name="compare" :size="15" />{{ compareIds.includes(clue.id) ? '已对照' : '加入对照' }}</button></div></div></article></div>
+            <div v-else :class="['clue-collection', layout]"><article v-for="clue in displayedClues" :key="clue.id" class="clue-card" :class="{ 'clue-card-selected': clueSelectionMode && selectedClueIds.includes(clue.id) }" @click="clueSelectionMode ? toggleClueSelection(clue.id) : openClue(clue)"><button v-if="clueSelectionMode" class="clue-selection-check" role="checkbox" :aria-checked="selectedClueIds.includes(clue.id)" :aria-label="`选择线索 #${clue.number} ${clue.title}`" :disabled="busy" @click.stop="toggleClueSelection(clue.id)"><UiIcon v-if="selectedClueIds.includes(clue.id)" name="check" :size="18" /></button><div class="clue-image"><ClueThumbnail :path="clue.displayImagePath || clue.imagePath" :alt="clue.title" :rotation="clue.rotation" /><span class="clue-number">#{{ String(clue.number).padStart(3, '0') }}</span><button :class="['favorite-button', { active: clue.favorite }]" title="收藏线索" @click.stop="toggleFavorite(clue)"><UiIcon name="heart" :size="17" /></button></div><div class="clue-card-body"><div class="clue-card-meta"><span v-if="clue.round">{{ clue.round }}</span><span v-if="clue.category">{{ clue.category }}</span><button v-for="tag in clue.tags.slice(0, 3)" :key="tag" class="clue-tag-chip" :aria-label="`筛选标签${tag}`" @click.stop="filterTag = tag">{{ tag }}</button><span v-if="clue.tags.length > 3">+{{ clue.tags.length - 3 }}</span></div><h2 v-html="highlight(clue.title)"></h2><p v-if="clue.ocrText" v-html="highlight(shortText(clue.ocrText, layout === 'list' ? 165 : 74))"></p><p v-else class="muted">暂无识别文字</p><div class="clue-card-foot"><span>{{ dateLabel(clue.createdAt) }}</span><button :class="['compare-pick', { active: compareIds.includes(clue.id) }]" @click.stop="toggleCompare(clue.id)"><UiIcon name="compare" :size="15" />{{ compareIds.includes(clue.id) ? '已对照' : '加入对照' }}</button></div></div></article></div><button v-if="displayedClues.length < visibleClues.length" class="clue-load-more" @click="cluePageSize += 60">加载更多线索（还有 {{ visibleClues.length - displayedClues.length }} 条）</button>
           </section>
           <template v-else-if="view === 'organize'">
+            <div v-if="organizationActive || organizationPaused" class="organization-run-controls" role="status"><span>{{ organizationProgress }}</span><small>本次耗时 {{ elapsedLabel }}</small><button v-if="organizationActive" :disabled="organizationPauseRequested" @click="requestOrganizationPause">{{ organizationPauseRequested ? '等待当前请求保存…' : '暂停整理' }}</button><button v-else :disabled="busy" @click="runOrganization">继续整理</button></div>
             <section v-if="unfinishedTasks.length || pendingOcrClues.length" class="task-resume" aria-label="待继续处理"><header><div><strong>待继续处理</strong><p>已完成阶段已保存。点击继续后才会调用 API。</p></div><button v-if="unfinishedTasks.length" class="secondary-button" :disabled="busy" @click="runOrganization">继续整理</button></header><ul><li v-for="task in unfinishedTasks" :key="task.clueId"><button class="text-button" @click="openTimelineClue(task.clueId)">原线索 #{{ String(task.sourceNo).padStart(3, '0') }}</button><span>{{ task.message || (task.stage === 'checking' ? '时间核对待继续' : task.stage === 'local' ? '本地结果已保存，可继续 API 整理' : '整理待继续') }}</span></li><li v-for="clue in pendingOcrClues" :key="`ocr:${clue.id}`"><button class="text-button" @click="openClue(clue)">原线索 #{{ String(clue.number).padStart(3, '0') }}</button><span>{{ clue.ocrError || (clue.ocrStatus === 'pending' ? 'OCR 识别尚未完成' : '暂无 OCR 文字') }}</span><button v-if="!clue.ocrText.trim()" class="secondary-button" :disabled="busy" @click="retryOcr(clue)">重试识别</button></li></ul></section>
           <OrganizationOverview :clues="clues" :people="people" :relationships="relationships" :events="events" :organization="organization" :busy="busy" :auto-organize="autoOrganize" :api-configured="apiKeyConfigured" :api-provider="selectedProviderLabel" :can-undo="Boolean(reviewUndo && reviewUndo.scriptId === activeScriptId)" :progress="organizationProgress" @open-workbench="reviewWorkbenchOpen = true" @bulk-accept="applyReviewSelection($event, 'accept')" @bulk-ignore="applyReviewSelection($event, 'ignore')" @undo="undoLastChange" @analyze="runOrganization" @navigate="switchView" @open-clue="openSourceClue" @accept-person="acceptPersonSuggestion" @accept-relationship="acceptRelationshipSuggestion" @accept-timeline="acceptTimelineSuggestion" @accept-clue-point="acceptCluePointSuggestion" @clear-suggestions="clearOrganizationSuggestions" />
           </template>
@@ -1155,7 +1211,7 @@ onUnmounted(() => { document.removeEventListener('keydown', handleWorkspaceShort
       <RecoveryPanel v-if="recoveryOpen" :script-id="activeScriptId" @close="recoveryOpen = false" @restored="loadWorkspace" />
     <Teleport to="body">
       <div v-if="toast" class="toast" role="status">{{ toast }}</div>
-      <ReviewWorkbench v-if="reviewWorkbenchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :clues="clues" :organization="organization" :image-urls="imageUrls" :busy="busy" @close="reviewWorkbenchOpen = false" @open-clue="openTimelineClue" @accept="acceptWorkbenchSuggestion" @ignore="applyReviewSelection([$event], 'ignore')" @locate-clue="locateClueSource" />
+      <ReviewWorkbench v-if="reviewWorkbenchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :clues="clues" :organization="organization" :image-urls="imageUrls" :busy="busy" @request-image="requestClueImage" @close="reviewWorkbenchOpen = false" @open-clue="openTimelineClue" @accept="acceptWorkbenchSuggestion" @ignore="applyReviewSelection([$event], 'ignore')" @locate-clue="locateClueSource" />
       <ClueBatchEditor v-if="clueBatchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :clues="selectedBatchClues" :rounds="captureRoundOptions" :categories="categories" :busy="busy" @close="clueBatchOpen = false" @apply="applyClueBatch" />
       <WorkspaceSearch v-if="workspaceSearchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :script-name="activeScript.name" :clues="clues" :people="people" :events="events" :notes="notes" @close="workspaceSearchOpen = false" @open-clue="openSearchClue" @open-person="openSearchPerson" @open-event="openSearchEvent" @open-note="openSearchNote" />
       <WorkspaceGuide v-if="workspaceGuideOpen && activeScript" :key="activeScriptId" :script-name="activeScript.name" @close="workspaceGuideOpen = false" @navigate="navigateFromGuide" @open-search="openWorkspaceSearch" />

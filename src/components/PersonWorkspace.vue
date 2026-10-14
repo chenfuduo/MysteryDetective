@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ClueRecord, PersonRecord, RelationshipRecord, TimelineRecord } from '../services/vault'
 import UiIcon from './UiIcon.vue'
+import ClueThumbnail from './ClueThumbnail.vue'
 
 type Evidence = { clueId: string; sourceNo?: number; quote: string }
 type LinkedEvent = TimelineRecord & { evidence?: Evidence[]; precision?: 'date' | 'hour' | 'minute'; approximate?: boolean }
@@ -66,7 +67,6 @@ function clueExcerpt(clue: ClueRecord) {
   const start = Math.max(0, at - 35)
   return `${start ? '…' : ''}${text.slice(start, start + 180)}${text.length > start + 180 ? '…' : ''}`
 }
-function clueImage(clue: ClueRecord) { return props.imageUrls[clue.displayImagePath] || props.imageUrls[clue.imagePath] || props.imageUrls[clue.id] || '' }
 function changeTab(value: typeof tab.value) { tab.value = value; if (scroller.value) scroller.value.scrollTop = 0 }
 let previousOverflow = ''
 let previousFocus: HTMLElement | null = null
@@ -112,7 +112,7 @@ onBeforeUnmount(() => { if (document.body.style.overflow === 'hidden') document.
             </template>
             <template v-else-if="tab === 'clues'">
               <p class="workspace-caption">来自姓名、别名的明确匹配及事件关联。</p>
-              <article v-for="clue in relatedClues" :key="clue.id" class="workspace-clue"><button type="button" class="clue-open" @click="emit('open-clue', clue.id)"><img v-if="clueImage(clue)" :src="clueImage(clue)" alt="" /><span v-else class="clue-placeholder"><UiIcon name="image" :size="25" /></span><span class="clue-heading"><small>线索 #{{ String(clue.number).padStart(3, '0') }}</small><strong>{{ clue.title || '未命名线索' }}</strong><span>{{ clue.category || '未分类' }} · 第 {{ clue.round }} 轮</span></span><UiIcon name="chevron" :size="17" /></button><p v-if="clue.ocrText" class="clue-excerpt">{{ clueExcerpt(clue) }}</p><details v-if="clue.ocrText" class="clue-text"><summary>展开 OCR 原文</summary><p>{{ clue.ocrText }}</p></details></article>
+              <article v-for="clue in relatedClues" :key="clue.id" class="workspace-clue"><div class="clue-open"><span class="clue-photo" @click="emit('open-clue', clue.id)"><ClueThumbnail :path="clue.displayImagePath || clue.imagePath" :rotation="clue.rotation" :alt="clue.title" /></span><button type="button" class="clue-heading" @click="emit('open-clue', clue.id)"><small>线索 #{{ String(clue.number).padStart(3, '0') }}</small><strong>{{ clue.title || '未命名线索' }}</strong><span>{{ clue.category || '未分类' }} · 第 {{ clue.round }} 轮</span></button><UiIcon name="chevron" :size="17" /></div><p v-if="clue.ocrText" class="clue-excerpt">{{ clueExcerpt(clue) }}</p><details v-if="clue.ocrText" class="clue-text"><summary>展开 OCR 原文</summary><p>{{ clue.ocrText }}</p></details></article>
               <div v-if="!relatedClues.length" class="workspace-empty"><UiIcon name="archive" :size="32" /><strong>还没有相关线索</strong><p>拍摄录入后，可通过姓名、别名或事件关联查找。</p></div>
             </template>
             <template v-else>
@@ -169,9 +169,9 @@ onBeforeUnmount(() => { if (document.body.style.overflow === 'hidden') document.
 .manual-event { margin: 10px 0 0; color: #9ba58e; font-size: 10px; }
 .workspace-clue { margin-bottom: 12px; padding: 13px; border: 1px solid #e0e7d9; border-radius: 14px; background: #fff; }
 .clue-open { display: flex; align-items: center; gap: 12px; width: 100%; padding: 0; border: 0; background: transparent; color: #35533a; text-align: left; font: inherit; }
-.clue-open > img, .clue-placeholder { flex-shrink: 0; width: 52px; height: 68px; object-fit: cover; border-radius: 8px; background: #edf2e8; }
+.clue-photo { flex-shrink: 0; width: 52px; height: 68px; object-fit: cover; border-radius: 8px; background: #edf2e8; }
 .clue-placeholder { display: grid; place-items: center; color: #9bad8e; }
-.clue-heading { display: flex; flex: 1; flex-direction: column; gap: 5px; min-width: 0; }
+.clue-heading { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; padding: 8px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
 .clue-heading small { color: #a17a56; font-size: 10px; }
 .clue-heading strong { overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
 .clue-heading > span { color: #94a087; font-size: 10px; }

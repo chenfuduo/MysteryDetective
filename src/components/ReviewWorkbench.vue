@@ -11,7 +11,7 @@ type Suggestion =
   | { kind: 'timeline'; item: OrganizationTimelineSuggestion }
   | { kind: 'cluePoints'; item: OrganizationCluePointSuggestion }
 const props = defineProps<{ scriptId: string; clues: ClueRecord[]; organization: OrganizationSnapshot | null; busy: boolean; imageUrls: Record<string, string> }>()
-const emit = defineEmits<{ close: []; 'open-clue': [id: string, quote?: string]; accept: [selection: ReviewSelection]; ignore: [selection: ReviewSelection]; 'locate-clue': [id: string] }>()
+const emit = defineEmits<{ close: []; 'open-clue': [id: string, quote?: string]; accept: [selection: ReviewSelection]; ignore: [selection: ReviewSelection]; 'locate-clue': [id: string]; 'request-image': [path: string] }>()
 const currentKey = ref('')
 const sourceIndex = ref(0)
 const zoom = ref(false)
@@ -52,6 +52,7 @@ const sources = computed(() => {
 })
 const source = computed(() => sources.value[sourceIndex.value] || sources.value[0] || null)
 const photo = computed(() => source.value ? props.imageUrls[source.value.clue.imagePath] || '' : '')
+watch(() => source.value?.clue.imagePath, path => { if (path && !props.imageUrls[path]) emit('request-image', path) }, { immediate: true })
 const regions = computed(() => source.value?.clue.ocrImagePath === source.value?.clue.imagePath ? source.value?.clue.ocrRegions || [] : [])
 const ocrParts = computed(() => {
   const text = source.value?.clue.ocrText || ''

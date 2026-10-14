@@ -63,13 +63,13 @@ function sourceQuote(sourceNo: number, quote: unknown, clues: ClueRecord[]): { c
   if (!clue || !excerpt || !clue.ocrText.includes(excerpt)) return null
   return { clue, quote: excerpt }
 }
-type RunPhase = 'idle' | 'extracting' | 'checking' | 'complete' | 'error' | 'local'
+type RunPhase = 'idle' | 'extracting' | 'checking' | 'complete' | 'error' | 'local' | 'paused'
 export const organizationRun = reactive({ phase: 'idle' as RunPhase, provider: null as AiProvider | 'local' | null, message: '', lastError: '' })
 type DateToken = { index: number; end: number; year: string; month: number; day: number; value: string }
 type ClockToken = { index: number; end: number; hour: number; minute: number | null; approximate: boolean; value: string }
 type CheckedTime = { startsAt: string; precision: 'date' | 'hour' | 'minute'; approximate: boolean }
 type NormalizedResult = { snapshot: OrganizationSnapshot; rejected: Map<number, number> }
-export type OrganizationStage = 'extracting' | 'checking' | 'complete' | 'failed'
+export type OrganizationStage = 'extracting' | 'checking' | 'complete' | 'failed' | 'paused'
 export type OrganizationCheckpoint = {
   version: 1
   fingerprint: string
@@ -83,10 +83,18 @@ export type OrganizationCheckpoint = {
 export type OrganizationContext = {
   fingerprint?: string
   checkpoint?: OrganizationCheckpoint | null
+  shouldPause?: () => boolean
   onCheckpoint?: (checkpoint: OrganizationCheckpoint) => void | Promise<void>
   onStage?: (stage: OrganizationStage, message?: string) => void | Promise<void>
 }
 
+
+export class OrganizationPausedError extends Error {
+  constructor(readonly snapshot?: OrganizationSnapshot) {
+    super(snapshot ? '已暂停，首轮结果已保存；继续时仅补做时间核对' : '已暂停，继续时从当前线索开始')
+    this.name = 'OrganizationPausedError'
+  }
+}
 
 function scanDates(value: string): DateToken[] {
   // Full-width OCR digits retain their original character offsets for source quotes.
@@ -322,6 +330,9 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     if (!first) return
     await context.onCheckpoint?.({ version: 1, fingerprint, clueIds: clues.map(clue => clue.id), provider, stage, snapshot: structuredClone(first.snapshot), rejected: [...first.rejected], updatedAt: new Date().toISOString() })
   }
+  const stopIfRequested = (): void => {
+    if (context.shouldPause?.()) throw new OrganizationPausedError(first?.snapshot)
+  }
   try {
     const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText }))
     if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
@@ -330,6 +341,7 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
       await context.onStage?.('complete', organizationRun.message)
       return first.snapshot
     }
+    stopIfRequested()
     await context.onStage?.(first ? 'checking' : 'extracting', first ? '已恢复首轮结果，准备时间核对' : '准备提取 OCR 文字')
     if (typeof navigator !== 'undefined' && navigator.onLine === false) { await context.onStage?.('failed', organizationRun.lastError || organizationRun.message); return localTimelineFallback(clues, 'offline', first?.snapshot) }
     let provider: AiProvider
@@ -340,9 +352,11 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     organizationRun.provider = provider; organizationRun.message = first ? `${providerLabel(provider)} 正在恢复时间核对` : `${providerLabel(provider)} 正在整理 OCR 文字`
     const apiKey = await readApiKey(provider)
     const sources = JSON.stringify(sourceClues)
+    stopIfRequested()
     if (!first) {
       try { first = normalize(await requestOrganization(provider, apiKey, `完整整理以下单个剧本的 OCR 线索。逐条从头到尾扫描，不能省略后半段时间。只返回规定 JSON。\n${sources}`), clues) }
       catch (error) {
+        if (context.shouldPause?.()) { organizationRun.lastError = error instanceof Error ? error.message : String(error); stopIfRequested() }
         if (error instanceof OrganizationApiError && error.localReason) { await context.onStage?.('failed', organizationRun.lastError || organizationRun.message); return localTimelineFallback(clues, error.localReason) }
         throw error
       }
@@ -351,11 +365,13 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
       // Persist extraction before starting another request; a restart only repeats the audit.
       await saveStage(provider, 'checking')
     }
+    stopIfRequested()
     organizationRun.phase = 'checking'; organizationRun.message = `${providerLabel(provider)} 正在逐段核对时间是否遗漏`
     await context.onStage?.('checking', organizationRun.message)
     let reviewed = false, reviewError = ''
     // This inventory only directs the API to literal OCR spans; it never creates events online.
     const clockAnchors = clues.map(clue => ({ source: clue.number, occurrences: scanClocks(clue.ocrText).map(clock => ({ offset: clock.index, text: clue.ocrText.slice(clock.index, clock.end), context: clue.ocrText.slice(Math.max(0, clock.index - 48), Math.min(clue.ocrText.length, clock.end + 96)) })) }))
+    stopIfRequested()
     try {
       const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}`), clues)
       first.snapshot.timeline = mergeTimeline(first.snapshot.timeline, second.snapshot.timeline)
@@ -364,6 +380,7 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     } catch (error) {
       organizationRun.lastError = error instanceof Error ? error.message : String(error)
       await context.onStage?.('failed', organizationRun.lastError || organizationRun.message)
+      stopIfRequested()
       if (error instanceof OrganizationApiError && error.localReason) return localTimelineFallback(clues, error.localReason, first.snapshot)
       reviewError = `第二轮核对未完成：${organizationRun.lastError}；已保留首轮整理结果，再次整理将仅重试核对`
     }
@@ -377,6 +394,11 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     await context.onStage?.(reviewed ? 'complete' : 'failed', organizationRun.message)
     return first.snapshot
   } catch (error) {
+    if (error instanceof OrganizationPausedError) {
+      organizationRun.phase = 'paused'; organizationRun.message = error.message
+      await context.onStage?.('paused', error.message)
+      throw error
+    }
     organizationRun.phase = 'error'; organizationRun.lastError = error instanceof Error ? error.message : String(error); organizationRun.message = organizationRun.lastError
     await context.onStage?.('failed', organizationRun.lastError || organizationRun.message)
     throw error

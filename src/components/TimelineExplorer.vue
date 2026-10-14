@@ -137,7 +137,7 @@ async function syncCharts() {
       height: '100%', stack: true, selectable: true, showCurrentTime: false,
       zoomKey: 'ctrlKey', horizontalScroll: true, verticalScroll: true,
       margin: { item: { horizontal: 18, vertical: 18 }, axis: 22 },
-      orientation: { axis: 'bottom', item: 'top' },
+      orientation: { axis: 'bottom', item: 'bottom' },
       tooltip: { followMouse: false },
     })
     instances[lane] = instance

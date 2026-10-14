@@ -7,9 +7,9 @@ import { Ocr } from '@jcesarmobile/capacitor-ocr'
 import JSZip from 'jszip'
 
 export type ScriptRecord = { id: string; name: string; playDate: string; coverPath: string; createdAt: string }
-export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
+export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
 export type CluePhotoImportResult = { clues: ClueRecord[]; skippedDuplicates: number }
-export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string }
+export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string; photoPaths?: string[] }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
 export type OrganizationEvidence = { clueId: string; sourceNo: number; quote: string }
 export type TimelineRecord = { id: string; scriptId: string; title: string; startsAt: string; personIds: string[]; clueId: string; confirmed: boolean; yearlessMarkerIgnored?: boolean; evidence?: OrganizationEvidence[]; precision?: 'date' | 'hour' | 'minute'; approximate?: boolean }
@@ -30,9 +30,9 @@ export function suggestionKey(kind: OrganizationSuggestionKind, item: Organizati
 }
 export type AnnotationRecord = { id: string; clueId: string; strokes: unknown[] }
 
-type Table = 'scripts' | 'clues' | 'people' | 'relationships' | 'timeline' | 'board_items' | 'board_links' | 'notes' | 'annotations' | 'organization'
+type Table = 'scripts' | 'clues' | 'people' | 'relationships' | 'timeline' | 'board_items' | 'board_links' | 'notes' | 'annotations' | 'organization' | 'workspace_state'
 type Stored = { id: string; scriptId?: string }
-const tables: Table[] = ['scripts', 'clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations', 'organization']
+const tables: Table[] = ['scripts', 'clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations', 'organization', 'workspace_state']
 const native = Capacitor.isNativePlatform()
 let database: any = null
 let initialized = false
@@ -115,6 +115,78 @@ async function indexClue(clue: ClueRecord): Promise<void> {
   if (!native || !ftsReady) return
   await database.run('DELETE FROM clue_fts WHERE clue_id = ?', [clue.id])
   await database.run('INSERT INTO clue_fts (clue_id, script_id, title, ocr_text, notes) VALUES (?, ?, ?, ?, ?)', [clue.id, clue.scriptId, clue.title, clue.ocrText, clue.notes])
+}
+
+export type VaultRecordKind = Exclude<Table, 'scripts' | 'workspace_state'>
+export type VaultRecordChange = { kind: VaultRecordKind; id: string; before: unknown; after: unknown }
+type LocalStateRecord = { id: string; scriptId: string; key: string; value: unknown }
+const stateId = (scriptId: string, key: string) => JSON.stringify([scriptId, key])
+const recordEqual = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+
+// Local workflow metadata stays on this device and is deliberately excluded from archives.
+export async function getLocalState<T>(scriptId: string, key: string): Promise<T | null> {
+  const record = await getRecord<LocalStateRecord>('workspace_state', stateId(scriptId, key))
+  return record?.scriptId === scriptId ? record.value as T : null
+}
+export async function saveLocalState<T>(scriptId: string, key: string, value: T): Promise<void> {
+  await putRecord('workspace_state', { id: stateId(scriptId, key), scriptId, key, value })
+}
+export async function removeLocalState(scriptId: string, key: string): Promise<void> {
+  await removeRecord('workspace_state', stateId(scriptId, key))
+}
+
+// Merge, restore and undo write all linked records and their recovery metadata together.
+export async function applyRecordChanges(scriptId: string, changes: VaultRecordChange[], state: { save?: { key: string; value: unknown }[]; remove?: string[] } = {}): Promise<void> {
+  await initVault()
+  const writes: { table: Table; id: string; after: Stored | null }[] = []
+  const seen = new Set<string>()
+  for (const change of changes) {
+    if (!tables.includes(change.kind) || change.kind === ('scripts' as Table) || change.kind === ('workspace_state' as Table)) throw new Error('不支持修改这个资料类型')
+    const identity = `${change.kind}:${change.id}`
+    if (seen.has(identity)) throw new Error('同一资料不能重复写入')
+    seen.add(identity)
+    const current = await getRecord<Stored>(change.kind, change.id)
+    if (current && current.scriptId !== scriptId) throw new Error('资料不属于当前剧本')
+    if (!recordEqual(current, change.before)) throw new Error('相关资料已有新变化，请保留当前内容后再操作')
+    const after = change.after as Stored | null
+    if (after && (after.id !== change.id || after.scriptId !== scriptId)) throw new Error('资料不属于当前剧本')
+    writes.push({ table: change.kind, id: change.id, after })
+  }
+  for (const entry of state.save || []) writes.push({ table: 'workspace_state', id: stateId(scriptId, entry.key), after: { id: stateId(scriptId, entry.key), scriptId, key: entry.key, value: entry.value } as LocalStateRecord })
+  for (const key of state.remove || []) writes.push({ table: 'workspace_state', id: stateId(scriptId, key), after: null })
+  if (!writes.length) return
+  if (native) {
+    const statements: { statement: string; values: unknown[] }[] = []
+    for (const write of writes) {
+      statements.push(write.after
+        ? { statement: `INSERT OR REPLACE INTO ${write.table} (id, script_id, data) VALUES (?, ?, ?)`, values: [write.id, scriptId, JSON.stringify(write.after)] }
+        : { statement: `DELETE FROM ${write.table} WHERE id = ? AND script_id = ?`, values: [write.id, scriptId] })
+      if (write.table === 'clues' && ftsReady) {
+        statements.push({ statement: 'DELETE FROM clue_fts WHERE clue_id = ?', values: [write.id] })
+        if (write.after) {
+          const clue = write.after as ClueRecord
+          statements.push({ statement: 'INSERT INTO clue_fts (clue_id, script_id, title, ocr_text, notes) VALUES (?, ?, ?, ?, ?)', values: [clue.id, scriptId, clue.title, clue.ocrText, clue.notes] })
+        }
+      }
+    }
+    await database.executeSet(statements, true)
+  } else {
+    const originals = new Map<Table, string | null>()
+    const pending = new Map<Table, Stored[]>()
+    for (const write of writes) {
+      if (!pending.has(write.table)) { originals.set(write.table, localStorage.getItem(webKey(write.table))); pending.set(write.table, webRecords<Stored>(write.table)) }
+      const records = pending.get(write.table)!
+      const index = records.findIndex(item => item.id === write.id)
+      if (write.after) { if (index < 0) records.push(write.after); else records[index] = write.after }
+      else if (index >= 0) records.splice(index, 1)
+    }
+    try { for (const [table, records] of pending) localStorage.setItem(webKey(table), JSON.stringify(records)) }
+    catch (error) {
+      for (const table of originals.keys()) localStorage.removeItem(webKey(table))
+      for (const [table, raw] of originals) if (raw !== null) localStorage.setItem(webKey(table), raw)
+      throw error
+    }
+  }
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -246,12 +318,20 @@ export async function deleteScript(id: string): Promise<void> {
   const script = await getRecord<ScriptRecord>('scripts', id)
   if (!script) return
   for (const clue of await listClues(id)) { await deleteImage(clue.imagePath); await deleteImage(clue.displayImagePath) }
-  for (const person of await listPeople(id)) await deleteImage(person.photoPath)
+  for (const person of await listPeople(id)) for (const path of [person.photoPath, ...(person.photoPaths || [])]) await deleteImage(path)
+  for (const entry of await listRecords<LocalStateRecord>('workspace_state', id)) {
+    if (!entry.key.startsWith('trash:')) continue
+    const trash = entry.value as ClueTrashRecord
+    const clue = trash?.changes?.find(change => change.kind === 'clues')?.before as ClueRecord | undefined
+    if (clue) { await deleteImage(clue.imagePath); await deleteImage(clue.displayImagePath) }
+  }
   await deleteImage(script.coverPath)
   for (const table of tables.filter((item) => item !== 'scripts')) {
     for (const item of await listRecords<Stored>(table, id)) await removeRecord(table, item.id)
   }
   await removeRecord('scripts', id)
+  const draftPrefix = `clue-vault:draft:${encodeURIComponent(id)}:`
+  for (const key of Object.keys(localStorage)) if (key.startsWith(draftPrefix)) localStorage.removeItem(key)
 }
 
 export async function listClues(scriptId: string): Promise<ClueRecord[]> {
@@ -287,47 +367,74 @@ async function sourceBase64(uri: string): Promise<string> {
   const response = await fetch(uri)
   return bytesToBase64(new Uint8Array(await response.arrayBuffer()))
 }
-async function addPhoto(scriptId: string, uri: string, mime: string): Promise<ClueRecord | null> {
-  const data = await sourceBase64(uri)
-  const [imageHash, result] = await Promise.all([
-    imageFingerprint(data),
-    native ? Ocr.process({ image: `data:${mime};base64,${data}` }) : Promise.resolve({ results: [] as { text: string }[] }),
-  ])
-  const ocrText = result.results.map((item) => item.text).join('\n')
-  const normalizedText = normalizeClueText(ocrText)
-  const existing = await listClues(scriptId)
-  const duplicate = existing.some(clue =>
-    (Boolean(imageHash) && clue.imageHash === imageHash) ||
-    (Boolean(normalizedText) && normalizeClueText(clue.ocrText) === normalizedText),
-  )
-  if (duplicate) return null
-  const imagePath = await saveImage(scriptId, data, mime)
+async function recognizeSavedClue(clue: ClueRecord, data?: string): Promise<ClueRecord> {
+  let ocrText = ''
+  let error = ''
   try {
-    const number = Math.max(0, ...existing.map((clue) => clue.number)) + 1
-    const clue: ClueRecord = { id: uid(), scriptId, number, title: `线索 ${String(number).padStart(3, '0')}`, imagePath, displayImagePath: '', ocrText, imageHash, round: 1, category: categoryFromText(ocrText), tags: [], favorite: false, notes: '', rotation: 0, createdAt: now() }
-    await putRecord('clues', clue)
-    await addTimeCandidates(clue)
-    return clue
+    const base64 = data || await readImage(clue.imagePath)
+    const result = native ? await Ocr.process({ image: `data:${mimeForPath(clue.imagePath)};base64,${base64}` }) : { results: [] as { text: string }[] }
+    ocrText = result.results.map(item => item.text).join('\n')
+    if (!ocrText.trim()) error = '未识别到文字，原始照片已保存，可以重新识别或手动输入'
+  } catch {
+    error = '文字识别失败，原始照片已保存，请重新识别或手动输入'
+  }
+  const current = await getRecord<ClueRecord>('clues', clue.id)
+  if (!current || current.scriptId !== clue.scriptId) throw new Error('线索已被移除，无法继续识别')
+  // A manual correction made while OCR was running always wins.
+  if (current.ocrText.trim()) return current
+  if (error) return updateClue(clue.id, { ocrStatus: 'failed', ocrError: error })
+  return updateClue(clue.id, { ocrText, category: categoryFromText(ocrText), ocrStatus: 'complete', ocrError: '' })
+}
+export async function retryClueOcr(scriptId: string, clueId: string): Promise<ClueRecord> {
+  const clue = await getRecord<ClueRecord>('clues', clueId)
+  if (!clue || clue.scriptId !== scriptId) throw new Error('线索不属于当前剧本')
+  if (clue.ocrText.trim()) throw new Error('这条线索已有识别或修正文字，请先保留原文，不会自动覆盖')
+  const pending = await updateClue(clue.id, { ocrStatus: 'pending', ocrError: '' })
+  const result = await recognizeSavedClue(pending)
+  if (result.ocrStatus === 'complete') await addTimeCandidates(result)
+  return result
+}
+async function addPhoto(scriptId: string, uri: string, mime: string, round = 1): Promise<ClueRecord | null> {
+  const data = await sourceBase64(uri)
+  const imageHash = await imageFingerprint(data)
+  const existing = await listClues(scriptId)
+  if (imageHash && existing.some(clue => clue.imageHash === imageHash)) return null
+  const imagePath = await saveImage(scriptId, data, mime)
+  let pending: ClueRecord
+  try {
+    const deletedNumbers = (await listRecords<LocalStateRecord>('workspace_state', scriptId)).filter(item => item.key.startsWith('trash:')).map(item => ((item.value as ClueTrashRecord).changes.find(change => change.kind === 'clues')?.before as ClueRecord | undefined)?.number || 0)
+    const number = Math.max(0, ...existing.map(clue => clue.number), ...deletedNumbers) + 1
+    pending = { id: uid(), scriptId, number, title: `线索 ${String(number).padStart(3, '0')}`, imagePath, displayImagePath: '', ocrText: '', ocrStatus: 'pending', ocrError: '', imageHash, round: Number.isInteger(round) && round > 0 ? round : 1, category: '未分类', tags: [], favorite: false, notes: '', rotation: 0, createdAt: now() }
+    await putRecord('clues', pending)
   } catch (error) {
     await deleteImage(imagePath)
     throw error
   }
+  const clue = await recognizeSavedClue(pending, data)
+  const normalizedText = normalizeClueText(clue.ocrText)
+  if (normalizedText && (await listClues(scriptId)).some(other => other.id !== clue.id && normalizeClueText(other.ocrText) === normalizedText)) {
+    await removeRecord('clues', clue.id)
+    await deleteImage(imagePath)
+    return null
+  }
+  if (clue.ocrStatus === 'complete') await addTimeCandidates(clue)
+  return clue
 }
-export async function captureClues(scriptId: string): Promise<CluePhotoImportResult> {
+export async function captureClues(scriptId: string, round = 1): Promise<CluePhotoImportResult> {
   const photo = await Camera.takePhoto({ quality: 90, includeMetadata: true })
   const uri = photo.uri || photo.webPath
   if (!uri) throw new Error('无法读取拍摄照片')
-  const clue = await addPhoto(scriptId, uri, mimeForPath(uri))
+  const clue = await addPhoto(scriptId, uri, mimeForPath(uri), round)
   return { clues: clue ? [clue] : [], skippedDuplicates: clue ? 0 : 1 }
 }
-export async function importCluePhotos(scriptId: string): Promise<CluePhotoImportResult> {
+export async function importCluePhotos(scriptId: string, round = 1): Promise<CluePhotoImportResult> {
   const selection = await Camera.chooseFromGallery({ allowMultipleSelection: true, limit: 0, includeMetadata: true })
   const added: ClueRecord[] = []
   let skippedDuplicates = 0
   for (const photo of selection.results) {
     const uri = photo.uri || photo.webPath
     if (!uri) throw new Error('无法读取相册照片')
-    const clue = await addPhoto(scriptId, uri, mimeForPath(uri))
+    const clue = await addPhoto(scriptId, uri, mimeForPath(uri), round)
     if (clue) added.push(clue)
     else skippedDuplicates += 1
   }
@@ -336,24 +443,48 @@ export async function importCluePhotos(scriptId: string): Promise<CluePhotoImpor
 export async function updateClue(id: string, patch: Partial<ClueRecord>): Promise<ClueRecord> {
   const existing = await getRecord<ClueRecord>('clues', id)
   if (!existing) throw new Error('线索不存在')
-  return putRecord('clues', { ...existing, ...patch, id, scriptId: existing.scriptId, imagePath: existing.imagePath })
+  const ocrState = patch.ocrText?.trim() ? { ocrStatus: 'complete' as const, ocrError: '' } : {}
+  return putRecord('clues', { ...existing, ...patch, ...ocrState, id, scriptId: existing.scriptId, imagePath: existing.imagePath })
+}
+type ClueTrashRecord = { id: string; label: string; deletedAt: string; kind: 'clue'; changes: VaultRecordChange[] }
+export async function listTrash(scriptId: string): Promise<{ id: string; label: string; deletedAt: string; kind: 'clue' }[]> {
+  return (await listRecords<LocalStateRecord>('workspace_state', scriptId)).filter(item => item.key.startsWith('trash:')).map(item => {
+    const entry = item.value as ClueTrashRecord
+    return { id: entry.id, label: entry.label, deletedAt: entry.deletedAt, kind: entry.kind }
+  }).sort((a, b) => b.deletedAt.localeCompare(a.deletedAt))
+}
+export async function restoreTrash(scriptId: string, id: string): Promise<void> {
+  const trash = await getLocalState<ClueTrashRecord>(scriptId, `trash:${id}`)
+  if (!trash || trash.kind !== 'clue') throw new Error('这条回收记录不存在')
+  const oldClue = trash.changes.find(change => change.kind === 'clues')?.before as ClueRecord | undefined
+  if (oldClue && (await listClues(scriptId)).some(clue => clue.id !== oldClue.id && clue.number === oldClue.number)) throw new Error('原线索编号已被使用，请先调整当前线索编号后恢复')
+  await applyRecordChanges(scriptId, trash.changes.map(change => ({ ...change, before: change.after, after: change.before })), { remove: [`trash:${id}`] })
 }
 export async function deleteClue(id: string): Promise<void> {
   const clue = await getRecord<ClueRecord>('clues', id)
   if (!clue) return
+  const changes: VaultRecordChange[] = []
+  const remember = (kind: VaultRecordKind, before: Stored, after: unknown = null) => changes.push({ kind, id: before.id, before, after })
   for (const item of await listTimelineEvents(clue.scriptId)) {
     if (item.clueId !== id && !item.evidence?.some(source => source.clueId === id)) continue
     const evidence = (item.evidence || []).filter(source => source.clueId !== id)
-    if (item.clueId !== id || evidence.length) await updateTimelineEvent(item.id, { evidence, clueId: item.clueId === id ? evidence[0]!.clueId : item.clueId })
-    else await deleteTimelineEvent(item.id)
+    remember('timeline', item, item.clueId !== id || evidence.length ? { ...item, evidence, clueId: item.clueId === id ? evidence[0]!.clueId : item.clueId } : null)
   }
-  for (const item of await listBoardItems(clue.scriptId)) if (item.kind === 'clue' && item.refId === id) await deleteBoardItem(item.id)
-  for (const item of await listNotes(clue.scriptId)) if (item.clueId === id) await deleteNote(item.id)
+  const removedCards = new Set<string>()
+  for (const item of await listBoardItems(clue.scriptId)) if (item.kind === 'clue' && item.refId === id) { removedCards.add(item.id); remember('board_items', item) }
+  for (const link of await listBoardLinks(clue.scriptId)) if (removedCards.has(link.fromId) || removedCards.has(link.toId)) remember('board_links', link)
+  for (const item of await listNotes(clue.scriptId)) if (item.clueId === id) remember('notes', item)
   const annotation = await getAnnotation(id)
-  if (annotation) await removeRecord('annotations', annotation.id)
-  await deleteImage(clue.imagePath)
-  await deleteImage(clue.displayImagePath)
-  await removeRecord('clues', id)
+  if (annotation) remember('annotations', { ...annotation, scriptId: clue.scriptId })
+  const organization = await getOrganization(clue.scriptId)
+  if (organization) {
+    const processedClues = { ...(organization.processedClues || {}) }; delete processedClues[id]
+    remember('organization', organization, { ...organization, people: organization.people.filter(item => item.sourceNo !== clue.number), relationships: organization.relationships.filter(item => item.sourceNo !== clue.number), timeline: organization.timeline.filter(item => item.sourceNo !== clue.number && !item.evidence?.some(source => source.clueId === id || source.sourceNo === clue.number)), cluePoints: organization.cluePoints.filter(item => item.sourceNo !== clue.number), timelineAudit: organization.timelineAudit?.filter(item => item.sourceNo !== clue.number), processedClues, updatedAt: now() })
+  }
+  remember('clues', clue)
+  const trash: ClueTrashRecord = { id, label: `#${String(clue.number).padStart(3, '0')} ${clue.title}`, deletedAt: now(), kind: 'clue', changes }
+  // Photos remain on disk; explicit script deletion still removes the entire archive.
+  await applyRecordChanges(clue.scriptId, changes, { save: [{ key: `trash:${id}`, value: trash }] })
 }
 export async function searchClues(scriptId: string, query: string): Promise<ClueRecord[]> {
   const clues = await listClues(scriptId)
@@ -429,7 +560,7 @@ async function timelineEvidence(scriptId: string, input: Partial<TimelineRecord>
 export async function mergeTimelineEvidence(existing: TimelineRecord, input: Partial<TimelineRecord>): Promise<TimelineRecord> {
   const evidence = await timelineEvidence(existing.scriptId, { clueId: existing.clueId || input.clueId, evidence: [...(existing.evidence || []), ...(input.evidence || [])] })
   if (input.clueId && input.clueId !== existing.clueId && !evidence.some(item => item.clueId === input.clueId)) evidence.push(...await timelineEvidence(existing.scriptId, { clueId: input.clueId }))
-  return putRecord('timeline', { ...existing, evidence, clueId: existing.clueId || evidence[0]?.clueId || '', precision: existing.precision || input.precision, approximate: existing.approximate ?? input.approximate })
+  return putRecord('timeline', { ...existing, evidence, clueId: existing.clueId || evidence[0]?.clueId || '' })
 }
 export async function createTimelineEvent(scriptId: string, input: Partial<TimelineRecord>): Promise<TimelineRecord> {
   const record: TimelineRecord = { id: uid(), scriptId, title: input.title || '', startsAt: input.startsAt || '', personIds: input.personIds || [], clueId: input.clueId || '', confirmed: input.confirmed ?? true, yearlessMarkerIgnored: input.yearlessMarkerIgnored ?? false, evidence: await timelineEvidence(scriptId, input), precision: input.precision, approximate: input.approximate }
@@ -514,7 +645,7 @@ export async function exportScript(id: string): Promise<void> {
   for (const table of archiveTables) records[table] = await listRecords(table, id)
   const zip = new JSZip()
   zip.file('manifest.json', JSON.stringify({ format: 'clue-vault', version: 1, script, records }))
-  const paths = [script.coverPath, ...(records.clues as ClueRecord[]).flatMap((item) => [item.imagePath, item.displayImagePath]), ...(records.people as PersonRecord[]).map((item) => item.photoPath)].filter(Boolean)
+  const paths = [script.coverPath, ...(records.clues as ClueRecord[]).flatMap((item) => [item.imagePath, item.displayImagePath]), ...(records.people as PersonRecord[]).flatMap((item) => [item.photoPath, ...(item.photoPaths || [])])].filter(Boolean)
   for (const path of paths) zip.file(path, await readImage(path), { base64: true })
   const archive = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
   if (native) {
@@ -561,7 +692,7 @@ export async function importScript(): Promise<ScriptRecord | null> {
       for (const key of ['clueId', 'personId', 'fromId', 'toId', 'refId']) if (record[key]) record[key] = idMap.get(record[key]) || ''
       if (Array.isArray(record.personIds)) record.personIds = record.personIds.map((id: string) => idMap.get(id) || '').filter(Boolean)
       if (table === 'clues') { record.imagePath = await importedImage(raw.imagePath); record.displayImagePath = await importedImage(raw.displayImagePath) }
-      if (table === 'people') record.photoPath = await importedImage(raw.photoPath)
+      if (table === 'people') { record.photoPath = await importedImage(raw.photoPath); if (Array.isArray(raw.photoPaths)) record.photoPaths = await Promise.all(raw.photoPaths.map(importedImage)) }
       await putRecord(table, record)
     }
   }

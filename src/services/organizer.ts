@@ -69,6 +69,24 @@ type DateToken = { index: number; end: number; year: string; month: number; day:
 type ClockToken = { index: number; end: number; hour: number; minute: number | null; approximate: boolean; value: string }
 type CheckedTime = { startsAt: string; precision: 'date' | 'hour' | 'minute'; approximate: boolean }
 type NormalizedResult = { snapshot: OrganizationSnapshot; rejected: Map<number, number> }
+export type OrganizationStage = 'extracting' | 'checking' | 'complete' | 'failed'
+export type OrganizationCheckpoint = {
+  version: 1
+  fingerprint: string
+  clueIds: string[]
+  provider: AiProvider
+  stage: 'checking' | 'complete'
+  snapshot: OrganizationSnapshot
+  rejected: [number, number][]
+  updatedAt: string
+}
+export type OrganizationContext = {
+  fingerprint?: string
+  checkpoint?: OrganizationCheckpoint | null
+  onCheckpoint?: (checkpoint: OrganizationCheckpoint) => void | Promise<void>
+  onStage?: (stage: OrganizationStage, message?: string) => void | Promise<void>
+}
+
 
 function scanDates(value: string): DateToken[] {
   const pattern = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)|(?<![\d-])(\d{1,2})[/.](\d{1,2})(?!\d)/g
@@ -289,40 +307,72 @@ async function requestOrganization(provider: AiProvider, apiKey: string, user: s
   try { return JSON.parse(content) as RawResult } catch { throw new OrganizationApiError(`${label} 返回内容格式异常，请重试`) }
 }
 
-export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSnapshot> {
+export async function organizeClues(clues: ClueRecord[], context: OrganizationContext = {}): Promise<OrganizationSnapshot> {
   organizationRun.lastError = ''; organizationRun.message = '正在准备 OCR 文字'; organizationRun.phase = 'extracting'; organizationRun.provider = null
+  let first: NormalizedResult | undefined
+  const saved = context.checkpoint
+  const fingerprint = context.fingerprint || JSON.stringify(clues.map(clue => [clue.id, clue.ocrText]))
+  const resumed = saved && saved.version === 1 && saved.fingerprint === fingerprint && saved.clueIds.length === clues.length && clues.every(clue => saved.clueIds.includes(clue.id)) ? saved : null
+  if (resumed) { first = { snapshot: structuredClone(resumed.snapshot), rejected: new Map(resumed.rejected) }; organizationRun.phase = 'checking' }
+  const saveStage = async (provider: AiProvider, stage: 'checking' | 'complete'): Promise<void> => {
+    if (!first) return
+    await context.onCheckpoint?.({ version: 1, fingerprint, clueIds: clues.map(clue => clue.id), provider, stage, snapshot: structuredClone(first.snapshot), rejected: [...first.rejected], updatedAt: new Date().toISOString() })
+  }
   try {
     const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText }))
     if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return localTimelineFallback(clues, 'offline')
+    if (resumed?.stage === 'complete' && first) {
+      organizationRun.phase = 'complete'; organizationRun.provider = resumed.provider; organizationRun.message = '已恢复完成的整理结果'
+      await context.onStage?.('complete', organizationRun.message)
+      return first.snapshot
+    }
+    await context.onStage?.(first ? 'checking' : 'extracting', first ? '已恢复首轮结果，准备时间核对' : '准备提取 OCR 文字')
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) { await context.onStage?.('failed', organizationRun.lastError || organizationRun.message); return localTimelineFallback(clues, 'offline', first?.snapshot) }
     let provider: AiProvider
-    try { provider = await resolveAiProvider() } catch (error) { if (isNetworkUnavailable(error)) return localTimelineFallback(clues, 'offline'); throw error }
-    organizationRun.provider = provider; organizationRun.message = `${providerLabel(provider)} 正在整理 OCR 文字`
+    try { provider = await resolveAiProvider() } catch (error) {
+      if (isNetworkUnavailable(error)) { await context.onStage?.('failed', organizationRun.lastError || organizationRun.message); return localTimelineFallback(clues, 'offline', first?.snapshot) }
+      throw error
+    }
+    organizationRun.provider = provider; organizationRun.message = first ? `${providerLabel(provider)} 正在恢复时间核对` : `${providerLabel(provider)} 正在整理 OCR 文字`
     const apiKey = await readApiKey(provider)
     const sources = JSON.stringify(sourceClues)
-    let first: NormalizedResult
-    try { first = normalize(await requestOrganization(provider, apiKey, `完整整理以下单个剧本的 OCR 线索。逐条从头到尾扫描，不能省略后半段时间。只返回规定 JSON。\n${sources}`), clues) }
-    catch (error) { if (error instanceof OrganizationApiError && error.localReason) return localTimelineFallback(clues, error.localReason); throw error }
+    if (!first) {
+      try { first = normalize(await requestOrganization(provider, apiKey, `完整整理以下单个剧本的 OCR 线索。逐条从头到尾扫描，不能省略后半段时间。只返回规定 JSON。\n${sources}`), clues) }
+      catch (error) {
+        if (error instanceof OrganizationApiError && error.localReason) { await context.onStage?.('failed', organizationRun.lastError || organizationRun.message); return localTimelineFallback(clues, error.localReason) }
+        throw error
+      }
+      first.snapshot.analysis = { provider, reviewed: false }
+      first.snapshot.timelineAudit = auditTimeline(clues, first.snapshot.timeline, first.rejected, false)
+      // Persist extraction before starting another request; a restart only repeats the audit.
+      await saveStage(provider, 'checking')
+    }
     organizationRun.phase = 'checking'; organizationRun.message = `${providerLabel(provider)} 正在逐段核对时间是否遗漏`
+    await context.onStage?.('checking', organizationRun.message)
     let reviewed = false, reviewError = ''
     try {
       const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。\n${sources}`), clues)
       first.snapshot.timeline = mergeTimeline(first.snapshot.timeline, second.snapshot.timeline)
-      // A rejected candidate remains visible in the audit even when other events passed.
       for (const [sourceNo, count] of second.rejected) first.rejected.set(sourceNo, Math.max(first.rejected.get(sourceNo) || 0, count))
       reviewed = true
     } catch (error) {
       organizationRun.lastError = error instanceof Error ? error.message : String(error)
+      await context.onStage?.('failed', organizationRun.lastError || organizationRun.message)
       if (error instanceof OrganizationApiError && error.localReason) return localTimelineFallback(clues, error.localReason, first.snapshot)
-      reviewError = `第二轮核对未完成：${organizationRun.lastError}；已保留首轮整理结果`
+      reviewError = `第二轮核对未完成：${organizationRun.lastError}；已保留首轮整理结果，再次整理将仅重试核对`
     }
-    first.snapshot.analysis = { provider, reviewed }
+    // Keep the original extraction provider on resume, even if region routing changed.
+    first.snapshot.analysis = { provider: resumed ? resumed.provider : provider, reviewed }
     first.snapshot.timelineAudit = auditTimeline(clues, first.snapshot.timeline, first.rejected, reviewed, reviewError)
+    // A complete checkpoint closes the crash window between API success and workflow persistence.
+    await saveStage(resumed ? resumed.provider : provider, reviewed ? 'complete' : 'checking')
     const reviewCount = first.snapshot.timelineAudit.filter(item => item.status === 'review').length
-    organizationRun.phase = 'complete'; organizationRun.message = reviewCount ? `整理已保存，${reviewCount} 份线索的时间待复核` : '整理及时间完整性核对已完成'
+    organizationRun.phase = 'complete'; organizationRun.message = reviewed ? (reviewCount ? `整理已保存，${reviewCount} 份线索的时间待复核` : '整理及时间完整性核对已完成') : '首轮整理已保存，等待重试时间核对'
+    await context.onStage?.(reviewed ? 'complete' : 'failed', organizationRun.message)
     return first.snapshot
   } catch (error) {
     organizationRun.phase = 'error'; organizationRun.lastError = error instanceof Error ? error.message : String(error); organizationRun.message = organizationRun.lastError
+    await context.onStage?.('failed', organizationRun.lastError || organizationRun.message)
     throw error
   }
 }

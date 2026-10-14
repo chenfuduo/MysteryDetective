@@ -1,11 +1,30 @@
 import {
-  getOrganization, mergeTimelineEvidence, organizationTextKey, saveOrganization, suggestionKey,
+  getLocalState, getOrganization, mergeTimelineEvidence, organizationTextKey, removeLocalState, saveLocalState, saveOrganization, suggestionKey,
   type ClueRecord, type OrganizationEvidence, type OrganizationSnapshot,
   type OrganizationTimelineSuggestion,
   type PersonRecord, type RelationshipRecord, type TimelineRecord,
 } from './vault'
 
-export type OrganizationProgress = { processed: number; total: number; clue: ClueRecord }
+import type { OrganizationCheckpoint, OrganizationContext, OrganizationStage } from './organizer'
+
+export type OrganizationProgress = { processed: number; total: number; clue: ClueRecord; stage?: OrganizationStage; message?: string }
+export type OrganizationTaskState = {
+  clueId: string
+  sourceNo: number
+  fingerprint: string
+  stage: OrganizationStage
+  message: string
+  updatedAt: string
+}
+
+export async function getOrganizationTaskStates(scriptId: string, clues: ClueRecord[]): Promise<OrganizationTaskState[]> {
+  const states = await Promise.all(clues.filter(clue => clue.scriptId === scriptId).map(async clue => {
+    const state = await getLocalState<OrganizationTaskState>(scriptId, `organization-job:${clue.id}`)
+    return state && state.fingerprint === await fingerprint(clue) ? state : null
+  }))
+  return states.filter((state): state is OrganizationTaskState => state !== null)
+}
+
 export type IncrementalOrganizationInput = {
   scriptId: string
   clues: ClueRecord[]
@@ -18,7 +37,7 @@ export type IncrementalOrganizationInput = {
 
 
 async function fingerprint(clue: ClueRecord): Promise<string> {
-  const value = clue.ocrText.normalize('NFKC').trim()
+  const value = clue.ocrText
   if (globalThis.crypto?.subtle) {
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))
     return Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('')
@@ -61,7 +80,7 @@ function snapshotFor(scriptId: string, previous: OrganizationSnapshot | null): O
 /** Analyze only changed OCR, checkpoint every clue, and preserve previously reviewed work. */
 export async function organizeIncrementally(
   input: IncrementalOrganizationInput,
-  analyze: (clues: ClueRecord[]) => Promise<OrganizationSnapshot>,
+  analyze: (clues: ClueRecord[], context?: OrganizationContext) => Promise<OrganizationSnapshot>,
 ): Promise<{ snapshot: OrganizationSnapshot; processed: number; skipped: number }> {
   const { scriptId } = input
   const clues = input.clues.filter(clue => clue.scriptId === scriptId && clue.ocrText.trim())
@@ -69,10 +88,23 @@ export async function organizeIncrementally(
   const fingerprints = new Map<string, string>()
   for (const clue of clues) fingerprints.set(clue.id, await fingerprint(clue))
   let snapshot = snapshotFor(scriptId, input.previous)
-  const pending = clues.filter(clue => snapshot.processedClues?.[clue.id] !== fingerprints.get(clue.id))
+  const checkpoints = new Map<string, OrganizationCheckpoint>()
+  for (const clue of clues) {
+    const key = `organization-task:${clue.id}`
+    const saved = await getLocalState<OrganizationCheckpoint>(scriptId, key)
+    if (saved?.version === 1 && saved.fingerprint === fingerprints.get(clue.id) && saved.clueIds.length === 1 && saved.clueIds[0] === clue.id) checkpoints.set(clue.id, saved)
+    else if (saved) await removeLocalState(scriptId, key)
+  }
+  const pending = clues.filter(clue => {
+    const saved = checkpoints.get(clue.id)
+    if (saved) return true
+    if (snapshot.processedClues?.[clue.id] !== fingerprints.get(clue.id)) return true
+    // A failed second request used to look complete because OCR itself had not changed.
+    return snapshot.timelineAudit?.some(audit => audit.sourceNo === clue.number && audit.status === 'review' && /尚未完成 API|第二轮核对未完成/.test(audit.message)) || false
+  })
   const changed = new Set(pending.filter(clue => {
     const previousFingerprint = snapshot.processedClues?.[clue.id]
-    return previousFingerprint && previousFingerprint.replace(/^local:/, '') !== fingerprints.get(clue.id)
+    return previousFingerprint && previousFingerprint.replace(/^(?:local:|review:)/, '') !== fingerprints.get(clue.id)
   }).map(clue => clue.id))
   snapshot.processedClues = Object.fromEntries(Object.entries(snapshot.processedClues || {}).filter(([id]) => fingerprints.has(id) && !changed.has(id)))
   const unchangedSource = (sourceNo: number): boolean => {
@@ -129,8 +161,24 @@ export async function organizeIncrementally(
   await checkpoint()
   let processed = 0
   for (const clue of pending) {
-    input.onProgress?.({ processed, total: pending.length, clue })
-    const result = await analyze([clue])
+    const saved = checkpoints.get(clue.id)
+    const taskKey = `organization-task:${clue.id}`
+    const saveTask = async (stage: OrganizationStage, message = ''): Promise<void> => {
+      await saveLocalState<OrganizationTaskState>(scriptId, `organization-job:${clue.id}`, { clueId: clue.id, sourceNo: clue.number, fingerprint: fingerprints.get(clue.id)!, stage, message, updatedAt: new Date().toISOString() })
+      input.onProgress?.({ processed, total: pending.length, clue, stage, message })
+    }
+    await saveTask(saved ? 'checking' : 'extracting', saved ? '已恢复首轮结果，仅重试时间核对' : '正在提取 OCR 文字')
+    let result: OrganizationSnapshot
+    try {
+      result = await analyze([clue], {
+        fingerprint: fingerprints.get(clue.id), checkpoint: saved,
+        onCheckpoint: async value => { await saveLocalState(scriptId, taskKey, value); checkpoints.set(clue.id, value) },
+        onStage: saveTask,
+      })
+    } catch (error) {
+      await saveTask('failed', error instanceof Error ? error.message : String(error))
+      throw error
+    }
     if (result.scriptId && result.scriptId !== scriptId) throw new Error('整理结果不属于当前剧本')
     const validSource = (item: { sourceNo: number; quote: string }): boolean => item.sourceNo === clue.number && Boolean(item.quote.trim()) && clue.ocrText.includes(item.quote)
     snapshot.people = snapshot.people.filter(item => item.sourceNo !== clue.number)
@@ -161,10 +209,12 @@ export async function organizeIncrementally(
     snapshot.cluePoints = [...pointByKey.values()]
     snapshot.timelineAudit = [...(snapshot.timelineAudit || []).filter(item => item.sourceNo !== clue.number), ...(result.timelineAudit || []).filter(item => item.sourceNo === clue.number)]
     snapshot.analysis = result.analysis
-    snapshot.processedClues![clue.id] = `${result.analysis?.provider === 'local' ? 'local:' : ''}${fingerprints.get(clue.id)!}`
+    const reviewed = result.analysis?.reviewed === true && result.analysis.provider !== 'local'
+    snapshot.processedClues![clue.id] = `${result.analysis?.provider === 'local' ? 'local:' : reviewed ? '' : 'review:'}${fingerprints.get(clue.id)!}`
     await checkpoint()
+    if (reviewed) { await removeLocalState(scriptId, taskKey); checkpoints.delete(clue.id) }
     processed += 1
-    input.onProgress?.({ processed, total: pending.length, clue })
+    await saveTask(reviewed ? 'complete' : 'failed', reviewed ? '提取及时间核对已完成' : result.timelineAudit?.find(audit => audit.sourceNo === clue.number)?.message || '整理未完成，可继续重试')
   }
   return { snapshot, processed, skipped: clues.length - pending.length }
 }

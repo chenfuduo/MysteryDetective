@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { classifyReview, type ReviewGroup } from '../services/reviewClassification'
 import type {
   ClueRecord,
   OrganizationCluePointSuggestion,
@@ -45,12 +46,17 @@ const emit = defineEmits<{
   undo: []
 }>()
 const activeFilter = ref('all')
+const activeGroup = ref<ReviewGroup | 'all' | null>(null)
+const reviewedKeys = ref<string[]>([])
+const openedSourceKeys = ref<string[]>([])
+const batchMessage = ref('')
 const expandedIds = ref<string[]>([])
 const reviewElement = ref<HTMLElement | null>(null)
 const selectedKeys = ref<string[]>([])
 const selectionKey = (suggestion: Suggestion) => `${suggestion.kind}:${suggestion.item.id}`
 function focusSuggestions() {
   activeFilter.value = 'all'
+  activeGroup.value = null
   reviewElement.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 const allSuggestions = computed<Suggestion[]>(() => {
@@ -65,24 +71,55 @@ const allSuggestions = computed<Suggestion[]>(() => {
 })
 const pendingCount = computed(() => allSuggestions.value.length)
 const cluePointCount = computed(() => new Set((props.organization?.cluePoints || []).map(item => item.sourceNo)).size)
-const filters = computed(() => [
-  { id: 'all', label: '全部', count: pendingCount.value },
-  { id: 'people', label: '人物', count: props.organization?.people.length || 0 },
-  { id: 'relationships', label: '关系', count: props.organization?.relationships.length || 0 },
-  { id: 'timeline', label: '时间', count: props.organization?.timeline.length || 0 },
-  { id: 'cluePoints', label: '线索点', count: props.organization?.cluePoints.length || 0 },
+const reviewInfo = computed(() => new Map(allSuggestions.value.map(suggestion => [selectionKey(suggestion), classifyReview(suggestion, props.clues, props.organization?.timelineAudit, reviewedKeys.value.includes(selectionKey(suggestion)))])))
+const classification = (suggestion: Suggestion) => reviewInfo.value.get(selectionKey(suggestion))!
+const groupLabel = (group: ReviewGroup) => ({ ready: '可直接录入', 'needs-content': '需要补充', 'needs-review': '需要核对' })[group]
+const effectiveGroup = computed(() => activeGroup.value || (allSuggestions.value.some(suggestion => classification(suggestion).group === 'needs-review') ? 'needs-review' : allSuggestions.value.some(suggestion => classification(suggestion).group === 'needs-content') ? 'needs-content' : 'ready'))
+const groupSuggestions = computed(() => effectiveGroup.value === 'all' ? allSuggestions.value : allSuggestions.value.filter(suggestion => classification(suggestion).group === effectiveGroup.value))
+const kindSuggestions = computed(() => activeFilter.value === 'all' ? allSuggestions.value : allSuggestions.value.filter(suggestion => suggestion.kind === activeFilter.value))
+const groups = computed(() => [
+  { id: 'needs-review' as const, label: '需要核对', count: kindSuggestions.value.filter(suggestion => classification(suggestion).group === 'needs-review').length },
+  { id: 'needs-content' as const, label: '需要补充', count: kindSuggestions.value.filter(suggestion => classification(suggestion).group === 'needs-content').length },
+  { id: 'ready' as const, label: '可直接录入', count: kindSuggestions.value.filter(suggestion => classification(suggestion).group === 'ready').length },
+  { id: 'all' as const, label: '全部', count: kindSuggestions.value.length },
 ])
-const visibleSuggestions = computed(() => activeFilter.value === 'all'
-  ? allSuggestions.value
-  : allSuggestions.value.filter(item => item.kind === activeFilter.value))
+const filters = computed(() => [
+  { id: 'all', label: '全部', count: groupSuggestions.value.length },
+  { id: 'people', label: '人物', count: groupSuggestions.value.filter(item => item.kind === 'people').length },
+  { id: 'relationships', label: '关系', count: groupSuggestions.value.filter(item => item.kind === 'relationships').length },
+  { id: 'timeline', label: '时间', count: groupSuggestions.value.filter(item => item.kind === 'timeline').length },
+  { id: 'cluePoints', label: '线索点', count: groupSuggestions.value.filter(item => item.kind === 'cluePoints').length },
+])
+const visibleSuggestions = computed(() => activeFilter.value === 'all' ? groupSuggestions.value : groupSuggestions.value.filter(item => item.kind === activeFilter.value))
 const selectedSuggestions = computed(() => allSuggestions.value.filter(item => selectedKeys.value.includes(selectionKey(item))))
 const selectedCount = computed(() => selectedSuggestions.value.length)
+const selectedAcceptable = computed(() => selectedSuggestions.value.filter(item => classification(item).group === 'ready'))
+const hiddenSelectedCount = computed(() => selectedSuggestions.value.filter(item => !visibleSuggestions.value.includes(item)).length)
+const blockedSelectedCount = computed(() => selectedCount.value - selectedAcceptable.value.length)
 const allVisibleSelected = computed(() => visibleSuggestions.value.length > 0 && visibleSuggestions.value.every(item => selectedKeys.value.includes(selectionKey(item))))
-const incompleteSelected = computed(() => selectedSuggestions.value.filter(item => item.kind === 'timeline' && (item.item.requiresTitle || !item.item.title.trim())).length)
 watch(allSuggestions, items => {
   const available = new Set(items.map(selectionKey))
   selectedKeys.value = selectedKeys.value.filter(key => available.has(key))
+  reviewedKeys.value = reviewedKeys.value.filter(key => available.has(key))
+  openedSourceKeys.value = openedSourceKeys.value.filter(key => available.has(key))
 })
+watch(() => props.organization?.scriptId, () => {
+  activeGroup.value = null
+  reviewedKeys.value = []
+  openedSourceKeys.value = []
+  selectedKeys.value = []
+  batchMessage.value = ''
+})
+function viewSource(suggestion: Suggestion) {
+  if (!classification(suggestion).sourceExists) return
+  const key = selectionKey(suggestion)
+  if (!openedSourceKeys.value.includes(key)) openedSourceKeys.value.push(key)
+  emit('openClue', suggestion.item.sourceNo, suggestion.item.quote)
+}
+function confirmReviewed(suggestion: Suggestion) {
+  if (props.busy || !classification(suggestion).canConfirm || !openedSourceKeys.value.includes(selectionKey(suggestion))) return
+  reviewedKeys.value = [...new Set([...reviewedKeys.value, selectionKey(suggestion)])]
+}
 function selectSuggestion(suggestion: Suggestion) {
   if (props.busy) return
   const key = selectionKey(suggestion)
@@ -95,7 +132,10 @@ function selectVisible() {
 }
 function bulk(action: 'accept' | 'ignore') {
   if (props.busy || !selectedCount.value) return
-  const selection = selectedSuggestions.value.map(item => ({ kind: item.kind, id: item.item.id }))
+  const items = action === 'accept' ? selectedAcceptable.value : selectedSuggestions.value
+  batchMessage.value = action === 'accept' && blockedSelectedCount.value ? `已跳过 ${blockedSelectedCount.value} 项需要补充或核对的建议，仍保留在列表中。` : ''
+  const selection = items.map(item => ({ kind: item.kind, id: item.item.id }))
+  if (!selection.length) return
   if (action === 'accept') emit('bulkAccept', selection)
   else emit('bulkIgnore', selection)
 }
@@ -123,11 +163,8 @@ const title = (suggestion: Suggestion) => {
   if (suggestion.kind === 'timeline') return `${dateLabel(suggestion.item.startsAt)} · ${suggestion.item.title}`
   return `${suggestion.item.title}${suggestion.item.category ? ` · ${suggestion.item.category}` : ''}`
 }
-const actionLabel = (suggestion: Suggestion) => {
-  if (suggestion.kind === 'timeline' && (suggestion.item.requiresTitle || suggestion.item.title === '待补充事件')) return '补充事件'
-  if (suggestion.kind === 'timeline') return '直接录入'
-  return ({ people: '加入人物', relationships: '确认关系', cluePoints: '应用到线索' })[suggestion.kind]
-}
+const actionLabel = (suggestion: Suggestion) => ({ ready: '直接录入', 'needs-content': '补充事件', 'needs-review': '查看原文' })[classification(suggestion).group]
+
 
 const isLongQuote = (item: Suggestion['item']) => item.quote.length > 115
 function toggleQuote(id: string) {
@@ -135,6 +172,7 @@ function toggleQuote(id: string) {
 }
 function accept(suggestion: Suggestion) {
   if (props.busy) return
+  if (classification(suggestion).group === 'needs-review') { viewSource(suggestion); return }
   if (suggestion.kind === 'people') emit('acceptPerson', suggestion.item.id)
   else if (suggestion.kind === 'relationships') emit('acceptRelationship', suggestion.item.id)
   else if (suggestion.kind === 'timeline') emit('acceptTimeline', suggestion.item.id)
@@ -197,7 +235,7 @@ function accept(suggestion: Suggestion) {
       <summary><span class="audit-summary-title">时间提取核对</span><span class="audit-total">{{ auditTotals.covered }} / {{ auditTotals.clocks }} 处时间已覆盖</span><span class="audit-state" :class="{ 'needs-review': auditTotals.review }">{{ auditTotals.review ? `${auditTotals.review} 条线索需核对` : '覆盖完整' }}</span><span class="audit-expand">展开 ›</span></summary>
       <div class="audit-items">
         <article v-for="audit in organization.timelineAudit" :key="audit.sourceNo" class="audit-row">
-          <div class="audit-row-heading"><button class="source-link" @click="emit('openClue', audit.sourceNo, auditOriginal(audit.sourceNo))">原线索 #{{ String(audit.sourceNo).padStart(3, '0') }} ›</button><span class="audit-state" :class="{ 'needs-review': audit.status === 'review' }">{{ audit.status === 'review' ? '需核对' : '覆盖完整' }}</span><span>{{ audit.covered }} / {{ audit.clocks }} 处</span></div>
+          <div class="audit-row-heading"><button class="source-link" @click="emit('openClue', audit.sourceNo, auditOriginal(audit.sourceNo))">原线索 #{{ String(audit.sourceNo).padStart(3, '0') }} ›</button><span class="audit-state" :class="{ 'needs-review': audit.status === 'review' }">{{ audit.status === 'review' ? '需核对' : '覆盖完整' }}</span><span>{{ audit.covered }} / {{ audit.clocks }} 处</span><button v-if="audit.status === 'review'" class="audit-retry" :disabled="busy" @click="emit('analyze')">重试核对</button></div>
           <p>{{ audit.message }}</p>
           <details class="audit-source"><summary>展开 OCR 原文</summary><p>{{ auditOriginal(audit.sourceNo) }}</p></details>
         </article>
@@ -206,26 +244,31 @@ function accept(suggestion: Suggestion) {
 
     <section ref="reviewElement" class="review-section">
       <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><div class="review-heading-actions"><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
+      <nav class="review-groups" aria-label="按处理步骤筛选">
+        <button v-for="group in groups" :key="group.id" :class="{ active: effectiveGroup === group.id }" :aria-pressed="effectiveGroup === group.id" @click="activeGroup = group.id">{{ group.label }} <span>{{ group.count }}</span></button>
+      </nav>
       <nav class="review-filters" aria-label="筛选整理建议">
         <button v-for="filter in filters" :key="filter.id" :class="{ active: activeFilter === filter.id }" :aria-pressed="activeFilter === filter.id" @click="activeFilter = filter.id">{{ filter.label }} <span>{{ filter.count }}</span></button>
       </nav>
       <div v-if="pendingCount || canUndo" class="review-batch">
         <label v-if="visibleSuggestions.length" class="batch-select"><input type="checkbox" :checked="allVisibleSelected" :disabled="busy" @change="selectVisible" /><span>全选当前 {{ visibleSuggestions.length }} 项</span></label>
-        <span class="batch-count" role="status">共选 {{ selectedCount }} 项<span v-if="activeFilter !== 'all' && selectedCount">（含其他分类）</span></span>
-        <div class="batch-actions"><button :disabled="busy || !selectedCount" class="batch-accept" @click="bulk('accept')">录入所选{{ selectedCount ? ` ${selectedCount}` : '' }}</button><button :disabled="busy || !selectedCount" @click="bulk('ignore')">忽略所选{{ selectedCount ? ` ${selectedCount}` : '' }}</button><button :disabled="busy || !canUndo" @click="emit('undo')">撤销上一步</button></div>
-        <p v-if="incompleteSelected" class="batch-incomplete">所选 {{ incompleteSelected }} 项时间尚缺事件说明，批量录入后会保留，补充事件后可单独录入。</p>
+        <span class="batch-count" role="status">共选 {{ selectedCount }} 项<span v-if="hiddenSelectedCount">（其中 {{ hiddenSelectedCount }} 项在其他筛选中）</span></span>
+        <div class="batch-actions"><button :disabled="busy || !selectedAcceptable.length" class="batch-accept" @click="bulk('accept')">录入可用项{{ selectedAcceptable.length ? ` ${selectedAcceptable.length}` : '' }}</button><button :disabled="busy || !selectedCount" @click="bulk('ignore')">忽略所选{{ selectedCount ? ` ${selectedCount}` : '' }}</button><button :disabled="busy || !canUndo" @click="emit('undo')">撤销上一步</button></div>
+        <p v-if="blockedSelectedCount" class="batch-incomplete">所选 {{ blockedSelectedCount }} 项需要补充或核对，将跳过录入；“忽略所选”仍适用于全部所选项。</p><p v-if="batchMessage" class="batch-incomplete" role="status">{{ batchMessage }}</p>
       </div>
       <div v-if="!organization" class="review-empty"><strong>还没有整理结果</strong><p>点击右上角“整理线索”生成待核对建议。</p></div>
-      <div v-else-if="!visibleSuggestions.length" class="review-empty"><strong>{{ pendingCount ? '这个分类暂时没有建议' : '没有待确认的建议' }}</strong><p>{{ pendingCount ? '切换分类查看其他建议。' : '录入新线索后可以再次整理。' }}</p></div>
+      <div v-else-if="!visibleSuggestions.length" class="review-empty"><strong>{{ pendingCount ? '当前筛选下没有建议' : '没有待确认的建议' }}</strong><p>{{ pendingCount ? '切换处理分组或人物、关系等分类查看其他建议。' : '录入新线索后可以再次整理。' }}</p></div>
       <div v-else class="suggestion-list">
-        <article v-for="suggestion in visibleSuggestions" :key="suggestion.item.id" class="suggestion-row" :class="{ 'is-selected': selectedKeys.includes(selectionKey(suggestion)) }">
+        <article v-for="suggestion in visibleSuggestions" :key="selectionKey(suggestion)" class="suggestion-row" :class="{ 'is-selected': selectedKeys.includes(selectionKey(suggestion)) }">
           <label class="suggestion-select"><input type="checkbox" :checked="selectedKeys.includes(selectionKey(suggestion))" :disabled="busy" :aria-label="`选择${title(suggestion)}`" @change="selectSuggestion(suggestion)" /></label>
           <div class="suggestion-main">
-            <div class="suggestion-title"><span class="kind-pill" :class="`kind-${suggestion.kind}`">{{ kindLabel(suggestion.kind) }}</span><strong>{{ title(suggestion) }}</strong><span v-if="suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')" class="yearless-pill">无年份</span><span v-if="suggestion.kind === 'timeline'" class="precision-pill">{{ precisionLabel(suggestion.item) }}</span><span v-if="suggestion.kind === 'timeline' && suggestion.item.approximate" class="precision-pill is-approximate">约时</span><span v-if="suggestion.kind === 'timeline' && (suggestion.item.requiresTitle || !suggestion.item.title.trim())" class="needs-title-pill">需补充事件</span></div>
+            <div class="suggestion-title"><span class="kind-pill" :class="`kind-${suggestion.kind}`">{{ kindLabel(suggestion.kind) }}</span><strong>{{ title(suggestion) }}</strong><span class="review-group-pill" :class="classification(suggestion).group">{{ groupLabel(classification(suggestion).group) }}</span><span v-if="suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')" class="yearless-pill">无年份</span><span v-if="suggestion.kind === 'timeline'" class="precision-pill">{{ precisionLabel(suggestion.item) }}</span><span v-if="suggestion.kind === 'timeline' && suggestion.item.approximate" class="precision-pill is-approximate">约时</span><span v-if="suggestion.kind === 'timeline' && (suggestion.item.requiresTitle || !suggestion.item.title.trim())" class="needs-title-pill">需补充事件</span></div>
             <p :class="['evidence-quote', { expanded: expandedIds.includes(suggestion.item.id) }]">{{ quote(suggestion.item) }}</p>
-            <div class="suggestion-meta"><button class="source-link" @click="emit('openClue', sourceNo(suggestion.item), quote(suggestion.item))">原线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button><template v-if="suggestion.kind === 'timeline'"><button v-for="source in suggestion.item.evidence?.filter(item => item.sourceNo !== suggestion.item.sourceNo || item.quote !== suggestion.item.quote) || []" :key="`${source.clueId}:${source.quote}`" class="source-link" @click="emit('openClue', source.sourceNo, source.quote)">另见 #{{ String(source.sourceNo).padStart(3, '0') }} <span>›</span></button></template><button v-if="isLongQuote(suggestion.item)" class="quote-toggle" :aria-expanded="expandedIds.includes(suggestion.item.id)" @click="toggleQuote(suggestion.item.id)">{{ expandedIds.includes(suggestion.item.id) ? '收起摘录' : '展开摘录' }}</button></div>
+            <div class="suggestion-meta"><button class="source-link" :disabled="!classification(suggestion).sourceExists" @click="viewSource(suggestion)">原线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button><template v-if="suggestion.kind === 'timeline'"><button v-for="source in suggestion.item.evidence?.filter(item => item.sourceNo !== suggestion.item.sourceNo || item.quote !== suggestion.item.quote) || []" :key="`${source.clueId}:${source.quote}`" class="source-link" @click="emit('openClue', source.sourceNo, source.quote)">另见 #{{ String(source.sourceNo).padStart(3, '0') }} <span>›</span></button></template><button v-if="isLongQuote(suggestion.item)" class="quote-toggle" :aria-expanded="expandedIds.includes(suggestion.item.id)" @click="toggleQuote(suggestion.item.id)">{{ expandedIds.includes(suggestion.item.id) ? '收起摘录' : '展开摘录' }}</button></div>
+            <p class="review-next-step" :class="classification(suggestion).group">{{ classification(suggestion).reason }}</p>
+            <label v-if="classification(suggestion).canConfirm" class="review-confirm"><input type="checkbox" :disabled="busy || !openedSourceKeys.includes(selectionKey(suggestion))" @change="confirmReviewed(suggestion)" /><span>{{ openedSourceKeys.includes(selectionKey(suggestion)) ? '已核对，允许录入' : '先查看原文，再确认允许录入' }}</span></label>
           </div>
-          <button class="suggestion-action" :disabled="busy" @click="accept(suggestion)">{{ actionLabel(suggestion) }}</button>
+          <div class="suggestion-actions"><button class="suggestion-action" :disabled="busy || (classification(suggestion).group === 'needs-review' && !classification(suggestion).sourceExists)" @click="accept(suggestion)">{{ actionLabel(suggestion) }}</button><button v-if="classification(suggestion).retry" class="retry-suggestion" :disabled="busy" @click="emit('analyze')">{{ classification(suggestion).canConfirm ? '重试核对' : '重新整理' }}</button></div>
         </article>
       </div>
       <footer class="review-footnote">AI 结果可能有误；关系和时间需人工确认，不推断动机、因果或答案。</footer>
@@ -279,6 +322,22 @@ function accept(suggestion: Suggestion) {
 .review-heading time { color: #9aa49d; font-size: 11px; white-space: nowrap; }
 .review-heading-actions { display: flex; align-items: center; gap: 12px; }
 .clear-suggestions-button { min-height: 36px; padding: 0 11px; border: 1px solid #ecdcd2; border-radius: 9px; background: #fff; color: #a36d55; font-size: 12px; white-space: nowrap; }
+
+.review-groups { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 21px 12px; }
+.review-groups button { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 12px; border: 1px solid #e2e8e1; border-radius: 9px; background: #fafbf8; color: #7c897e; font-size: 12px; }
+.review-groups button.active { border-color: #b9cdbd; background: #eaf2e9; color: #315c48; font-weight: 650; }
+.review-groups button span { font-size: 11px; font-variant-numeric: tabular-nums; }
+.review-group-pill { display: inline-flex; padding: 3px 6px; border-radius: 5px; background: #edf4ed; color: #64846a; font-size: 10px; }
+.review-group-pill.needs-review { background: #fbf0e5; color: #ad7548; }
+.review-group-pill.needs-content { background: #edf3f7; color: #688597; }
+.review-next-step { margin: 6px 0 0; color: #8b9a8b; font-size: 11px; line-height: 1.6; }
+.review-next-step.needs-review { color: #a2774f; }
+.review-next-step.needs-content { color: #738b9a; }
+.review-confirm { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; margin-top: 4px; color: #657d69; font-size: 12px; }
+.review-confirm input { width: 18px; height: 18px; margin: 0; accent-color: #3f7052; }
+.suggestion-actions { display: flex; flex-direction: column; align-items: stretch; gap: 5px; flex: 0 0 auto; }
+.retry-suggestion, .audit-retry { min-height: 34px; padding: 0 8px; border-radius: 7px; background: transparent; color: #8c7959; font-size: 12px; }
+.audit-retry { margin-left: auto; }
 .review-filters { display: flex; align-items: center; gap: 4px; padding: 0 18px 12px; border-bottom: 1px solid #edf0eb; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .review-filters::-webkit-scrollbar { display: none; }
 .review-filters button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: 36px; padding: 0 13px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #7c8b80; font-size: 13px; white-space: nowrap; transition: background .18s ease, color .18s ease; }
@@ -372,6 +431,7 @@ button:focus-visible { outline: 2px solid #638772; outline-offset: 3px; }
   .organize-status { font-size: 11px; }
   .review-heading { padding: 18px 17px 14px; }
   .review-heading h2 { font-size: 18px; }
+  .review-groups { padding: 0 16px 10px; }
   .review-filters { padding: 0 12px 10px; }
   .review-filters button { gap: 5px; padding: 0 10px; font-size: 12px; }
   .suggestion-list { padding: 0 16px; }
@@ -398,7 +458,8 @@ button:focus-visible { outline: 2px solid #638772; outline-offset: 3px; }
   .clear-suggestions-button { padding: 0 8px; font-size: 11px; }
   .suggestion-row { flex-wrap: wrap; gap: 8px; }
   .suggestion-main { flex-basis: 100%; }
-  .suggestion-action { min-height: 40px; margin-left: auto; }
+  .suggestion-actions { margin-left: auto; }
+  .suggestion-action { min-height: 40px; }
   .review-footnote { padding: 12px 16px; font-size: 10px; }
 }
 @media (prefers-reduced-motion: reduce) {

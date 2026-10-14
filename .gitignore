@@ -5,3 +5,4 @@ dist/
 ios/App/Pods/
 ios/App/App/public/
 ios/App/DerivedData/
+.env.local

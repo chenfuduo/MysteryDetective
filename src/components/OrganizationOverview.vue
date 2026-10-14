@@ -27,6 +27,7 @@ const props = defineProps<{
   busy: boolean
   autoOrganize: boolean
   apiConfigured: boolean
+  apiProvider: string
 }>()
 const emit = defineEmits<{
   analyze: []
@@ -121,8 +122,8 @@ function accept(suggestion: Suggestion) {
       <span class="status-dot" :class="{ processing: busy }"></span>
       <span v-if="busy" role="status" aria-live="polite">正在整理 OCR 文字，完成后建议会显示在下方。</span>
       <span v-else-if="!apiConfigured">照片和 OCR 保存在本机；AI 整理尚未配置。</span>
-      <span v-else-if="autoOrganize">自动整理已开启 · 只发送 OCR 文字，照片留在 iPad。</span>
-      <span v-else>手动整理 · 只发送 OCR 文字，照片留在 iPad。</span>
+      <span v-else-if="autoOrganize">自动整理已开启 · OCR 文字发送到 {{ apiProvider }}，照片留在 iPad。</span>
+      <span v-else>手动整理 · OCR 文字发送到 {{ apiProvider }}，照片留在 iPad。</span>
       <button @click="emit('navigate', 'settings')">设置</button>
     </div>
 

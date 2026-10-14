@@ -1,6 +1,7 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { SecureStorage } from '@aparajita/capacitor-secure-storage'
 import type { ClueRecord, OrganizationSnapshot } from './vault'
+import { resolveAiProvider, providerLabel, type AiProvider } from './aiProvider'
 
 type RawPerson = { name?: unknown; aliases?: unknown; source?: unknown; quote?: unknown }
 type RawRelationship = { from?: unknown; to?: unknown; label?: unknown; source?: unknown; quote?: unknown }
@@ -8,33 +9,40 @@ type RawTimeline = { title?: unknown; startsAt?: unknown; people?: unknown; sour
 type RawCluePoint = { source?: unknown; title?: unknown; category?: unknown; tags?: unknown; quote?: unknown }
 type RawResult = { people?: unknown; relationships?: unknown; timeline?: unknown; cluePoints?: unknown }
 
-const keyName = 'deepseek_api_key'
+const keyNames: Record<AiProvider, string> = { deepseek: 'deepseek_api_key', openai: 'openai_api_key' }
 
-export async function hasApiKey(): Promise<boolean> {
-  if (!Capacitor.isNativePlatform()) return false
+export async function hasApiKey(provider: AiProvider = 'deepseek'): Promise<boolean> {
+  if (!Capacitor.isNativePlatform()) {
+    if (!import.meta.env.DEV || provider !== 'openai') return false
+    try {
+      const response = await fetch('/__local-ai/openai/key-status')
+      return response.ok && (await response.json()).configured === true
+    } catch { return false }
+  }
   await SecureStorage.setSynchronize(false)
-  return Boolean((await SecureStorage.getItem(keyName))?.trim())
+  return Boolean((await SecureStorage.getItem(keyNames[provider]))?.trim())
 }
 
-export async function saveApiKey(value: string): Promise<void> {
+export async function saveApiKey(value: string, provider: AiProvider = 'deepseek'): Promise<void> {
   if (!Capacitor.isNativePlatform()) throw new Error('请在 iPad App 中配置 API Key')
   const key = value.trim()
-  if (!key) throw new Error('请粘贴 DeepSeek API Key')
+  if (!key) throw new Error(`请粘贴 ${providerLabel(provider)} API Key`)
   await SecureStorage.setSynchronize(false)
-  await SecureStorage.setItem(keyName, key)
+  await SecureStorage.setItem(keyNames[provider], key)
 }
 
-export async function removeApiKey(): Promise<void> {
+export async function removeApiKey(provider: AiProvider = 'deepseek'): Promise<void> {
   if (!Capacitor.isNativePlatform()) return
   await SecureStorage.setSynchronize(false)
-  await SecureStorage.removeItem(keyName)
+  await SecureStorage.removeItem(keyNames[provider])
 }
 
-async function readApiKey(): Promise<string> {
+async function readApiKey(provider: AiProvider): Promise<string> {
+  if (!Capacitor.isNativePlatform() && import.meta.env.DEV && provider === 'openai') return ''
   if (!Capacitor.isNativePlatform()) throw new Error('请在 iPad App 中配置 API Key')
   await SecureStorage.setSynchronize(false)
-  const key = await SecureStorage.getItem(keyName)
-  if (!key?.trim()) throw new Error('请先在「剧本管理」中保存 DeepSeek API Key')
+  const key = await SecureStorage.getItem(keyNames[provider])
+  if (!key?.trim()) throw new Error(`请先在「档案管理」中保存 ${providerLabel(provider)} API Key`)
   return key.trim()
 }
 
@@ -245,7 +253,15 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
   const sourceClues = clues.filter(clue => clue.ocrText.trim()).map(clue => ({ source: clue.number, text: clue.ocrText.trim() }))
   if (!sourceClues.length) throw new Error('当前剧本没有可整理的 OCR 文字')
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return localTimelineFallback(clues)
-  const apiKey = await readApiKey()
+  let provider: AiProvider
+  try { provider = await resolveAiProvider() }
+  catch (error) {
+    if (isNetworkUnavailable(error)) return localTimelineFallback(clues)
+    throw error
+  }
+  const label = providerLabel(provider)
+  const apiKey = await readApiKey(provider)
+  const endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions'
 
   const system = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
 时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索都要从头扫描到尾，不能找到第一处时间就停止。
@@ -262,10 +278,9 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
 
 其他约束：人名必须逐字出现在对应原文；人物关系必须由原文直接说明，不能因两人同框、共同出现或同一事件而推断；事件日期和时间必须能在对应原文中找到；原文明确写出上午、下午、晚上等时段时，按其明确含义换算为 24 小时制；没有时段标记时不得擅自改变小时。线索主题只能简要归纳原文写了什么。每项都必须有 source 编号和逐字连续 quote。证据不足就省略，不要补全、猜测、判断证词真假、分析动机、预测凶手或揭示答案。` 
   const data = {
-    model: 'deepseek-chat',
+    model: provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek-chat',
     stream: false,
-    temperature: 0.2,
-    max_tokens: 6000,
+    ...(provider === 'openai' ? { reasoning_effort: 'none', max_completion_tokens: 12000 } : { temperature: 0.2, max_tokens: 6000 }),
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: system },
@@ -278,16 +293,19 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
   try {
     if (Capacitor.isNativePlatform()) {
       const response = await CapacitorHttp.post({
-        url: 'https://api.deepseek.com/chat/completions',
+        url: endpoint,
+        connectTimeout: 15000,
+        readTimeout: 90000,
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         data,
       })
       status = response.status
       responseData = response.data
     } else {
-      const response = await fetch('https://api.deepseek.com/chat/completions', {
+      const response = await fetch(import.meta.env.DEV && provider === 'openai' ? '/__local-ai/openai/chat/completions' : endpoint, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90000),
         body: JSON.stringify(data),
       })
       status = response.status
@@ -297,17 +315,18 @@ export async function organizeClues(clues: ClueRecord[]): Promise<OrganizationSn
     if (isNetworkUnavailable(error)) return localTimelineFallback(clues)
     throw error
   }
-  if (status === 402) return localTimelineFallback(clues)
+  const apiError = (responseData as { error?: { code?: string; message?: string } } | null)?.error
+  if (status === 402 || (status === 429 && apiError?.code === 'insufficient_quota')) return localTimelineFallback(clues)
   if (status < 200 || status >= 300) {
-    if (status === 401) throw new Error('DeepSeek API Key 无效，请在剧本管理中更新')
-    throw new Error(`DeepSeek 整理失败（HTTP ${status}），请稍后重试`)
+    if (status === 401) throw new Error(`${label} API Key 无效，请在档案管理中更新`)
+    throw new Error(`${label} 整理失败（HTTP ${status}），请稍后重试`)
   }
   const body = responseData as { choices?: { finish_reason?: string; message?: { content?: string | null } }[] } | null
   const choice = body?.choices?.[0]
   if (choice?.finish_reason === 'length') throw new Error('整理结果过长，未能完整返回，请减少线索后重试')
   const content = choice?.message?.content
-  if (!content) throw new Error('DeepSeek 没有返回整理结果，请重试')
+  if (!content) throw new Error(`${label} 没有返回整理结果，请重试`)
   let parsed: RawResult
-  try { parsed = JSON.parse(content) as RawResult } catch { throw new Error('DeepSeek 返回内容格式异常，请重试') }
+  try { parsed = JSON.parse(content) as RawResult } catch { throw new Error(`${label} 返回内容格式异常，请重试`) }
   return normalize(parsed, clues)
 }

@@ -10,6 +10,7 @@ import OrganizationOverview from './components/OrganizationOverview.vue'
 import RelationshipExplorer from './components/RelationshipExplorer.vue'
 import TimelineExplorer from './components/TimelineExplorer.vue'
 import * as organizer from './services/organizer'
+import { aiRoute, initializeAiRouting, providerLabel, type AiProvider } from './services/aiProvider'
 import * as vault from './services/vault'
 import type { ScriptRecord, ClueRecord, PersonRecord, RelationshipRecord, TimelineRecord, BoardItemRecord, BoardLinkRecord, NoteRecord, OrganizationSnapshot, OrganizationTimelineSuggestion } from './services/vault'
 
@@ -22,8 +23,26 @@ const boardItems = ref<BoardItemRecord[]>([])
 const boardLinks = ref<BoardLinkRecord[]>([])
 const notes = ref<NoteRecord[]>([])
 const organization = ref<OrganizationSnapshot | null>(null)
-const apiKeyDraft = ref('')
+const apiKeyDrafts = reactive<Record<AiProvider, string>>({ deepseek: '', openai: '' })
+const apiKeysConfigured = reactive<Record<AiProvider, boolean>>({ deepseek: false, openai: false })
 const apiKeyConfigured = ref(false)
+const selectedProviderLabel = computed(() => aiRoute.provider ? providerLabel(aiRoute.provider) : 'AI')
+const aiStatusLabel = computed(() => {
+  if (aiRoute.phase === 'checking') return '检测中'
+  if (aiRoute.phase === 'offline') return '离线'
+  if (aiRoute.phase !== 'ready' || !aiRoute.provider) return '待检测'
+  return apiKeyConfigured.value ? `已选 ${providerLabel(aiRoute.provider)}` : `${providerLabel(aiRoute.provider)} · 未配置`
+})
+const aiStatusTone = computed(() => {
+  if (aiRoute.phase === 'checking' || aiRoute.phase === 'offline') return 'muted'
+  if (aiRoute.phase !== 'ready' || !aiRoute.provider || !apiKeyConfigured.value) return 'warning'
+  return aiRoute.provider
+})
+const aiStatusTitle = computed(() => {
+  if (aiRoute.phase === 'checking') return '正在检测出口 IP 所在地，首页可正常使用'
+  if (aiRoute.phase !== 'ready' || !aiRoute.provider) return `${aiRoute.message || '暂时无法选择 AI 服务'}；点击重新检测`
+  return `当前服务已选择：${providerLabel(aiRoute.provider)}${aiRoute.countryCode ? `（${aiRoute.countryCode} IP）` : ''}。${apiKeyConfigured.value ? '密钥已配置，尚未验证 API 连通性' : '请先配置此服务的 API Key'}；点击管理设置`
+})
 const autoOrganize = ref(localStorage.getItem('clue-vault:auto-organize') === 'true')
 const activeScriptId = ref('')
 const view = ref<'clues' | 'organize' | 'people' | 'timeline' | 'board' | 'notes' | 'compare' | 'settings'>('clues')
@@ -329,25 +348,39 @@ async function importPhotos() {
   })
   notify(message)
 }
-async function saveDeepSeekKey() {
-  await action(async () => {
-    await organizer.saveApiKey(apiKeyDraft.value)
-    apiKeyDraft.value = ''
-    apiKeyConfigured.value = true
-  }, 'API Key 已保存到 iPad 安全存储')
+async function refreshApiKeyConfiguration(provider: AiProvider) {
+  try { apiKeysConfigured[provider] = await organizer.hasApiKey(provider) }
+  catch { apiKeysConfigured[provider] = false }
+  if (aiRoute.provider === provider) apiKeyConfigured.value = apiKeysConfigured[provider]
 }
-async function removeDeepSeekKey() {
+async function saveProviderKey(provider: AiProvider) {
   await action(async () => {
-    await organizer.removeApiKey()
-    apiKeyConfigured.value = false
-    autoOrganize.value = false
-    localStorage.setItem('clue-vault:auto-organize', 'false')
-  }, 'API Key 已从 iPad 移除')
+    await organizer.saveApiKey(apiKeyDrafts[provider], provider)
+    apiKeyDrafts[provider] = ''
+    apiKeysConfigured[provider] = true
+    if (aiRoute.provider === provider) apiKeyConfigured.value = true
+  }, `${providerLabel(provider)} API Key 已保存到 iPad 安全存储`)
+}
+async function removeProviderKey(provider: AiProvider) {
+  await action(async () => {
+    await organizer.removeApiKey(provider)
+    apiKeysConfigured[provider] = false
+    if (aiRoute.provider === provider) {
+      apiKeyConfigured.value = false
+      autoOrganize.value = false
+      localStorage.setItem('clue-vault:auto-organize', 'false')
+    }
+  }, `${providerLabel(provider)} API Key 已从 iPad 移除`)
+}
+function openAiStatus() {
+  if (aiRoute.phase === 'checking') return
+  if (aiRoute.phase === 'ready' && aiRoute.provider) view.value = 'settings'
+  else void initializeAiRouting()
 }
 function saveAutoOrganize() {
   if (autoOrganize.value && !apiKeyConfigured.value) {
     autoOrganize.value = false
-    return notify('请先保存 DeepSeek API Key')
+    return notify(aiRoute.provider ? `请先保存 ${providerLabel(aiRoute.provider)} API Key` : '请先检测并配置 AI 服务')
   }
   localStorage.setItem('clue-vault:auto-organize', String(autoOrganize.value))
 }
@@ -663,6 +696,12 @@ async function importArchive() {
     await loadScripts(); await loadWorkspace()
   }, '档案已导入')
 }
+function refreshAiRoutingOnVisibility() {
+  if (document.visibilityState === 'visible') void initializeAiRouting()
+}
+function refreshAiRoutingOnNetwork() {
+  void initializeAiRouting()
+}
 function updateTimelineOrientation() {
   timelineOrientation.value = timelineOrientationQuery?.matches ? 'portrait' : 'landscape'
 }
@@ -677,14 +716,23 @@ watch(query, async value => {
     if (sequence === searchSequence) searchIds.value = results.map(item => item.id)
   } catch { if (sequence === searchSequence) searchIds.value = [] }
 })
+watch(() => aiRoute.provider, provider => {
+  apiKeyConfigured.value = provider ? apiKeysConfigured[provider] : false
+  if (provider) void refreshApiKeyConfiguration(provider)
+}, { immediate: true })
 onMounted(async () => {
+  document.addEventListener('visibilitychange', refreshAiRoutingOnVisibility)
+  window.addEventListener('online', refreshAiRoutingOnNetwork)
+  window.addEventListener('offline', refreshAiRoutingOnNetwork)
+  void initializeAiRouting()
+  void refreshApiKeyConfiguration('deepseek')
+  void refreshApiKeyConfiguration('openai')
   timelineOrientationQuery = window.matchMedia('(orientation: portrait)')
   updateTimelineOrientation()
   timelineOrientationQuery.addEventListener('change', updateTimelineOrientation)
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
-  try { apiKeyConfigured.value = await organizer.hasApiKey() } catch { apiKeyConfigured.value = false }
 })
-onUnmounted(() => { timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
+onUnmounted(() => { document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -701,7 +749,7 @@ onUnmounted(() => { timelineOrientationQuery?.removeEventListener('change', upda
         <div class="sidebar-bottom"><div class="offline-chip"><span class="offline-dot"></span>本机保存 · AI 可选</div><button class="sidebar-small-button" @click="openScriptDialog()"><UiIcon name="plus" :size="16" />新建剧本</button></div>
       </aside>
       <main class="main-panel">
-        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
+        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><button class="ai-route-indicator" :class="aiStatusTone" :title="aiStatusTitle" :aria-label="aiStatusTitle" :disabled="aiRoute.phase === 'checking'" @click="openAiStatus"><span class="ai-route-dot" aria-hidden="true"></span><span aria-live="polite">{{ aiStatusLabel }}</span></button><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
         <div v-if="!activeScript" class="empty-home"><div class="empty-art"><div class="art-paper art-paper-one"></div><div class="art-paper art-paper-two"></div><div class="art-paper art-paper-three"><UiIcon name="search" :size="38" /></div></div><h1>从一个剧本开始</h1><p>拍下线索，OCR 文字在本机识别。需要时可选择 AI 整理。</p><div class="empty-home-actions"><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button><button class="secondary-button" @click="importArchive"><UiIcon name="upload" :size="18" />导入档案</button></div></div>
         <template v-else>
           <section v-if="view === 'clues'" class="page page-clues">
@@ -711,7 +759,7 @@ onUnmounted(() => { timelineOrientationQuery?.removeEventListener('change', upda
             <div v-if="!visibleClues.length" class="section-empty"><div class="section-empty-icon"><UiIcon :name="clues.length ? 'search' : 'camera'" :size="31" /></div><h2>{{ clues.length ? '没有符合条件的线索' : '还没有线索' }}</h2><p>{{ clues.length ? '试着调整搜索词或筛选条件。' : '拍摄或导入第一张线索照片，文字会在本机自动识别。' }}</p><button v-if="!clues.length" class="primary-button" @click="capture"><UiIcon name="camera" :size="18" />拍摄线索</button></div>
             <div v-else :class="['clue-collection', layout]"><article v-for="clue in visibleClues" :key="clue.id" class="clue-card" @click="openClue(clue)"><div class="clue-image"><img v-if="imageUrls[clue.displayImagePath || clue.imagePath]" :src="imageUrls[clue.displayImagePath || clue.imagePath]" :alt="clue.title" :style="{ transform: `rotate(${clue.rotation}deg)` }" /><UiIcon v-else name="image" :size="31" /><span class="clue-number">#{{ String(clue.number).padStart(3, '0') }}</span><button :class="['favorite-button', { active: clue.favorite }]" title="收藏线索" @click.stop="toggleFavorite(clue)"><UiIcon name="heart" :size="17" /></button></div><div class="clue-card-body"><div class="clue-card-meta"><span v-if="clue.round">{{ clue.round }}</span><span v-if="clue.category">{{ clue.category }}</span></div><h2 v-html="highlight(clue.title)"></h2><p v-if="clue.ocrText" v-html="highlight(shortText(clue.ocrText, layout === 'list' ? 165 : 74))"></p><p v-else class="muted">暂无识别文字</p><div class="clue-card-foot"><span>{{ dateLabel(clue.createdAt) }}</span><button :class="['compare-pick', { active: compareIds.includes(clue.id) }]" @click.stop="toggleCompare(clue.id)"><UiIcon name="compare" :size="15" />{{ compareIds.includes(clue.id) ? '已对照' : '加入对照' }}</button></div></div></article></div>
           </section>
-          <OrganizationOverview v-else-if="view === 'organize'" :clues="clues" :people="people" :relationships="relationships" :events="events" :organization="organization" :busy="busy" :auto-organize="autoOrganize" :api-configured="apiKeyConfigured" @analyze="runOrganization" @navigate="switchView" @open-clue="openSourceClue" @accept-person="acceptPersonSuggestion" @accept-relationship="acceptRelationshipSuggestion" @accept-timeline="acceptTimelineSuggestion" @accept-clue-point="acceptCluePointSuggestion" @clear-suggestions="clearOrganizationSuggestions" />
+          <OrganizationOverview v-else-if="view === 'organize'" :clues="clues" :people="people" :relationships="relationships" :events="events" :organization="organization" :busy="busy" :auto-organize="autoOrganize" :api-configured="apiKeyConfigured" :api-provider="selectedProviderLabel" @analyze="runOrganization" @navigate="switchView" @open-clue="openSourceClue" @accept-person="acceptPersonSuggestion" @accept-relationship="acceptRelationshipSuggestion" @accept-timeline="acceptTimelineSuggestion" @accept-clue-point="acceptCluePointSuggestion" @clear-suggestions="clearOrganizationSuggestions" />
           <section v-else-if="view === 'people'" class="page people-page" :class="{ 'relationship-page': relationGraph }"><div class="page-header"><div><h1>{{ relationGraph ? '人物关系' : '人物档案' }}</h1><p>{{ relationGraph ? '查看你手动建立的人物关系。' : '名字匹配来自已保存线索；人物之间的关系由你亲自建立。' }}</p></div><div class="header-actions"><button v-if="!relationGraph" class="secondary-button" :disabled="people.length < 2" @click="relationForm.fromId = ''; relationForm.toId = ''; relationForm.label = ''; relationshipDialog = true"><UiIcon name="plus" :size="18" />添加关系</button><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div></div><div class="subtabs"><button :class="{ active: !relationGraph }" @click="relationGraph = false">人物列表</button><button :class="{ active: relationGraph }" @click="relationGraph = true">关系图</button></div><div v-if="!people.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="people" :size="31" /></div><h2>建立人物档案</h2><p>添加人物姓名后，可以自动找到提及姓名的线索。</p><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div><RelationshipExplorer v-else-if="relationGraph" :key="activeScriptId" :people="people" :relationships="relationships" :image-urls="imageUrls" :clue-counts="personClueCounts" :script-id="activeScriptId" @open-person="openGraphPerson" @view-clues="viewPersonClues" @remove-relationship="removeRelationship" @add-relationship="openRelationshipDialog" /><div v-else class="people-grid"><article v-for="person in people" :key="person.id" class="person-card"><div class="person-avatar"><img v-if="person.photoPath && imageUrls[person.photoPath]" :src="imageUrls[person.photoPath]" :alt="person.name" /><span v-else>{{ person.name.slice(0, 1) }}</span></div><div class="person-card-main"><h2>{{ person.name }}</h2><p v-if="person.aliases.length">又名 {{ person.aliases.join('、') }}</p><p v-else class="muted">暂无别名</p></div><div class="person-card-meta">{{ personClueCount(person) }} 条相关线索</div><p v-if="person.notes" class="person-card-notes">{{ shortText(person.notes, 82) }}</p><div class="person-card-actions"><button @click="filterPerson = person.id; view = 'clues'">查看线索 <UiIcon name="chevron" :size="15" /></button><button title="编辑人物" @click="openPersonDialog(person)"><UiIcon name="edit" :size="17" /></button><button title="删除人物" @click="removePerson(person)"><UiIcon name="trash" :size="17" /></button></div></article></div></section>
           <section v-else-if="view === 'timeline'" class="page timeline-page" :class="{ 'timeline-page-landscape': timelineOrientation === 'landscape' }">
             <div class="page-header"><div><h1>时间线</h1><p>只展示你确认的事件，不补全未知经过。</p></div><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div>
@@ -730,7 +778,7 @@ onUnmounted(() => { timelineOrientationQuery?.removeEventListener('change', upda
           <section v-else-if="view === 'board'" class="page board-page"><div class="page-header"><div><h1>自由整理板</h1><p>拖动卡片，手动连接思路。布局自动保存在本机。</p></div><div class="header-actions"><button class="secondary-button" @click="boardLinkForm.fromId = ''; boardLinkForm.toId = ''; boardLinkForm.label = ''; boardLinkDialog = true"><UiIcon name="plus" :size="18" />连接卡片</button><button class="primary-button" @click="openBoardDialog('note')"><UiIcon name="plus" :size="18" />添加卡片</button></div></div><div class="board-toolbar"><button @click="openBoardDialog('clue')"><UiIcon name="archive" :size="17" />线索</button><button @click="openBoardDialog('person')"><UiIcon name="person" :size="17" />人物</button><button @click="openBoardDialog('note')"><UiIcon name="note" :size="17" />便签</button><div class="board-toolbar-spacer"></div><button @click="boardZoom = Math.max(.5, boardZoom - .15)"><UiIcon name="zoomOut" :size="17" /></button><span>{{ Math.round(boardZoom * 100) }}%</span><button @click="boardZoom = Math.min(2, boardZoom + .15)"><UiIcon name="zoomIn" :size="17" /></button></div><div class="board-canvas"><div v-if="!boardItems.length" class="board-empty"><div class="board-empty-symbol"><UiIcon name="board" :size="37" /></div><strong>你的线索空间</strong><span>添加人物、线索或便签，开始整理。</span><button class="primary-button" @click="openBoardDialog('note')"><UiIcon name="plus" :size="17" />添加第一张卡片</button></div><VueFlow v-else :nodes="boardNodes" :edges="boardEdges" :default-zoom="boardZoom" :min-zoom=".5" :max-zoom="2" :fit-view-on-init="false" @node-click="selectedBoardId = $event.node.id" @node-drag-stop="onBoardDragStop" @connect="onBoardConnect"><Background :gap="24" :size="1" pattern-color="#e2ddd5" /><Controls /></VueFlow><div v-if="selectedBoardItem" class="board-inspector"><div><strong>卡片详情</strong><button title="关闭" @click="selectedBoardId = ''"><UiIcon name="close" :size="16" /></button></div><p>{{ selectedBoardItem.text || (selectedBoardItem.kind === 'clue' ? clues.find(clue => clue.id === selectedBoardItem.refId)?.title : people.find(person => person.id === selectedBoardItem.refId)?.name) }}</p><span v-if="selectedBoardItem.group">分组：{{ selectedBoardItem.group }}</span><div><button @click="openBoardDialog(selectedBoardItem.kind, selectedBoardItem)"><UiIcon name="edit" :size="16" />编辑</button><button @click="removeBoardItem(selectedBoardItem.id)"><UiIcon name="trash" :size="16" />移除</button></div></div></div><div v-if="boardLinks.length" class="board-links-list"><span>已建立的连接</span><div v-for="link in boardLinks" :key="link.id"><span>{{ link.label || '未命名连接' }}</span><button title="删除连接" @click="removeBoardLink(link.id)"><UiIcon name="close" :size="15" /></button></div></div></section>
           <section v-else-if="view === 'notes'" class="page"><div class="page-header"><div><h1>笔记</h1><p>记录你自己的观察与讨论，不生成答案或推理。</p></div><button class="primary-button" @click="openNoteDialog()"><UiIcon name="plus" :size="18" />新建笔记</button></div><div v-if="!notes.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="note" :size="31" /></div><h2>先记下一个想法</h2><p>文字笔记可以关联具体线索或人物。</p><button class="primary-button" @click="openNoteDialog()"><UiIcon name="plus" :size="18" />新建笔记</button></div><div v-else class="notes-grid"><article v-for="note in [...notes].sort((a,b) => b.createdAt.localeCompare(a.createdAt))" :key="note.id" class="note-card"><div class="note-card-top"><UiIcon name="note" :size="19" /><span>{{ dateLabel(note.createdAt) }}</span></div><p>{{ note.text }}</p><div class="note-card-bottom"><span v-if="note.clueId">{{ clues.find(clue => clue.id === note.clueId)?.title || '线索' }}</span><span v-else-if="note.personId">{{ people.find(person => person.id === note.personId)?.name || '人物' }}</span><span v-else>独立笔记</span><button title="编辑" @click="openNoteDialog(note)"><UiIcon name="edit" :size="17" /></button><button title="删除" @click="removeNote(note.id)"><UiIcon name="trash" :size="17" /></button></div></article></div></section>
           <section v-else-if="view === 'compare'" class="page"><div class="page-header"><div><h1>线索对照</h1><p>把多条线索放在一起，逐字查看原图和识别内容。</p></div><button v-if="compareIds.length" class="secondary-button" @click="compareIds = []">清空对照</button></div><div v-if="!compareClues.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="compare" :size="31" /></div><h2>还没有加入对照的线索</h2><p>在线索库中点击「加入对照」，即可并排查看。</p><button class="primary-button" @click="view = 'clues'"><UiIcon name="archive" :size="18" />前往线索库</button></div><div v-else class="compare-grid"><article v-for="clue in compareClues" :key="clue.id" class="compare-card"><div class="compare-card-header"><div><span>#{{ String(clue.number).padStart(3, '0') }}</span><h2>{{ clue.title }}</h2></div><button title="移出对照" @click="toggleCompare(clue.id)"><UiIcon name="close" :size="18" /></button></div><button class="compare-photo" @click="openClue(clue)"><img v-if="imageUrls[clue.imagePath]" :src="imageUrls[clue.imagePath]" :alt="clue.title" :style="{ transform: `rotate(${clue.rotation}deg)` }" /><UiIcon v-else name="image" :size="32" /></button><div class="compare-ocr"><span>识别文字</span><p>{{ clue.ocrText || '暂无识别文字' }}</p></div></article></div></section>
-          <section v-else-if="view === 'settings'" class="page"><div class="page-header"><div><h1>档案管理</h1><p>每个剧本独立存储；可以按剧本导出与恢复。</p></div><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button></div><div class="settings-layout"><div><div class="section-label">我的剧本</div><div class="script-list"><article v-for="script in scripts" :key="script.id" :class="['script-row', { active: script.id === activeScriptId }]" @click="selectScript(script.id)"><div class="script-row-cover" :style="script.coverPath && imageUrls[script.coverPath] ? { backgroundImage: `url(${imageUrls[script.coverPath]})` } : {}"><UiIcon v-if="!script.coverPath" name="file" :size="23" /></div><div><h2>{{ script.name }}</h2><p>{{ dateLabel(script.playDate) }}</p></div><UiIcon name="chevron" :size="16" /></article></div></div><div class="settings-side"><div class="section-label">当前剧本</div><div class="settings-card"><h2>{{ activeScript.name }}</h2><p>照片、OCR 文字、人物和整理内容都保存在本机。导出的档案可在另一台设备上导入。</p><button class="settings-action" @click="openScriptDialog(activeScript)"><UiIcon name="edit" :size="18" />编辑剧本<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="exportArchive"><UiIcon name="download" :size="18" />导出完整档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="importArchive"><UiIcon name="upload" :size="18" />导入历史档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action danger" @click="removeScript(activeScript)"><UiIcon name="trash" :size="18" />删除剧本<UiIcon name="chevron" :size="16" /></button></div><div class="settings-card ai-settings-card"><h2>DeepSeek 线索整理</h2><p>可选联网功能。发送当前剧本的 OCR 文字和线索编号，照片仍保存在本机；API Key 保存于 iPad Keychain，不进入导出档案。</p><label class="ai-key-label">DeepSeek API Key<input v-model="apiKeyDraft" type="password" autocomplete="off" placeholder="粘贴 API Key 后保存" /></label><div class="ai-key-actions"><button class="primary-button" :disabled="busy || !apiKeyDraft.trim()" @click="saveDeepSeekKey">保存到 iPad</button><button v-if="apiKeyConfigured" class="text-button" :disabled="busy" @click="removeDeepSeekKey">移除密钥</button></div><label class="auto-organize-toggle"><input v-model="autoOrganize" type="checkbox" :disabled="!apiKeyConfigured" @change="saveAutoOrganize" /><span><strong>自动整理新增线索</strong><small>拍照或导入后会发送 OCR 文字到 DeepSeek；可能产生 API 用量。</small></span></label></div><div class="privacy-note"><UiIcon name="info" :size="18" /><span>本机 OCR 和照片管理可离线使用。选择 AI 整理时会联网发送文字；模型只生成待确认建议，不判断证词、不推断因果或答案。</span></div></div></div></section>
+          <section v-else-if="view === 'settings'" class="page"><div class="page-header"><div><h1>档案管理</h1><p>每个剧本独立存储；可以按剧本导出与恢复。</p></div><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button></div><div class="settings-layout"><div><div class="section-label">我的剧本</div><div class="script-list"><article v-for="script in scripts" :key="script.id" :class="['script-row', { active: script.id === activeScriptId }]" @click="selectScript(script.id)"><div class="script-row-cover" :style="script.coverPath && imageUrls[script.coverPath] ? { backgroundImage: `url(${imageUrls[script.coverPath]})` } : {}"><UiIcon v-if="!script.coverPath" name="file" :size="23" /></div><div><h2>{{ script.name }}</h2><p>{{ dateLabel(script.playDate) }}</p></div><UiIcon name="chevron" :size="16" /></article></div></div><div class="settings-side"><div class="section-label">当前剧本</div><div class="settings-card"><h2>{{ activeScript.name }}</h2><p>照片、OCR 文字、人物和整理内容都保存在本机。导出的档案可在另一台设备上导入。</p><button class="settings-action" @click="openScriptDialog(activeScript)"><UiIcon name="edit" :size="18" />编辑剧本<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="exportArchive"><UiIcon name="download" :size="18" />导出完整档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action" @click="importArchive"><UiIcon name="upload" :size="18" />导入历史档案<UiIcon name="chevron" :size="16" /></button><button class="settings-action danger" @click="removeScript(activeScript)"><UiIcon name="trash" :size="18" />删除剧本<UiIcon name="chevron" :size="16" /></button></div><div class="settings-card ai-settings-card"><h2>AI 线索整理</h2><p>启动时按出口 IP 自动选择：中国 IP 使用 DeepSeek，其他地区使用 GPT。只发送当前剧本的 OCR 文字和线索编号，照片留在本机；密钥分别保存于 iPad Keychain，不进入导出档案。</p><div class="ai-selected-provider"><span class="ai-route-dot" :class="aiStatusTone"></span>{{ aiRoute.provider ? `当前选择：${selectedProviderLabel}` : aiStatusLabel }}<button class="text-button" :disabled="aiRoute.phase === 'checking'" @click="initializeAiRouting">重新检测</button></div><div class="ai-provider-settings"><div class="ai-provider-heading"><strong>DeepSeek</strong><small>{{ apiKeysConfigured.deepseek ? '已保存密钥' : '未配置' }}</small></div><label class="ai-key-label">DeepSeek API Key<input v-model="apiKeyDrafts.deepseek" type="password" autocomplete="off" placeholder="粘贴 DeepSeek API Key" /></label><div class="ai-key-actions"><button class="primary-button" :disabled="busy || !apiKeyDrafts.deepseek.trim()" @click="saveProviderKey('deepseek')">保存到 iPad</button><button v-if="apiKeysConfigured.deepseek" class="text-button" :disabled="busy" @click="removeProviderKey('deepseek')">移除密钥</button></div></div><div class="ai-provider-settings"><div class="ai-provider-heading"><strong>GPT · OpenAI</strong><small>{{ apiKeysConfigured.openai ? '已保存密钥' : '未配置' }}</small></div><label class="ai-key-label">OpenAI API Key<input v-model="apiKeyDrafts.openai" type="password" autocomplete="off" placeholder="粘贴 OpenAI API Key" /></label><div class="ai-key-actions"><button class="primary-button" :disabled="busy || !apiKeyDrafts.openai.trim()" @click="saveProviderKey('openai')">保存到 iPad</button><button v-if="apiKeysConfigured.openai" class="text-button" :disabled="busy" @click="removeProviderKey('openai')">移除密钥</button></div></div><label class="auto-organize-toggle"><input v-model="autoOrganize" type="checkbox" :disabled="!apiKeyConfigured" @change="saveAutoOrganize" /><span><strong>自动整理新增线索</strong><small>拍照或导入后会发送 OCR 文字到当前选择的 {{ selectedProviderLabel }}；可能产生 API 用量。</small></span></label></div><div class="privacy-note"><UiIcon name="info" :size="18" /><span>本机 OCR 和照片管理可离线使用。选择 AI 整理时会联网发送文字；模型只生成待确认建议，不判断证词、不推断因果或答案。</span></div></div></div></section>
         </template>
       </main>
       <nav class="mobile-nav" aria-label="底部导航"><button v-for="item in nav" :key="item.id" :class="{ active: activeNavId === item.id }" @click="switchView(item.id)"><UiIcon :name="item.icon" :size="21" /><span>{{ item.label }}</span></button></nav>

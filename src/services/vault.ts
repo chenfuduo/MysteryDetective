@@ -5,9 +5,11 @@ import { Share } from '@capacitor/share'
 import { CapgoFilePicker } from '@capgo/capacitor-file-picker'
 import { Ocr } from '@jcesarmobile/capacitor-ocr'
 import JSZip from 'jszip'
+import { normalizedOcrRegions, type OcrRegion } from './ocrLocation'
+export type { OcrRegion } from './ocrLocation'
 
 export type ScriptRecord = { id: string; name: string; playDate: string; coverPath: string; createdAt: string }
-export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
+export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; ocrRegions?: OcrRegion[]; ocrImagePath?: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
 export type CluePhotoImportResult = { clues: ClueRecord[]; skippedDuplicates: number }
 export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string; photoPaths?: string[] }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
@@ -369,11 +371,13 @@ async function sourceBase64(uri: string): Promise<string> {
 }
 async function recognizeSavedClue(clue: ClueRecord, data?: string): Promise<ClueRecord> {
   let ocrText = ''
+  let ocrRegions: OcrRegion[] = []
   let error = ''
   try {
     const base64 = data || await readImage(clue.imagePath)
     const result = native ? await Ocr.process({ image: `data:${mimeForPath(clue.imagePath)};base64,${base64}` }) : { results: [] as { text: string }[] }
     ocrText = result.results.map(item => item.text).join('\n')
+    ocrRegions = normalizedOcrRegions(result.results)
     if (!ocrText.trim()) error = '未识别到文字，原始照片已保存，可以重新识别或手动输入'
   } catch {
     error = '文字识别失败，原始照片已保存，请重新识别或手动输入'
@@ -381,9 +385,22 @@ async function recognizeSavedClue(clue: ClueRecord, data?: string): Promise<Clue
   const current = await getRecord<ClueRecord>('clues', clue.id)
   if (!current || current.scriptId !== clue.scriptId) throw new Error('线索已被移除，无法继续识别')
   // A manual correction made while OCR was running always wins.
-  if (current.ocrText.trim()) return current
+  if (current.ocrText.trim()) return ocrRegions.length ? updateClue(clue.id, { ocrRegions, ocrImagePath: clue.imagePath }) : current
   if (error) return updateClue(clue.id, { ocrStatus: 'failed', ocrError: error })
-  return updateClue(clue.id, { ocrText, category: categoryFromText(ocrText), ocrStatus: 'complete', ocrError: '' })
+  return updateClue(clue.id, { ocrText, ocrRegions, ocrImagePath: clue.imagePath, category: categoryFromText(ocrText), ocrStatus: 'complete', ocrError: '' })
+}
+/** Supplement original-photo locations without replacing OCR text or manual corrections. */
+export async function locateClueText(scriptId: string, clueId: string): Promise<ClueRecord> {
+  const clue = await getRecord<ClueRecord>('clues', clueId)
+  if (!clue || clue.scriptId !== scriptId) throw new Error('线索不属于当前剧本')
+  if (!native) throw new Error('照片文字定位需要在 iPad 上使用本地 Apple Vision 识别')
+  const base64 = await readImage(clue.imagePath)
+  const result = await Ocr.process({ image: `data:${mimeForPath(clue.imagePath)};base64,${base64}` })
+  const ocrRegions = normalizedOcrRegions(result.results)
+  if (!ocrRegions.length) throw new Error('没有获取到文字位置，请使用包含定位功能的新版 iPad 应用，并确认照片文字清晰')
+  const current = await getRecord<ClueRecord>('clues', clueId)
+  if (!current || current.scriptId !== scriptId || current.imagePath !== clue.imagePath) throw new Error('原始线索已发生变化，请重新打开')
+  return updateClue(clueId, { ocrRegions, ocrImagePath: clue.imagePath })
 }
 export async function retryClueOcr(scriptId: string, clueId: string): Promise<ClueRecord> {
   const clue = await getRecord<ClueRecord>('clues', clueId)
@@ -740,7 +757,7 @@ export async function importScript(): Promise<ScriptRecord | null> {
       const record = { ...raw, id: idMap.get(raw.id), scriptId: newScriptId }
       for (const key of ['clueId', 'personId', 'fromId', 'toId', 'refId']) if (record[key]) record[key] = idMap.get(record[key]) || ''
       if (Array.isArray(record.personIds)) record.personIds = record.personIds.map((id: string) => idMap.get(id) || '').filter(Boolean)
-      if (table === 'clues') { record.imagePath = await importedImage(raw.imagePath); record.displayImagePath = await importedImage(raw.displayImagePath) }
+      if (table === 'clues') { record.imagePath = await importedImage(raw.imagePath); record.displayImagePath = await importedImage(raw.displayImagePath); record.ocrImagePath = raw.ocrImagePath === raw.imagePath ? record.imagePath : ''; if (!record.ocrImagePath) record.ocrRegions = [] }
       if (table === 'people') { record.photoPath = await importedImage(raw.photoPath); if (Array.isArray(raw.photoPaths)) record.photoPaths = await Promise.all(raw.photoPaths.map(importedImage)) }
       await putRecord(table, record)
     }

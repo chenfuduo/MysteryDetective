@@ -34,6 +34,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   analyze: []
+  openWorkbench: []
   navigate: [view: 'clues' | 'people' | 'timeline' | 'board' | 'notes' | 'compare' | 'settings', section?: 'profiles' | 'relationships']
   openClue: [sourceNo: number, quote?: string]
   acceptPerson: [id: string]
@@ -243,7 +244,7 @@ function accept(suggestion: Suggestion) {
     </details>
 
     <section ref="reviewElement" class="review-section">
-      <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><div class="review-heading-actions"><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
+      <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><div class="review-heading-actions"><button v-if="pendingCount" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条核对 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
       <nav class="review-groups" aria-label="按处理步骤筛选">
         <button v-for="group in groups" :key="group.id" :class="{ active: effectiveGroup === group.id }" :aria-pressed="effectiveGroup === group.id" @click="activeGroup = group.id">{{ group.label }} <span>{{ group.count }}</span></button>
       </nav>
@@ -277,6 +278,8 @@ function accept(suggestion: Suggestion) {
 </template>
 
 <style scoped>
+.workbench-entry { display: inline-flex; align-items: center; gap: 8px; min-height: 42px; padding: 0 15px; border: 1px solid #cbdccf; border-radius: 10px; color: #315c48; background: #eff5f0; font-size: 13px; font-weight: 650; white-space: nowrap; }
+.workbench-entry:disabled { opacity: .5; }
 .organization-page {
   -webkit-user-select: none;
   user-select: none;

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
+import { matchOcrRegions, type OcrRegion } from '../services/ocrLocation'
 
-const props = defineProps<{ src: string; alt: string; rotation: number; zoom: boolean }>()
-const emit = defineEmits<{ 'update:zoom': [value: boolean] }>()
+const props = defineProps<{ src: string; alt: string; rotation: number; zoom: boolean; regions?: OcrRegion[]; focusText?: string }>()
+const emit = defineEmits<{ 'update:zoom': [value: boolean]; location: [count: number] }>()
+const highlightedRegions = computed(() => matchOcrRegions(props.regions || [], props.focusText || ''))
 const viewport = ref<HTMLElement | null>(null)
 const size = reactive({ width: 0, height: 0, imageWidth: 0, imageHeight: 0 })
 const dimensions = computed(() => {
@@ -35,11 +37,32 @@ watch(() => [props.src, props.zoom, props.rotation, size.width, size.height, siz
   drag = null
   dragging.value = false
   await nextTick()
-  if (viewport.value) {
-    viewport.value.scrollLeft = (dimensions.value.width - viewport.value.clientWidth) / 2
-    viewport.value.scrollTop = (dimensions.value.height - viewport.value.clientHeight) / 2
-  }
+  centerOnSource()
 })
+watch(highlightedRegions, async matches => {
+  emit('location', matches.length)
+  if (matches.length && !props.zoom) emit('update:zoom', true)
+  await nextTick()
+  centerOnSource()
+}, { immediate: true })
+function centerOnSource() {
+  const element = viewport.value
+  if (!element) return
+  const points = highlightedRegions.value.flatMap(region => [
+    [region.x, region.y], [region.x + region.width, region.y],
+    [region.x, region.y + region.height], [region.x + region.width, region.y + region.height],
+  ])
+  const radians = props.rotation * Math.PI / 180
+  const positions = points.map(([x, y]) => {
+    const dx = (x - 0.5) * dimensions.value.imageWidth
+    const dy = (y - 0.5) * dimensions.value.imageHeight
+    return { x: dx * Math.cos(radians) - dy * Math.sin(radians), y: dx * Math.sin(radians) + dy * Math.cos(radians) }
+  })
+  const centerX = positions.length ? (Math.min(...positions.map(point => point.x)) + Math.max(...positions.map(point => point.x))) / 2 : 0
+  const centerY = positions.length ? (Math.min(...positions.map(point => point.y)) + Math.max(...positions.map(point => point.y))) / 2 : 0
+  element.scrollLeft = dimensions.value.width / 2 + centerX - element.clientWidth / 2
+  element.scrollTop = dimensions.value.height / 2 + centerY - element.clientHeight / 2
+}
 watch(() => props.src, () => { size.imageWidth = 0; size.imageHeight = 0 })
 function loaded(event: Event) {
   const image = event.target as HTMLImageElement
@@ -80,7 +103,12 @@ onUnmounted(() => observer?.disconnect())
 <template>
   <div ref="viewport" class="clue-photo-viewer" :class="{ zoomed: zoom, dragging }" aria-label="原始照片，放大后可上下左右拖动" @pointerdown="startDrag" @pointermove="moveDrag" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @click="toggleZoom" @contextmenu.prevent>
     <div class="photo-scroll-content" :style="{ width: `${dimensions.width}px`, height: `${dimensions.height}px` }">
-      <img :key="src" :src="src" :alt="alt" draggable="false" :style="{ width: `${dimensions.imageWidth}px`, height: `${dimensions.imageHeight}px`, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }" @load="loaded" />
+      <div class="photo-image-plane" :style="{ width: `${dimensions.imageWidth}px`, height: `${dimensions.imageHeight}px`, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }">
+        <img :key="src" :src="src" :alt="alt" draggable="false" @load="loaded" />
+        <div class="photo-source-regions" aria-hidden="true">
+          <span v-for="(region, index) in highlightedRegions" :key="index" class="photo-source-region" :style="{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }" />
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -90,5 +118,8 @@ onUnmounted(() => observer?.disconnect())
 .clue-photo-viewer.zoomed { cursor: grab; touch-action: none; }
 .clue-photo-viewer.dragging { cursor: grabbing; }
 .photo-scroll-content { position: relative; }
-.photo-scroll-content img { position: absolute; left: 50%; top: 50%; display: block; max-width: none; max-height: none; pointer-events: none; -webkit-user-drag: none; }
+.photo-image-plane { position: absolute; left: 50%; top: 50%; pointer-events: none; }
+.photo-image-plane img { display: block; width: 100%; height: 100%; max-width: none; max-height: none; -webkit-user-drag: none; }
+.photo-source-regions { position: absolute; inset: 0; pointer-events: none; }
+.photo-source-region { position: absolute; box-sizing: border-box; border: 2px solid #d88a20; background: #ffcf4938; box-shadow: 0 0 0 1px #fff9; border-radius: 2px; }
 </style>

@@ -7,6 +7,67 @@ const swiftFile = new URL(
 
 const replacements = [
   {
+    original: 'import Vision\n',
+    patched: 'import Vision\nimport UIKit\n',
+  },
+  {
+    original: '        if #available(iOS 18.0, *) {\n',
+    patched: `        // Match the upright image displayed by WebKit, including camera EXIF orientation.
+        let originalImage: UIImage?
+        if let imageData {
+            originalImage = UIImage(data: imageData)
+        } else if let imageURL {
+            originalImage = UIImage(contentsOfFile: imageURL.path)
+        } else {
+            originalImage = nil
+        }
+        guard let originalImage else {
+            call.reject("invalid image")
+            return
+        }
+        let imageSize = originalImage.size
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: imageSize, format: format)
+        imageData = renderer.image { _ in
+            originalImage.draw(in: CGRect(origin: .zero, size: imageSize))
+        }.pngData()
+        imageURL = nil
+
+        if #available(iOS 18.0, *) {
+`,
+  },
+  {
+    original: `                            observation["confidence"] = firstCandidate.confidence
+                            results.append(observation)
+`,
+    patched: `                            observation["confidence"] = firstCandidate.confidence
+                            let bounds = textObservation.boundingBox.cgRect
+                            observation["boundingBox"] = [
+                                "x": Double(bounds.minX),
+                                "y": Double(1 - bounds.maxY),
+                                "width": Double(bounds.width),
+                                "height": Double(bounds.height)
+                            ]
+                            results.append(observation)
+`,
+  },
+  {
+    original: `                            observation["confidence"] = firstCandidate.confidence
+                            results.append(observation)
+`,
+    patched: `                            observation["confidence"] = firstCandidate.confidence
+                            let bounds = textObservation.boundingBox
+                            observation["boundingBox"] = [
+                                "x": Double(bounds.minX),
+                                "y": Double(1 - bounds.maxY),
+                                "width": Double(bounds.width),
+                                "height": Double(bounds.height)
+                            ]
+                            results.append(observation)
+`,
+  },
+  {
     original: '                    let request = RecognizeTextRequest()\n',
     patched: `                    var request = RecognizeTextRequest()
                     request.recognitionLevel = .accurate
@@ -39,7 +100,9 @@ let changed = false
 
 for (const { original, patched } of replacements) {
   if (source.includes(patched)) continue
-  if (source.split(original).length !== 2) {
+  const count = source.split(original).length - 1
+  const expected = original.includes('observation["confidence"]') && patched.includes('boundingBox.cgRect') ? 2 : 1
+  if (count !== expected) {
     throw new Error('OCR Swift source changed; update patches/enable-ocr-languages.mjs')
   }
   source = source.replace(original, patched)
@@ -48,5 +111,5 @@ for (const { original, patched } of replacements) {
 
 if (changed) {
   await writeFile(swiftFile, source)
-  console.log('Enabled Simplified Chinese and English for Apple Vision OCR.')
+  console.log('Enabled Chinese/English OCR with original-photo line coordinates.')
 }

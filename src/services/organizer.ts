@@ -89,19 +89,22 @@ export type OrganizationContext = {
 
 
 function scanDates(value: string): DateToken[] {
-  const pattern = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)|(?<![\d-])(\d{1,2})[/.](\d{1,2})(?!\d)/g
+  // Full-width OCR digits retain their original character offsets for source quotes.
+  const numericText = value.replace(/[０-９]/g, digit => String(digit.charCodeAt(0) - 0xff10))
+  const pattern = /(?:(\d{4})\s*年\s*)?(\d(?:\s*\d)?)\s*月\s*(\d(?:\s*\d)?)\s*日|(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)|(?<![\d-])(\d{1,2})[/.](\d{1,2})(?!\d)/g
   const dates: DateToken[] = []
   let match: RegExpExecArray | null
-  while ((match = pattern.exec(value)) !== null) {
+  while ((match = pattern.exec(numericText)) !== null) {
     const year = match[1] || match[4] || ''
-    const month = Number(match[2] || match[5] || match[7])
-    const day = Number(match[3] || match[6] || match[8])
+    const month = Number((match[2] || match[5] || match[7]).replace(/\s/g, ''))
+    const day = Number((match[3] || match[6] || match[8]).replace(/\s/g, ''))
     if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year ? Number(year) : 2000, month, 0)).getUTCDate()) continue
     dates.push({ index: match.index, end: pattern.lastIndex, year, month, day, value: `${year ? `${year}-` : '--'}${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` })
   }
   return dates
 }
 function clockNumber(value: string): number {
+  value = value.replace(/\s/g, '')
   if (/^\d+$/.test(value)) return Number(value)
   const digits: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
   if (value.includes('十')) {
@@ -111,13 +114,14 @@ function clockNumber(value: string): number {
   return value.length > 1 ? Number([...value].map(char => digits[char]).join('')) : digits[value]
 }
 function scanClocks(value: string): ClockToken[] {
-  const pattern = /(?:(凌晨|清晨|早晨|早上|上午|中午|下午|午后|傍晚|晚上|晚间|夜里|夜间|深夜|半夜|晚)\s*)?(?<!\d)(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(点(?:钟)?|时|[:：])(?:\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?|\s*(半|一刻|三刻))?(?!\d)/g
+  const numericText = value.replace(/[０-９]/g, digit => String(digit.charCodeAt(0) - 0xff10)).replace(/[﹕∶]/g, ':')
+  const pattern = /(?:(凌晨|清晨|早晨|早上|上午|中午|下午|午后|傍晚|晚上|晚间|夜里|夜间|深夜|半夜|晚)\s*)?(?<!\d)(\d(?:\s*\d)?|[零〇一二两三四五六七八九十](?:\s*[零〇一二两三四五六七八九十]){0,2})\s*(点(?:钟)?|时|[:：])(?:\s*(半|一刻|三刻)|\s*(\d(?:\s*\d)?|[零〇一二两三四五六七八九十](?:\s*[零〇一二两三四五六七八九十]){0,2})\s*分?)?(?!\d)/g
   const clocks: ClockToken[] = []
   let previousPeriod = '', previousEnd = 0
   let match: RegExpExecArray | null
-  while ((match = pattern.exec(value)) !== null) {
+  while ((match = pattern.exec(numericText)) !== null) {
     let hour = clockNumber(match[2])
-    const minute = match[4] !== undefined ? clockNumber(match[4]) : match[5] ? ({ 半: 30, 一刻: 15, 三刻: 45 }[match[5]] ?? null) : null
+    const minute = match[4] ? ({ 半: 30, 一刻: 15, 三刻: 45 }[match[4]] ?? null) : match[5] !== undefined ? clockNumber(match[5]) : null
     if (!Number.isFinite(hour) || hour > 23 || (minute !== null && (!Number.isFinite(minute) || minute > 59)) || (minute === null && /[:：]/.test(match[3]))) continue
     const between = value.slice(previousEnd, match.index)
     const inheritedPeriod = previousPeriod && !/[。；;!?！？]/.test(between) && !scanDates(between).length ? previousPeriod : ''
@@ -274,7 +278,7 @@ const organizationSystem = `你是剧本杀线索的文字整理工具。只整�
 1. 每个明确时刻单独对应事件：到达、离开、打电话等发生在不同时刻时必须分开。原文写了几点几分，startsAt 必须保留分钟；例如“6月16日晚10点27分进入，10点29分离开”必须输出 --06-16T22:27 和 --06-16T22:29。只写到小时就只保留小时，不能补 :00。
 2. 无年份使用 --MM-DD、--MM-DDTHH 或 --MM-DDTHH:mm；明确有年份使用 YYYY-MM-DD、YYYY-MM-DDTHH 或 YYYY-MM-DDTHH:mm。不得猜年份、日期、时刻或分钟。
 3. 同线索前文明确月日，后续分项未出现新日期时沿用最近月日，跨段落/医院监控/城市监控等标题也继续检查，不得跨不同线索沿用日期。“6月17日早晨7点09分……城市监控显示：凌晨3时10分……3时24分……”必须分别保留后续每一时刻。
-4. 时段词和 OCR 错别字不应阻断时钟数字识别。明确晚上/下午换算 24 小时制；没有时段依据不得擅自加 12 小时。约、左右、大概、前后等近似含义必须保留，approximate=true；不能把约十点写成精确 10:00。
+4. 时段词和 OCR 错别字不应阻断时钟数字识别。全角数字、数字间的 OCR 空格/换行、中文数字和冒号均要识别，例如“１０点２７分”“1 0 点 2 7 分”“十点三刻”；quote 仍保留原文，不能改写成标准数字。“通话1分43秒”“停留约一分钟”“1524病房”“线索卡22”是时长、房号或编号，不能当作新的事件时刻。明确晚上/下午换算 24 小时制；没有时段依据不得擅自加 12 小时。约、左右、大概、前后等近似含义必须保留，approximate=true；不能把约十点写成精确 10:00。
 5. precision 为 date/hour/minute，与原文精度一致；约时仍保留原文实际精度。每个事件 title 只简述原文动作，无法提取标题时写“待补充事件”。不要为同一事件再重复一个仅日期建议。
 6. 每条 quote 必须逐字连续摘录对应 OCR 原文，保留原标点/空格，不要改错字、不要拼接多段，优先含时刻和事件动作；日期在前段时 quote 可只取当前时刻所在句，source 标明所属线索。每条 quote 尽量少于 400 字。
 输出纯 JSON：{"people":[{"name":"原文人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确动作","startsAt":"--06-16T22:27","precision":"minute","approximate":false,"people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
@@ -350,8 +354,10 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     organizationRun.phase = 'checking'; organizationRun.message = `${providerLabel(provider)} 正在逐段核对时间是否遗漏`
     await context.onStage?.('checking', organizationRun.message)
     let reviewed = false, reviewError = ''
+    // This inventory only directs the API to literal OCR spans; it never creates events online.
+    const clockAnchors = clues.map(clue => ({ source: clue.number, occurrences: scanClocks(clue.ocrText).map(clock => ({ offset: clock.index, text: clue.ocrText.slice(clock.index, clock.end), context: clue.ocrText.slice(Math.max(0, clock.index - 48), Math.min(clue.ocrText.length, clock.end + 96)) })) }))
     try {
-      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。\n${sources}`), clues)
+      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}`), clues)
       first.snapshot.timeline = mergeTimeline(first.snapshot.timeline, second.snapshot.timeline)
       for (const [sourceNo, count] of second.rejected) first.rejected.set(sourceNo, Math.max(first.rejected.get(sourceNo) || 0, count))
       reviewed = true

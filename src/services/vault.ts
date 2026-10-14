@@ -10,7 +10,7 @@ export type ScriptRecord = { id: string; name: string; playDate: string; coverPa
 export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
 export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
-export type TimelineRecord = { id: string; scriptId: string; title: string; startsAt: string; personIds: string[]; clueId: string; confirmed: boolean }
+export type TimelineRecord = { id: string; scriptId: string; title: string; startsAt: string; personIds: string[]; clueId: string; confirmed: boolean; yearlessMarkerIgnored?: boolean }
 export type BoardItemRecord = { id: string; scriptId: string; kind: 'clue' | 'person' | 'note' | 'photo'; refId: string; text: string; x: number; y: number; color: string; group: string }
 export type BoardLinkRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
 export type NoteRecord = { id: string; scriptId: string; clueId: string; personId: string; text: string; createdAt: string }
@@ -366,7 +366,7 @@ export async function listTimelineEvents(scriptId: string): Promise<TimelineReco
   return (await listRecords<TimelineRecord>('timeline', scriptId)).sort((a, b) => a.startsAt.localeCompare(b.startsAt))
 }
 export async function createTimelineEvent(scriptId: string, input: Partial<TimelineRecord>): Promise<TimelineRecord> {
-  return putRecord('timeline', { id: uid(), scriptId, title: input.title || '', startsAt: input.startsAt || '', personIds: input.personIds || [], clueId: input.clueId || '', confirmed: input.confirmed ?? true })
+  return putRecord('timeline', { id: uid(), scriptId, title: input.title || '', startsAt: input.startsAt || '', personIds: input.personIds || [], clueId: input.clueId || '', confirmed: input.confirmed ?? true, yearlessMarkerIgnored: input.yearlessMarkerIgnored ?? false })
 }
 export async function updateTimelineEvent(id: string, patch: Partial<TimelineRecord>): Promise<TimelineRecord> {
   const existing = await getRecord<TimelineRecord>('timeline', id)

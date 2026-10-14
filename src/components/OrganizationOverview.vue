@@ -35,7 +35,6 @@ const emit = defineEmits<{
   acceptPerson: [id: string]
   acceptRelationship: [id: string]
   acceptTimeline: [id: string]
-  ignoreTimeline: [id: string]
   acceptCluePoint: [id: string]
 }>()
 const activeFilter = ref('all')
@@ -64,7 +63,7 @@ const visibleSuggestions = computed(() => activeFilter.value === 'all'
   : allSuggestions.value.filter(item => item.kind === activeFilter.value))
 const dateLabel = (value: string) => {
   const partial = value.match(/^--(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
-  if (partial) return `${Number(partial[1])}月${Number(partial[2])}日${partial[3] ? ` ${partial[4] ? `${partial[3]}:${partial[4]}` : `${partial[3]}时`}` : ''}（未标年份）`
+  if (partial) return `${Number(partial[1])}月${Number(partial[2])}日${partial[3] ? ` ${partial[4] ? `${partial[3]}:${partial[4]}` : `${partial[3]}时`}` : ''}`
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date)
 }
@@ -78,7 +77,7 @@ const title = (suggestion: Suggestion) => {
   return `${suggestion.item.title}${suggestion.item.category ? ` · ${suggestion.item.category}` : ''}`
 }
 const actionLabel = (suggestion: Suggestion) => {
-  if (suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')) return '忽略'
+  if (suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')) return '录入无年份'
   if (suggestion.kind === 'timeline' && (suggestion.item.requiresTitle || !/T\d{2}:\d{2}$/.test(suggestion.item.startsAt))) return '补充并确认'
   return ({ people: '加入人物', relationships: '确认关系', timeline: '加入时间线', cluePoints: '应用到线索' })[suggestion.kind]
 }
@@ -89,7 +88,6 @@ function toggleQuote(id: string) {
 function accept(suggestion: Suggestion) {
   if (suggestion.kind === 'people') emit('acceptPerson', suggestion.item.id)
   else if (suggestion.kind === 'relationships') emit('acceptRelationship', suggestion.item.id)
-  else if (suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--')) emit('ignoreTimeline', suggestion.item.id)
   else if (suggestion.kind === 'timeline') emit('acceptTimeline', suggestion.item.id)
   else emit('acceptCluePoint', suggestion.item.id)
 }
@@ -158,7 +156,7 @@ function accept(suggestion: Suggestion) {
             <p :class="['evidence-quote', { expanded: expandedIds.includes(suggestion.item.id) }]">{{ quote(suggestion.item) }}</p>
             <div class="suggestion-meta"><button class="source-link" @click="emit('openClue', sourceNo(suggestion.item))">原线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button><button v-if="isLongQuote(suggestion.item)" class="quote-toggle" @click="toggleQuote(suggestion.item.id)">{{ expandedIds.includes(suggestion.item.id) ? '收起摘录' : '展开摘录' }}</button></div>
           </div>
-          <button :class="['suggestion-action', { 'suggestion-ignore': suggestion.kind === 'timeline' && suggestion.item.startsAt.startsWith('--') }]" @click="accept(suggestion)">{{ actionLabel(suggestion) }}</button>
+          <button class="suggestion-action" @click="accept(suggestion)">{{ actionLabel(suggestion) }}</button>
         </article>
       </div>
       <footer class="review-footnote">AI 结果可能有误；关系和时间需人工确认，不推断动机、因果或答案。</footer>

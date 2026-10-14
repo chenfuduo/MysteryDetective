@@ -672,6 +672,19 @@ function timelineWindow(items: TimelineRecord[], scale = timelineSpacingScale.va
   const center = (first + last) / 2
   return { start: new Date(center - span / 2), end: new Date(center + span / 2) }
 }
+function timelineAxisLabel(date: Date, scale: string, major = false) {
+  const momentLike = date as Date & { toDate?: () => Date }
+  const value = momentLike.toDate?.() ?? date
+  const format = (options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat('zh-CN-u-ca-gregory-nu-latn', options).format(value)
+  if (scale === 'millisecond') return `${String(value.getMilliseconds()).padStart(3, '0')} 毫秒`
+  if (scale === 'second') return format({ hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+  if (scale === 'minute' || scale === 'hour') return major ? format({ month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : format({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+  if (scale === 'weekday') return format(major ? { year: 'numeric', month: '2-digit', day: '2-digit' } : { month: '2-digit', day: '2-digit', weekday: 'short' })
+  if (scale === 'day' || scale === 'week') return format(major ? { year: 'numeric', month: '2-digit' } : { month: '2-digit', day: '2-digit' })
+  if (scale === 'month') return format({ year: 'numeric', month: '2-digit' })
+  if (scale === 'year') return format({ year: 'numeric' })
+  return format({ year: 'numeric', month: '2-digit', day: '2-digit' })
+}
 function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], visibleEvents: TimelineRecord[], yearless = false, initialRange?: { start: Date; end: Date } | null) {
   if (!host || !allEvents.length || !visibleEvents.length) return null
   const range = initialRange ?? timelineWindow(allEvents)
@@ -683,6 +696,8 @@ function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], v
   }))
   const instance = new Timeline(host, items, {
     locale: 'zh-cn',
+    locales: { 'zh-cn': { current: '现在', time: '时间', deleteSelected: '删除所选项' } },
+    format: { minorLabels: (date, scale) => timelineAxisLabel(date, scale), majorLabels: (date, scale) => timelineAxisLabel(date, scale, true) },
     stack: true,
     zoomKey: 'ctrlKey',
     margin: { item: 18 },

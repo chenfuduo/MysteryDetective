@@ -78,6 +78,9 @@ const datedTimelineElement = ref<HTMLElement | null>(null)
 const yearlessTimelineElement = ref<HTMLElement | null>(null)
 let datedTimelineInstance: Timeline | null = null
 let yearlessTimelineInstance: Timeline | null = null
+let datedTimelineViewport: { start: Date; end: Date } | null = null
+let yearlessTimelineViewport: { start: Date; end: Date } | null = null
+let appliedTimelineScale = timelineSpacingScale.value
 let timelineOrientationQuery: MediaQueryList | null = null
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let searchSequence = 0
@@ -661,17 +664,17 @@ function timelineEventTime(event: TimelineRecord) {
   const timestamp = Date.parse(value)
   return Number.isNaN(timestamp) ? 0 : timestamp
 }
-function timelineWindow(items: TimelineRecord[]) {
+function timelineWindow(items: TimelineRecord[], scale = timelineSpacingScale.value) {
   const times = items.map(timelineEventTime).sort((a, b) => a - b)
   const first = times[0] ?? Date.now()
   const last = times[times.length - 1] ?? first
-  const span = Math.max(last - first, 3 * 60 * 60 * 1000) * 1.16 / timelineSpacingScale.value
+  const span = Math.max(last - first, 3 * 60 * 60 * 1000) * 1.16 / scale
   const center = (first + last) / 2
   return { start: new Date(center - span / 2), end: new Date(center + span / 2) }
 }
-function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], visibleEvents: TimelineRecord[], yearless = false) {
+function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], visibleEvents: TimelineRecord[], yearless = false, initialRange?: { start: Date; end: Date } | null) {
   if (!host || !allEvents.length || !visibleEvents.length) return null
-  const range = timelineWindow(allEvents)
+  const range = initialRange ?? timelineWindow(allEvents)
   const items = visibleEvents.map(event => ({
     id: event.id,
     content: timelineEventTitle(event),
@@ -695,21 +698,54 @@ function createTimeline(host: HTMLElement | null, allEvents: TimelineRecord[], v
   return instance
 }
 function buildTimelineCharts() {
+  if (datedTimelineInstance) datedTimelineViewport = datedTimelineInstance.getWindow()
+  if (yearlessTimelineInstance) yearlessTimelineViewport = yearlessTimelineInstance.getWindow()
   datedTimelineInstance?.destroy()
   yearlessTimelineInstance?.destroy()
   datedTimelineInstance = null
   yearlessTimelineInstance = null
   if (view.value !== 'timeline' || timelineOrientation.value !== 'landscape') return
-  datedTimelineInstance = createTimeline(datedTimelineElement.value, datedConfirmedEvents.value, visibleDatedEvents.value)
-  yearlessTimelineInstance = createTimeline(yearlessTimelineElement.value, yearlessEvents.value, visibleYearlessEvents.value, true)
+  datedTimelineInstance = createTimeline(datedTimelineElement.value, datedConfirmedEvents.value, visibleDatedEvents.value, false, datedTimelineViewport)
+  yearlessTimelineInstance = createTimeline(yearlessTimelineElement.value, yearlessEvents.value, visibleYearlessEvents.value, true, yearlessTimelineViewport)
+  if (!datedTimelineViewport && datedTimelineInstance) datedTimelineViewport = datedTimelineInstance.getWindow()
+  if (!yearlessTimelineViewport && yearlessTimelineInstance) yearlessTimelineViewport = yearlessTimelineInstance.getWindow()
+  appliedTimelineScale = timelineSpacingScale.value
+}
+function setTimelineViewport(instance: Timeline | null, items: TimelineRecord[], range: { start: Date; end: Date } | null) {
+  if (!items.length) return null
+  const next = range ?? timelineWindow(items, 1)
+  instance?.setWindow(next.start, next.end, { animation: false })
+  return next
+}
+function updateTimelineScale(scale: number) {
+  const factor = appliedTimelineScale / scale
+  if (!Number.isFinite(factor) || factor <= 0 || factor === 1) return
+  const resizeViewport = (instance: Timeline | null, viewport: { start: Date; end: Date } | null) => {
+    const current = instance?.getWindow() ?? viewport
+    if (!current) return viewport
+    const center = (current.start.getTime() + current.end.getTime()) / 2
+    const span = Math.max(60_000, (current.end.getTime() - current.start.getTime()) * factor)
+    const next = { start: new Date(center - span / 2), end: new Date(center + span / 2) }
+    instance?.setWindow(next.start, next.end, { animation: false })
+    return next
+  }
+  datedTimelineViewport = resizeViewport(datedTimelineInstance, datedTimelineViewport)
+  yearlessTimelineViewport = resizeViewport(yearlessTimelineInstance, yearlessTimelineViewport)
+  appliedTimelineScale = scale
+}
+function fitTimelineCharts() {
+  timelineSpacingScale.value = 1
+  appliedTimelineScale = 1
+  datedTimelineViewport = setTimelineViewport(datedTimelineInstance, datedConfirmedEvents.value, timelineWindow(datedConfirmedEvents.value, 1))
+  yearlessTimelineViewport = setTimelineViewport(yearlessTimelineInstance, yearlessEvents.value, timelineWindow(yearlessEvents.value, 1))
 }
 function updateTimelineOrientation() {
   timelineOrientation.value = timelineOrientationQuery?.matches ? 'portrait' : 'landscape'
 }
-watch(timelineSpacingScale, value => localStorage.setItem('clue-vault:timeline-scale', String(value)))
-watch([view, visibleDatedEvents, visibleYearlessEvents, timelineOrientation, timelineSpacingScale], async () => { await nextTick(); buildTimelineCharts() })
+watch(timelineSpacingScale, value => { localStorage.setItem('clue-vault:timeline-scale', String(value)); updateTimelineScale(value) })
+watch([view, visibleDatedEvents, visibleYearlessEvents, timelineOrientation], async () => { await nextTick(); buildTimelineCharts() })
 watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize' })
-watch(activeScriptId, async () => { query.value = ''; searchIds.value = null; timelinePersonFilter.value = ''; await loadWorkspace() })
+watch(activeScriptId, async () => { query.value = ''; searchIds.value = null; timelinePersonFilter.value = ''; datedTimelineInstance?.destroy(); yearlessTimelineInstance?.destroy(); datedTimelineInstance = null; yearlessTimelineInstance = null; datedTimelineViewport = null; yearlessTimelineViewport = null; appliedTimelineScale = timelineSpacingScale.value; await loadWorkspace() })
 watch(query, async value => {
   const sequence = ++searchSequence
   if (!value.trim() || !activeScriptId.value) { searchIds.value = null; return }
@@ -760,7 +796,7 @@ onUnmounted(() => { datedTimelineInstance?.destroy(); yearlessTimelineInstance?.
             <div v-if="candidateEvents.length" class="candidate-list"><div class="section-label">待确认的时间</div><p>以下日期来自照片文字识别。请核对原图并填写事件后再加入时间线。</p><article v-for="candidate in candidateEvents" :key="candidate.id"><span>{{ dateLabel(candidate.startsAt) }}</span><button v-if="candidate.clueId" @click="clues.find(clue => clue.id === candidate.clueId) && openClue(clues.find(clue => clue.id === candidate.clueId)!)">查看原图</button><button class="primary-button" @click="openEventDialog(candidate)">确认事件</button></article></div>
             <div v-if="!confirmedEvents.length && !organization?.timeline.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="timeline" :size="31" /></div><h2>等待第一条确认的事件</h2><p>从线索里找到明确的时间，再由你录入事件。</p><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div>
             <template v-else-if="confirmedEvents.length">
-              <div class="timeline-controls"><label><span>人物筛选</span><select v-model="timelinePersonFilter" aria-label="按人物筛选时间线"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><label class="timeline-scale-control"><span>时间间距 <strong>{{ Math.round(timelineSpacingScale * 100) }}%</strong></span><input v-model.number="timelineSpacingScale" type="range" min="0.5" max="4" step="0.1" aria-label="时间线间距缩放" /></label><span class="timeline-visible-count">{{ visibleTimelineEvents.length }} / {{ confirmedEvents.length }} 个事件</span></div>
+              <div class="timeline-controls"><label><span>人物筛选</span><select v-model="timelinePersonFilter" aria-label="按人物筛选时间线"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><label class="timeline-scale-control"><span>时间间距 <strong>{{ Math.round(timelineSpacingScale * 100) }}%</strong></span><input v-model.number="timelineSpacingScale" type="range" min="0.5" max="4" step="0.1" aria-label="时间线间距缩放" /></label><span class="timeline-visible-count">{{ visibleTimelineEvents.length }} / {{ confirmedEvents.length }} 个事件</span><button class="secondary-button timeline-fit-button" title="恢复到包含全部事件的视图" @click="fitTimelineCharts">显示全部</button></div>
               <div v-if="visibleDatedEvents.length && timelineOrientation === 'landscape'" class="timeline-visual"><div class="section-label">时间概览</div><div ref="datedTimelineElement" class="vis-timeline-host"></div></div>
               <div v-if="visibleYearlessEvents.length && timelineOrientation === 'landscape'" class="timeline-visual yearless-timeline-visual"><div class="yearless-timeline-heading"><div class="section-label">无年份时间线</div><p>按月日和时刻排列，不代表具体年份。点击事件可编辑。</p></div><div ref="yearlessTimelineElement" class="vis-timeline-host yearless-vis"></div></div>
               <div v-if="!visibleTimelineEvents.length" class="timeline-filter-empty">没有与该人物关联的已确认事件。</div>

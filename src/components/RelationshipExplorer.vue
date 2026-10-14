@@ -9,16 +9,17 @@ const props = defineProps<{
   imageUrls: Record<string, string>
   clueCounts: Record<string, number>
   scriptId: string
+  relationshipDialogOpen?: boolean
 }>()
 const emit = defineEmits<{
   'open-person': [personId: string]
   'view-clues': [personId: string]
   'remove-relationship': [relationshipId: string]
-  'add-relationship': []
+  'add-relationship': [fromId?: string, toId?: string]
 }>()
 
 type Point = { x: number; y: number }
-type Gesture = { kind: 'pan' | 'person'; start: Point; pan: Point; personId?: string; position?: Point; moved: boolean }
+type Gesture = { kind: 'pan' | 'person' | 'connect'; start: Point; pan: Point; personId?: string; position?: Point; moved: boolean }
 type Pinch = { distance: number; zoom: number; anchor: Point }
 const stage = ref<HTMLElement | null>(null)
 const positions = ref<Record<string, Point>>({})
@@ -29,6 +30,11 @@ const fullscreen = ref(false)
 const selectedId = ref('')
 const search = ref('')
 const dragging = ref(false)
+const linkSourceId = ref('')
+const linkTargetId = ref('')
+const linkEndpoint = ref<Point | null>(null)
+const awaitingRelationship = ref(false)
+let longPressTimer: ReturnType<typeof setTimeout> | undefined
 const viewport = ref({ width: 1, height: 1 })
 const pointers = new Map<number, Point>()
 let gesture: Gesture | null = null
@@ -62,7 +68,7 @@ const edges = computed(() => {
     const from = positions.value[relationship.fromId]
     const to = positions.value[relationship.toId]
     if (!from || !to) return null
-    const active = !selectedId.value || relationship.fromId === selectedId.value || relationship.toId === selectedId.value
+    const active = !linkSourceId.value && (!selectedId.value || relationship.fromId === selectedId.value || relationship.toId === selectedId.value)
     const label = relationship.label || '关联'
     const labelWidth = Math.min(180, Math.max(44, label.length * 12 + 20))
     const length = Math.max(1, Math.hypot(to.x - from.x, to.y - from.y))
@@ -82,6 +88,47 @@ const edges = computed(() => {
     return { relationship, from, to, x: point.x, y: point.y, active, label, labelWidth }
   }).filter((edge): edge is NonNullable<typeof edge> => edge !== null)
 })
+
+const linkingLine = computed(() => {
+  const from = positions.value[linkSourceId.value]
+  const to = positions.value[linkTargetId.value] || linkEndpoint.value
+  return from && to ? { from, to } : null
+})
+function clearLongPress() { if (longPressTimer) clearTimeout(longPressTimer); longPressTimer = undefined }
+function cancelConnection() {
+  clearLongPress()
+  linkSourceId.value = ''; linkTargetId.value = ''; linkEndpoint.value = null; awaitingRelationship.value = false
+  gesture = null; pinch = null; dragging.value = false
+  const captured = [...pointers.keys()]
+  pointers.clear()
+  for (const id of captured) if (stage.value?.hasPointerCapture(id)) stage.value.releasePointerCapture(id)
+}
+function beginConnection(personId: string) {
+  clearLongPress()
+  if (people.value.length < 2 || !peopleById.value.has(personId)) return
+  selectedId.value = ''
+  linkSourceId.value = personId; linkTargetId.value = ''; awaitingRelationship.value = false
+  linkEndpoint.value = { ...positions.value[personId] }
+  if (gesture) gesture.kind = 'connect'
+  dragging.value = false
+}
+function updateConnection(event: PointerEvent) {
+  const point = localPoint(event)
+  const node = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-person]')
+  const target = node && stage.value?.contains(node) ? node.dataset.person || '' : ''
+  linkTargetId.value = target !== linkSourceId.value && peopleById.value.has(target) ? target : ''
+  linkEndpoint.value = { x: (point.x - pan.value.x) / zoom.value, y: (point.y - pan.value.y) / zoom.value }
+}
+function requestConnection(targetId: string) {
+  if (!linkSourceId.value || targetId === linkSourceId.value || !peopleById.value.has(targetId) || awaitingRelationship.value) return
+  linkTargetId.value = targetId; awaitingRelationship.value = true
+  emit('add-relationship', linkSourceId.value, targetId)
+}
+function choosePerson(personId: string) {
+  if (linkSourceId.value) requestConnection(personId)
+  else selectedId.value = personId
+}
+function openRelationshipPicker() { cancelConnection(); emit('add-relationship') }
 
 function imageFor(person: PersonRecord): string { return props.imageUrls[person.photoPath] || props.imageUrls[person.id] || '' }
 function personStyle(person: PersonRecord, index: number) {
@@ -135,6 +182,7 @@ function zoomAt(nextZoom: number, point: Point = { x: viewport.value.width / 2, 
   zoom.value = value
 }
 async function focusPerson(personId: string) {
+  if (linkSourceId.value) { requestConnection(personId); search.value = ''; return }
   selectedId.value = personId
   search.value = ''
   await nextTick()
@@ -149,7 +197,7 @@ function measure() {
   const rect = stage.value.getBoundingClientRect()
   const width = Math.max(1, rect.width)
   const height = Math.max(1, rect.height)
-  if (initialized) pan.value = { x: pan.value.x + (width - viewport.value.width) / 2, y: pan.value.y + (height - viewport.value.height) / 2 }
+  if (initialized && !linkSourceId.value) pan.value = { x: pan.value.x + (width - viewport.value.width) / 2, y: pan.value.y + (height - viewport.value.height) / 2 }
   viewport.value = { width, height }
 }
 function localPoint(event: PointerEvent | WheelEvent): Point {
@@ -157,6 +205,8 @@ function localPoint(event: PointerEvent | WheelEvent): Point {
   return { x: event.clientX - rect.left, y: event.clientY - rect.top }
 }
 function startPinch() {
+  clearLongPress()
+  linkSourceId.value = ''; linkTargetId.value = ''; linkEndpoint.value = null; awaitingRelationship.value = false
   const [a, b] = [...pointers.values()]
   if (!a || !b) return
   const midpoint = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
@@ -164,14 +214,21 @@ function startPinch() {
   gesture = null
 }
 function pointerDown(event: PointerEvent) {
-  if (event.button !== 0 || (event.target as Element).closest('.graph-hud, .graph-help, .graph-empty')) return
+  if (event.button !== 0 || awaitingRelationship.value || (event.target as Element).closest('.graph-hud, .graph-help, .graph-empty, .graph-connection-bar')) return
+  clearLongPress()
   const point = localPoint(event)
   pointers.set(event.pointerId, point)
   stage.value?.setPointerCapture(event.pointerId)
-  dragging.value = true
   if (pointers.size >= 2) { startPinch(); return }
   const personId = (event.target as Element).closest<HTMLElement>('[data-person]')?.dataset.person
-  gesture = { kind: personId ? 'person' : 'pan', start: point, pan: { ...pan.value }, personId, position: personId ? { ...positions.value[personId] } : undefined, moved: false }
+  gesture = { kind: linkSourceId.value ? 'connect' : personId ? 'person' : 'pan', start: point, pan: { ...pan.value }, personId, position: personId ? { ...positions.value[personId] } : undefined, moved: false }
+  dragging.value = !linkSourceId.value
+  if (linkSourceId.value) updateConnection(event)
+  else if (personId && people.value.length > 1) {
+    longPressTimer = setTimeout(() => {
+      if (gesture?.kind === 'person' && !gesture.moved && pointers.size === 1) beginConnection(personId)
+    }, 500)
+  }
 }
 function pointerMove(event: PointerEvent) {
   if (!pointers.has(event.pointerId)) return
@@ -185,27 +242,35 @@ function pointerMove(event: PointerEvent) {
     return
   }
   if (!gesture) return
-  const dx = point.x - gesture.start.x
-  const dy = point.y - gesture.start.y
-  if (Math.hypot(dx, dy) > 5) gesture.moved = true
+  const dx = point.x - gesture.start.x, dy = point.y - gesture.start.y
+  if (Math.hypot(dx, dy) > 5) { gesture.moved = true; clearLongPress() }
+  if (gesture.kind === 'connect') { updateConnection(event); return }
   if (gesture.kind === 'person' && gesture.personId && gesture.position) {
     if (gesture.moved) positions.value[gesture.personId] = { x: gesture.position.x + dx / zoom.value, y: gesture.position.y + dy / zoom.value }
   } else pan.value = { x: gesture.pan.x + dx, y: gesture.pan.y + dy }
 }
 function pointerEnd(event: PointerEvent) {
   if (!pointers.has(event.pointerId)) return
-  if (gesture?.kind === 'person') {
+  clearLongPress()
+  const cancelled = event.type !== 'pointerup'
+  const connecting = gesture?.kind === 'connect'
+  let targetId = ''
+  if (connecting && !cancelled) { updateConnection(event); targetId = linkTargetId.value }
+  else if (gesture?.kind === 'person') {
     if (gesture.moved) persistLayout()
-    else if (event.type !== 'pointercancel') selectedId.value = gesture.personId || ''
-  } else if (gesture?.kind === 'pan' && !gesture.moved && event.type !== 'pointercancel') selectedId.value = ''
+    else if (!cancelled) selectedId.value = gesture.personId || ''
+  } else if (gesture?.kind === 'pan' && !gesture.moved && !cancelled) selectedId.value = ''
   pointers.delete(event.pointerId)
-  gesture = null
-  pinch = null
+  gesture = null; pinch = null
+  if (stage.value?.hasPointerCapture(event.pointerId)) stage.value.releasePointerCapture(event.pointerId)
   if (pointers.size === 1) {
     const point = [...pointers.values()][0]
     gesture = { kind: 'pan', start: point, pan: { ...pan.value }, moved: true }
   }
-  dragging.value = pointers.size > 0
+  dragging.value = pointers.size > 0 && !linkSourceId.value
+  if (connecting && cancelled) cancelConnection()
+  else if (targetId) requestConnection(targetId)
+  else if (linkSourceId.value) linkEndpoint.value = null
 }
 function wheel(event: WheelEvent) {
   event.preventDefault()
@@ -213,14 +278,20 @@ function wheel(event: WheelEvent) {
   else pan.value = { x: pan.value.x - event.deltaX, y: pan.value.y - event.deltaY }
 }
 function onKey(event: KeyboardEvent) {
-  if (event.key === 'Escape' && fullscreen.value) fullscreen.value = false
+  if (event.key !== 'Escape' || awaitingRelationship.value) return
+  if (linkSourceId.value) cancelConnection()
+  else if (fullscreen.value) fullscreen.value = false
 }
 watch(() => props.scriptId, async () => {
-  selectedId.value = ''; search.value = ''; syncPeople(true)
+  cancelConnection(); selectedId.value = ''; search.value = ''; syncPeople(true)
   await nextTick(); measure(); fit()
 })
 watch(() => people.value.map(person => person.id).join('|'), async () => {
+  if (linkSourceId.value && (!peopleById.value.has(linkSourceId.value) || (linkTargetId.value && !peopleById.value.has(linkTargetId.value)))) cancelConnection()
   syncPeople(); await nextTick(); measure(); fit()
+})
+watch(() => props.relationshipDialogOpen, (open, previous) => {
+  if (previous && !open && awaitingRelationship.value) cancelConnection()
 })
 watch(fullscreen, async value => {
   if (value) { previousBodyOverflow = document.body.style.overflow; document.body.style.overflow = 'hidden' }
@@ -236,6 +307,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onKey)
 })
 onBeforeUnmount(() => {
+  cancelConnection()
   observer?.disconnect()
   window.removeEventListener('keydown', onKey)
   if (fullscreen.value) document.body.style.overflow = previousBodyOverflow
@@ -248,13 +320,13 @@ onBeforeUnmount(() => {
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>{{ people.length }} 位人物</strong><span>{{ relationships.length }} 条手动关系</span></div>
         <div class="graph-actions">
-          <button type="button" class="graph-text-button" @click="emit('add-relationship')"><UiIcon name="plus" :size="18" /><span>添加关系</span></button>
+          <button type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" /><span>添加关系</span></button>
           <button type="button" class="graph-icon-button" :title="fullscreen ? '退出全屏' : '全屏查看'" :aria-label="fullscreen ? '退出全屏' : '全屏查看'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'restore' : 'fullscreen'" /></button>
           <button v-if="fullscreen" type="button" class="graph-icon-button" aria-label="关闭全屏" @click="fullscreen = false"><UiIcon name="close" /></button>
         </div>
       </header>
       <div class="graph-layout">
-        <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @wheel="wheel">
+        <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging, 'is-linking': linkSourceId }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @lostpointercapture="pointerEnd" @contextmenu.prevent @wheel="wheel">
           <div class="graph-ground" aria-hidden="true"></div>
           <div class="graph-world" :style="worldStyle">
             <svg class="graph-edges" width="1" height="1" aria-hidden="true">
@@ -263,8 +335,9 @@ onBeforeUnmount(() => {
                 <line class="edge-line" :x1="edge.from.x" :y1="edge.from.y" :x2="edge.to.x" :y2="edge.to.y" />
                 <g :transform="`translate(${edge.x},${edge.y})`"><rect :x="-edge.labelWidth / 2" y="-13" :width="edge.labelWidth" height="26" rx="13" /><text text-anchor="middle" dominant-baseline="central">{{ edge.label.length > 14 ? `${edge.label.slice(0, 14)}…` : edge.label }}</text></g>
               </g>
+              <g v-if="linkingLine" class="connection-preview"><line class="connection-preview-shadow" :x1="linkingLine.from.x" :y1="linkingLine.from.y + 6" :x2="linkingLine.to.x" :y2="linkingLine.to.y + 6" /><line :class="{ 'has-target': linkTargetId }" :x1="linkingLine.from.x" :y1="linkingLine.from.y" :x2="linkingLine.to.x" :y2="linkingLine.to.y" /></g>
             </svg>
-            <div v-for="(person, index) in people" :key="person.id" class="person-node" :class="{ 'is-selected': selectedId === person.id, 'is-neighbor': adjacent.has(person.id), 'is-muted': selectedId && selectedId !== person.id && !adjacent.has(person.id) }" :style="personStyle(person, index)" :data-person="person.id" tabindex="0" role="button" :aria-label="`查看${person.name}的人物关系`" :aria-pressed="selectedId === person.id" @keydown.enter.prevent="selectedId = person.id" @keydown.space.prevent="selectedId = person.id" @dblclick.stop="emit('open-person', person.id)">
+            <div v-for="(person, index) in people" :key="person.id" class="person-node" :class="{ 'is-selected': linkSourceId ? linkSourceId === person.id : selectedId === person.id, 'is-neighbor': !linkSourceId && adjacent.has(person.id), 'is-link-target': linkTargetId === person.id, 'is-muted': linkSourceId ? person.id !== linkSourceId && person.id !== linkTargetId : selectedId && selectedId !== person.id && !adjacent.has(person.id) }" :style="personStyle(person, index)" :data-person="person.id" tabindex="0" role="button" :aria-label="`查看${person.name}的人物关系`" :aria-pressed="linkSourceId ? linkSourceId === person.id || linkTargetId === person.id : selectedId === person.id" @keydown.enter.prevent="choosePerson(person.id)" @keydown.space.prevent="choosePerson(person.id)" @dblclick.stop="!linkSourceId && emit('open-person', person.id)">
               <div class="graph-person-card">
                 <div class="graph-person-avatar"><img v-if="imageFor(person)" :src="imageFor(person)" alt="" draggable="false" /><span v-else>{{ person.name.slice(0, 1) }}</span></div>
                 <div class="graph-person-card-copy"><strong>{{ person.name }}</strong><span>{{ person.aliases.length ? person.aliases.join(' · ') : '人物档案' }}</span></div>
@@ -273,14 +346,15 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
-          <div class="graph-hud">
+          <div v-if="linkSourceId" class="graph-connection-bar" role="status"><div><strong>连线模式 · {{ peopleById.get(linkSourceId)?.name }}</strong><span>{{ linkTargetId ? `连接到 ${peopleById.get(linkTargetId)?.name}` : '拖到目标人物，或松手后点选人物' }}</span></div><button type="button" @click="cancelConnection"><UiIcon name="close" :size="16" />取消连线</button></div>
+          <div v-else class="graph-hud">
             <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
             <button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '立体' : '平面' }}</button>
           </div>
-          <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button type="button" class="graph-text-button" @click="emit('add-relationship')"><UiIcon name="plus" :size="18" />添加关系</button></div>
-          <div class="graph-help"><span>拖动画布 · 双指缩放 · 拖动人物</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
+          <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
+          <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
         </div>
-        <aside v-if="selected" class="graph-inspector">
+        <aside v-if="selected && !linkSourceId" class="graph-inspector">
           <header><span>人物详情</span><button type="button" class="graph-icon-button" aria-label="关闭人物详情" @click="selectedId = ''"><UiIcon name="close" :size="18" /></button></header>
           <div class="inspector-content">
             <div class="inspector-person"><div class="graph-person-avatar"><img v-if="imageFor(selected)" :src="imageFor(selected)" alt="" /><span v-else>{{ selected.name.slice(0, 1) }}</span></div><div><h3>{{ selected.name }}</h3><p>{{ selected.aliases.length ? selected.aliases.join(' · ') : '暂无别名' }}</p></div></div>
@@ -313,6 +387,19 @@ onBeforeUnmount(() => {
 .graph-layout { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
 .graph-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 30%, #fff 0%, #f6f8f4 75%); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
 .graph-stage.is-dragging { cursor: grabbing; }
+.graph-stage.is-linking, .is-linking .person-node { cursor: crosshair; }
+.graph-stage, .person-node, .person-node * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.is-linking .person-node.is-muted { opacity: .22; }
+.person-node.is-link-target { z-index: 3; }
+.person-node.is-link-target .graph-person-card { border-color: #6d9b7e; background: linear-gradient(145deg, #fff, #e9f4e9); box-shadow: 0 0 0 4px #87b89442, 0 12px 26px #315c4826; }
+.connection-preview line { stroke: #b87850; stroke-width: 3; stroke-dasharray: 9 6; stroke-linecap: round; }
+.connection-preview line.has-target { stroke: #457858; stroke-dasharray: none; }
+.connection-preview line.connection-preview-shadow { stroke: #315c48; stroke-width: 7; stroke-dasharray: none; opacity: .1; }
+.graph-connection-bar { position: absolute; z-index: 5; top: 16px; right: 16px; left: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #d3e3d0; border-radius: 12px; background: #fffffff5; box-shadow: 0 6px 20px #315c4812; }
+.graph-connection-bar > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.graph-connection-bar strong { color: #315c48; font-size: 13px; }
+.graph-connection-bar span { color: #87977f; font-size: 11px; }
+.graph-connection-bar button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 40px; padding: 0 10px; border: 1px solid #dce6d8; border-radius: 9px; background: #f7faf4; color: #57764f; font: inherit; font-size: 12px; }
 .graph-ground { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(#dce3da 1px, transparent 1px); background-size: 24px 24px; opacity: .7; transition: transform .3s ease, opacity .3s ease; }
 .is-spatial .graph-ground { transform: perspective(800px) rotateX(14deg) scale(1.18); transform-origin: 50% 70%; opacity: .55; }
 .graph-world { position: absolute; top: 0; left: 0; width: 1px; height: 1px; transform-origin: 0 0; will-change: transform; }

@@ -303,9 +303,10 @@ async function capture() {
   if (!activeScriptId.value) return
   let message = '照片已保存，可继续拍摄'
   await action(async () => {
-    const captured = await vault.captureClues(activeScriptId.value)
+    const result = await vault.captureClues(activeScriptId.value)
     await loadWorkspace()
-    if (captured.length && autoOrganize.value) {
+    if (!result.clues.length) { message = '这条线索已存在，已跳过重复录入'; return }
+    if (autoOrganize.value) {
       try { await performOrganization(); message = '照片已录入，整理建议已更新' }
       catch (error) { message = `照片已保存，整理未完成：${error instanceof Error ? error.message : '请重试'}` }
     }
@@ -316,11 +317,14 @@ async function importPhotos() {
   if (!activeScriptId.value) return
   let message = '图片已导入并识别'
   await action(async () => {
-    const imported = await vault.importCluePhotos(activeScriptId.value)
+    const result = await vault.importCluePhotos(activeScriptId.value)
+    const imported = result.clues
     await loadWorkspace()
+    const skipped = result.skippedDuplicates ? `，跳过 ${result.skippedDuplicates} 张重复照片` : ''
+    message = imported.length ? `已录入 ${imported.length} 张图片${skipped}` : '所选图片均为重复线索，已跳过'
     if (imported.length && autoOrganize.value) {
-      try { await performOrganization(); message = '图片已录入，整理建议已更新' }
-      catch (error) { message = `图片已保存，整理未完成：${error instanceof Error ? error.message : '请重试'}` }
+      try { await performOrganization(); message = `图片已录入，整理建议已更新${skipped}` }
+      catch (error) { message = `图片已保存，整理未完成：${error instanceof Error ? error.message : '请重试'}${skipped}` }
     }
   })
   notify(message)

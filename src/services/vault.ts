@@ -7,7 +7,8 @@ import { Ocr } from '@jcesarmobile/capacitor-ocr'
 import JSZip from 'jszip'
 
 export type ScriptRecord = { id: string; name: string; playDate: string; coverPath: string; createdAt: string }
-export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
+export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; ocrText: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
+export type CluePhotoImportResult = { clues: ClueRecord[]; skippedDuplicates: number }
 export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
 export type TimelineRecord = { id: string; scriptId: string; title: string; startsAt: string; personIds: string[]; clueId: string; confirmed: boolean; yearlessMarkerIgnored?: boolean }
@@ -118,6 +119,14 @@ function base64ToBytes(data: string): Uint8Array {
   const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
   return bytes
+}
+async function imageFingerprint(data: string): Promise<string> {
+  if (!globalThis.crypto?.subtle) return ''
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', base64ToBytes(cleanBase64(data))))
+  return Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('')
+}
+function normalizeClueText(text: string): string {
+  return text.normalize('NFKC').toLocaleLowerCase().replace(/[\s“”‘’]/g, '')
 }
 function cleanBase64(data: string): string { return data.includes(',') ? data.slice(data.indexOf(',') + 1) : data }
 function mimeForPath(path: string): string {
@@ -270,15 +279,24 @@ async function sourceBase64(uri: string): Promise<string> {
   const response = await fetch(uri)
   return bytesToBase64(new Uint8Array(await response.arrayBuffer()))
 }
-async function addPhoto(scriptId: string, uri: string, mime: string): Promise<ClueRecord> {
+async function addPhoto(scriptId: string, uri: string, mime: string): Promise<ClueRecord | null> {
   const data = await sourceBase64(uri)
+  const [imageHash, result] = await Promise.all([
+    imageFingerprint(data),
+    native ? Ocr.process({ image: `data:${mime};base64,${data}` }) : Promise.resolve({ results: [] as { text: string }[] }),
+  ])
+  const ocrText = result.results.map((item) => item.text).join('\n')
+  const normalizedText = normalizeClueText(ocrText)
+  const existing = await listClues(scriptId)
+  const duplicate = existing.some(clue =>
+    (Boolean(imageHash) && clue.imageHash === imageHash) ||
+    (Boolean(normalizedText) && normalizeClueText(clue.ocrText) === normalizedText),
+  )
+  if (duplicate) return null
   const imagePath = await saveImage(scriptId, data, mime)
   try {
-    const result = native ? await Ocr.process({ image: `data:${mime};base64,${data}` }) : { results: [] as { text: string }[] }
-    const ocrText = result.results.map((item) => item.text).join('\n')
-    const existing = await listClues(scriptId)
     const number = Math.max(0, ...existing.map((clue) => clue.number)) + 1
-    const clue: ClueRecord = { id: uid(), scriptId, number, title: `线索 ${String(number).padStart(3, '0')}`, imagePath, displayImagePath: '', ocrText, round: 1, category: categoryFromText(ocrText), tags: [], favorite: false, notes: '', rotation: 0, createdAt: now() }
+    const clue: ClueRecord = { id: uid(), scriptId, number, title: `线索 ${String(number).padStart(3, '0')}`, imagePath, displayImagePath: '', ocrText, imageHash, round: 1, category: categoryFromText(ocrText), tags: [], favorite: false, notes: '', rotation: 0, createdAt: now() }
     await putRecord('clues', clue)
     await addTimeCandidates(clue)
     return clue
@@ -287,21 +305,25 @@ async function addPhoto(scriptId: string, uri: string, mime: string): Promise<Cl
     throw error
   }
 }
-export async function captureClues(scriptId: string): Promise<ClueRecord[]> {
+export async function captureClues(scriptId: string): Promise<CluePhotoImportResult> {
   const photo = await Camera.takePhoto({ quality: 90, includeMetadata: true })
   const uri = photo.uri || photo.webPath
   if (!uri) throw new Error('无法读取拍摄照片')
-  return [await addPhoto(scriptId, uri, mimeForPath(uri))]
+  const clue = await addPhoto(scriptId, uri, mimeForPath(uri))
+  return { clues: clue ? [clue] : [], skippedDuplicates: clue ? 0 : 1 }
 }
-export async function importCluePhotos(scriptId: string): Promise<ClueRecord[]> {
+export async function importCluePhotos(scriptId: string): Promise<CluePhotoImportResult> {
   const selection = await Camera.chooseFromGallery({ allowMultipleSelection: true, limit: 0, includeMetadata: true })
   const added: ClueRecord[] = []
+  let skippedDuplicates = 0
   for (const photo of selection.results) {
     const uri = photo.uri || photo.webPath
     if (!uri) throw new Error('无法读取相册照片')
-    added.push(await addPhoto(scriptId, uri, mimeForPath(uri)))
+    const clue = await addPhoto(scriptId, uri, mimeForPath(uri))
+    if (clue) added.push(clue)
+    else skippedDuplicates += 1
   }
-  return added
+  return { clues: added, skippedDuplicates }
 }
 export async function updateClue(id: string, patch: Partial<ClueRecord>): Promise<ClueRecord> {
   const existing = await getRecord<ClueRecord>('clues', id)

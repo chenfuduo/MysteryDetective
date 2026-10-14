@@ -14,6 +14,8 @@ import PersonWorkspace from './components/PersonWorkspace.vue'
 import PersonMergeDialog from './components/PersonMergeDialog.vue'
 import RecoveryPanel from './components/RecoveryPanel.vue'
 import RecordComparison from './components/RecordComparison.vue'
+import WorkspaceSearch from './components/WorkspaceSearch.vue'
+import WorkspaceGuide from './components/WorkspaceGuide.vue'
 import { getDraft, saveDraft, removeDraft, flushDrafts } from './services/drafts'
 import { mergePeople } from './services/personMerge'
 import { organizeIncrementally, getOrganizationTaskStates, type OrganizationTaskState } from './services/organizationWorkflow'
@@ -42,6 +44,8 @@ const pendingOcrClues = computed(() => clues.value.filter(clue => clue.ocrStatus
 const recentClues = computed(() => [...clues.value].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5))
 const captureRoundOptions = computed(() => [...new Set(['1', '2', '3', '4', '5', captureRound.value, String(Math.max(1, Number(captureRound.value) || 1, ...clues.value.map(clue => Number(clue.round) || 1)) + 1), ...rounds.value.map(String)])].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })))
 const recoveryOpen = ref(false)
+const workspaceSearchOpen = ref(false)
+const workspaceGuideOpen = ref(false)
 const personMergeSourceId = ref('')
 const comparisonEventIds = ref<string[]>([])
 const reviewUndo = ref<ReviewUndo | null>(null)
@@ -137,6 +141,7 @@ const timelineExplorer = ref<{ enterFullscreen: () => void; focusEvent: (eventId
 let timelineOrientationQuery: MediaQueryList | null = null
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let searchSequence = 0
+let workspaceLocationHydrating = false
 let loadedWorkspaceScriptId = ''
 let captureRoundHydrating = false
 let clueDraftHydrating = false
@@ -165,11 +170,11 @@ const toolNav = [
   { id: 'timeline', label: '时间线', icon: 'clock', view: 'timeline' },
   { id: 'board', label: '整理板', icon: 'board', view: 'board' },
   { id: 'notes', label: '笔记', icon: 'note', view: 'notes' },
-  { id: 'compare', label: '线索对照', icon: 'compare', view: 'compare' },
+  { id: 'compare', label: '记录对照', icon: 'compare', view: 'compare' },
 ] as const
 const activeToolId = computed(() => view.value === 'people' ? relationGraph.value ? 'relationships' : 'profiles' : view.value)
 const activeNavId = computed(() => ['people', 'timeline', 'board', 'notes', 'compare'].includes(view.value) ? 'organize' : view.value)
-const viewLabel = computed(() => view.value === 'people' && relationGraph.value ? '人物关系' : ({ clues: '线索库', organize: '整理总览', people: '人物档案', timeline: '时间线', board: '自由整理板', notes: '笔记', compare: '线索对照', settings: '剧本管理' })[view.value])
+const viewLabel = computed(() => view.value === 'people' && relationGraph.value ? '人物关系' : ({ clues: '线索库', organize: '整理总览', people: '人物档案', timeline: '时间线', board: '自由整理板', notes: '笔记', compare: '记录对照', settings: '剧本管理' })[view.value])
 const activeScript = computed(() => scripts.value.find(item => item.id === activeScriptId.value))
 const selectedClue = computed(() => clues.value.find(item => item.id === detailId.value))
 const selectedBoardItem = computed(() => boardItems.value.find(item => item.id === selectedBoardId.value))
@@ -188,7 +193,7 @@ const rounds = computed(() => [...new Set(clues.value.map(item => item.round).fi
 const categories = computed(() => [...new Set(clues.value.map(item => item.category).filter(Boolean))].sort())
 const visibleClues = computed(() => clues.value.filter(item => {
   if (searchIds.value && !searchIds.value.includes(item.id)) return false
-  if (filterRound.value && item.round !== filterRound.value) return false
+  if (filterRound.value && String(item.round) !== String(filterRound.value)) return false
   if (filterCategory.value && item.category !== filterCategory.value) return false
   if (favoriteOnly.value && !item.favorite) return false
   if (filterPerson.value) {
@@ -197,6 +202,88 @@ const visibleClues = computed(() => clues.value.filter(item => {
   }
   return true
 }).sort((a, b) => b.createdAt.localeCompare(a.createdAt)))
+const hasClueFilters = computed(() => Boolean(query.value.trim() || filterRound.value || filterCategory.value || filterPerson.value || favoriteOnly.value))
+const activeClueFilters = computed(() => [
+  ...(query.value.trim() ? [{ kind: 'query', label: `搜索：${query.value.trim()}` }] : []),
+  ...(filterRound.value ? [{ kind: 'round', label: `第 ${filterRound.value} 轮` }] : []),
+  ...(filterCategory.value ? [{ kind: 'category', label: filterCategory.value }] : []),
+  ...(filterPerson.value ? [{ kind: 'person', label: people.value.find(person => person.id === filterPerson.value)?.name || '人物筛选' }] : []),
+  ...(favoriteOnly.value ? [{ kind: 'favorite', label: '仅收藏' }] : []),
+])
+function clearClueFilter(kind?: string) {
+  if (!kind || kind === 'query') { query.value = ''; searchIds.value = null; ++searchSequence }
+  if (!kind || kind === 'round') filterRound.value = ''
+  if (!kind || kind === 'category') filterCategory.value = ''
+  if (!kind || kind === 'person') filterPerson.value = ''
+  if (!kind || kind === 'favorite') favoriteOnly.value = false
+}
+// Navigation preferences are local UI state, scoped by script like the workspace data.
+function saveWorkspaceLocation() {
+  if (workspaceLocationHydrating || !activeScriptId.value) return
+  try {
+    localStorage.setItem(`clue-vault:workspace-location:${activeScriptId.value}`, JSON.stringify({
+      version: 1, view: view.value, query: query.value, round: String(filterRound.value),
+      category: filterCategory.value, personId: filterPerson.value, favoriteOnly: favoriteOnly.value,
+      layout: layout.value, timelinePersonId: timelinePersonFilter.value, relationGraph: relationGraph.value,
+    }))
+  } catch { /* Storage pressure must not interrupt reading or capturing clues. */ }
+}
+function restoreWorkspaceLocation(scriptId: string) {
+  workspaceLocationHydrating = true
+  try {
+    let saved: Record<string, unknown> = {}
+    try {
+      const raw = JSON.parse(localStorage.getItem(`clue-vault:workspace-location:${scriptId}`) || 'null')
+      if (raw && raw.version === 1) saved = raw
+    } catch { /* Old or unavailable UI preferences use the default workspace. */ }
+    const views = ['clues', 'organize', 'people', 'timeline', 'board', 'notes', 'compare', 'settings']
+    view.value = typeof saved.view === 'string' && views.includes(saved.view) ? saved.view as typeof view.value : 'clues'
+    mode.value = view.value === 'clues' ? 'capture' : 'organize'
+    query.value = typeof saved.query === 'string' ? saved.query : ''
+    filterRound.value = typeof saved.round === 'string' ? saved.round : ''
+    filterCategory.value = typeof saved.category === 'string' ? saved.category : ''
+    filterPerson.value = typeof saved.personId === 'string' ? saved.personId : ''
+    favoriteOnly.value = saved.favoriteOnly === true
+    layout.value = saved.layout === 'grid' ? 'grid' : 'list'
+    timelinePersonFilter.value = typeof saved.timelinePersonId === 'string' ? saved.timelinePersonId : ''
+    relationGraph.value = saved.relationGraph === true
+    searchIds.value = query.value.trim() ? [] : null
+    ++searchSequence
+  } finally { workspaceLocationHydrating = false }
+}
+function openWorkspaceSearch() {
+  if (!activeScriptId.value) return
+  workspaceGuideOpen.value = false
+  aiStatusOpen.value = false
+  workspaceSearchOpen.value = true
+}
+function openSearchClue(id: string, quote = '') { workspaceSearchOpen.value = false; openTimelineClue(id, quote) }
+function openSearchPerson(id: string) { workspaceSearchOpen.value = false; openPersonWorkspace(id) }
+async function openSearchEvent(id: string) {
+  const event = events.value.find(item => item.id === id && item.scriptId === activeScriptId.value && item.confirmed)
+  if (!event) return
+  workspaceSearchOpen.value = false
+  await focusWorkspaceEvent(event)
+}
+function openSearchNote(id: string) {
+  const note = notes.value.find(item => item.id === id && item.scriptId === activeScriptId.value)
+  if (!note) return
+  workspaceSearchOpen.value = false
+  switchView('notes')
+  void openNoteDialog(note)
+}
+function navigateFromGuide(next: typeof view.value, section?: 'profiles' | 'relationships') {
+  workspaceGuideOpen.value = false
+  switchView(next, section)
+}
+function handleWorkspaceShortcut(event: KeyboardEvent) {
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k' || event.altKey || event.shiftKey) return
+  if (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return
+  if (clueDialog.value || noteDialog.value || personDialog.value || eventDialog.value || relationshipDialog.value || scriptDialog.value || boardDialog.value || boardLinkDialog.value || recoveryOpen.value || personMergeSourceId.value) return
+  if (!activeScriptId.value) return
+  event.preventDefault()
+  openWorkspaceSearch()
+}
 const personClueCount = (person: PersonRecord) => clues.value.filter(clue => [person.name, ...person.aliases].some(name => name && `${clue.title} ${clue.ocrText}`.includes(name))).length
 const boardNodes = computed<Node[]>(() => boardItems.value.map(item => ({
   id: item.id,
@@ -261,7 +348,11 @@ async function loadImages() {
 async function loadScripts() {
   scripts.value = await vault.listScripts()
   if (activeScriptId.value && !scripts.value.some(item => item.id === activeScriptId.value)) activeScriptId.value = ''
-  if (!activeScriptId.value && scripts.value.length) activeScriptId.value = scripts.value[0].id
+  if (!activeScriptId.value && scripts.value.length) {
+    let previousId = ''
+    try { previousId = localStorage.getItem('clue-vault:last-script') || '' } catch {}
+    activeScriptId.value = scripts.value.some(script => script.id === previousId) ? previousId : scripts.value[0].id
+  }
   await loadImages()
 }
 async function loadWorkspace() {
@@ -285,6 +376,8 @@ async function loadWorkspace() {
   const scopedClues = nextClues.filter(item => item.scriptId === id)
   clues.value = scopedClues
   people.value = nextPeople.filter(item => item.scriptId === id)
+  if (filterPerson.value && !people.value.some(person => person.id === filterPerson.value)) filterPerson.value = ''
+  if (timelinePersonFilter.value && !people.value.some(person => person.id === timelinePersonFilter.value)) timelinePersonFilter.value = ''
   relationships.value = nextRelationships.filter(item => item.scriptId === id)
   events.value = nextEvents.filter(item => item.scriptId === id)
   boardItems.value = nextBoardItems.filter(item => item.scriptId === id)
@@ -371,6 +464,7 @@ async function removeScript(script: ScriptRecord) {
   if (!window.confirm(`删除「${script.name}」及其中全部线索、人物和笔记？此操作无法撤销。`)) return
   await action(async () => {
     await vault.deleteScript(script.id)
+    try { localStorage.removeItem(`clue-vault:workspace-location:${script.id}`); if (localStorage.getItem('clue-vault:last-script') === script.id) localStorage.removeItem('clue-vault:last-script') } catch {}
     activeScriptId.value = ''
     await loadScripts()
     if (activeScriptId.value) await loadWorkspace()
@@ -878,7 +972,7 @@ function refreshAiRoutingOnVisibility() {
 function refreshAiRoutingOnNetwork() {
   void initializeAiRouting()
 }
-watch(activeScriptId, () => { captureRoundReady.value = false; flushEditorDrafts(); ++clueDraftSequence; ++noteDraftSequence; clueDialog.value = false; noteDialog.value = false; clueDraftContext = null; noteDraftContext = null; personWorkspaceId.value = ''; personMergeSourceId.value = ''; recoveryOpen.value = false; reviewUndo.value = null; taskStates.value = []; organizationProgress.value = ''; aiStatusOpen.value = false }, { flush: 'sync' })
+watch(activeScriptId, () => { captureRoundReady.value = false; flushEditorDrafts(); ++clueDraftSequence; ++noteDraftSequence; clueDialog.value = false; noteDialog.value = false; clueDraftContext = null; noteDraftContext = null; personWorkspaceId.value = ''; personMergeSourceId.value = ''; recoveryOpen.value = false; reviewUndo.value = null; taskStates.value = []; organizationProgress.value = ''; aiStatusOpen.value = false; workspaceSearchOpen.value = false; workspaceGuideOpen.value = false; if (activeScriptId.value) { restoreWorkspaceLocation(activeScriptId.value); try { localStorage.setItem('clue-vault:last-script', activeScriptId.value) } catch {} } }, { flush: 'sync' })
 watch(captureRound, (value, previous) => {
   if (captureRoundHydrating || !activeScriptId.value) return
   const round = value.trim() || '1', scriptId = activeScriptId.value
@@ -910,20 +1004,23 @@ function updateTimelineOrientation() {
 }
 watch(timelineSpacingScale, value => localStorage.setItem('clue-vault:timeline-scale', String(value)))
 watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize'; if (next !== 'timeline') timelineImmersive.value = false })
-watch(activeScriptId, async () => { query.value = ''; filterRound.value = ''; filterCategory.value = ''; filterPerson.value = ''; searchIds.value = null; timelinePersonFilter.value = ''; timelineImmersive.value = false; await loadWorkspace() })
-watch(query, async value => {
+watch(activeScriptId, async () => { timelineImmersive.value = false; await loadWorkspace() })
+watch(() => [view.value, query.value, filterRound.value, filterCategory.value, filterPerson.value, favoriteOnly.value, layout.value, timelinePersonFilter.value, relationGraph.value], saveWorkspaceLocation, { flush: 'sync' })
+watch([query, activeScriptId], async ([value, scriptId]) => {
   const sequence = ++searchSequence
-  if (!value.trim() || !activeScriptId.value) { searchIds.value = null; return }
+  if (!value.trim() || !scriptId) { searchIds.value = null; return }
+  searchIds.value = []
   try {
-    const results = await vault.searchClues(activeScriptId.value, value.trim())
-    if (sequence === searchSequence) searchIds.value = results.map(item => item.id)
-  } catch { if (sequence === searchSequence) searchIds.value = [] }
+    const results = await vault.searchClues(scriptId, value.trim())
+    if (sequence === searchSequence && scriptId === activeScriptId.value) searchIds.value = results.filter(item => item.scriptId === scriptId).map(item => item.id)
+  } catch { if (sequence === searchSequence && scriptId === activeScriptId.value) searchIds.value = [] }
 })
 watch(() => aiRoute.provider, provider => {
   apiKeyConfigured.value = provider ? apiKeysConfigured[provider] : false
   if (provider) void refreshApiKeyConfiguration(provider)
 }, { immediate: true })
 onMounted(async () => {
+  document.addEventListener('keydown', handleWorkspaceShortcut)
   document.addEventListener('visibilitychange', refreshAiRoutingOnVisibility)
   window.addEventListener('pagehide', flushEditorDrafts)
   window.addEventListener('online', refreshAiRoutingOnNetwork)
@@ -936,7 +1033,7 @@ onMounted(async () => {
   timelineOrientationQuery.addEventListener('change', updateTimelineOrientation)
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
 })
-onUnmounted(() => { flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
+onUnmounted(() => { document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -953,15 +1050,15 @@ onUnmounted(() => { flushEditorDrafts(); window.removeEventListener('pagehide', 
         <div class="sidebar-bottom"><div class="offline-chip"><span class="offline-dot"></span>本机保存 · AI 可选</div><button class="sidebar-small-button" @click="openScriptDialog()"><UiIcon name="plus" :size="16" />新建剧本</button></div>
       </aside>
       <main class="main-panel">
-        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><div class="ai-service-menu"><button class="ai-route-indicator" :class="aiStatusTone" :title="aiStatusTitle" :aria-expanded="aiStatusOpen" @click="openAiStatus"><span class="ai-route-dot" aria-hidden="true"></span><span aria-live="polite">{{ aiStatusLabel }}</span></button><section v-if="aiStatusOpen" class="ai-service-popover" aria-label="AI 服务状态"><header><strong>AI 服务状态</strong><button aria-label="关闭服务状态" @click="aiStatusOpen = false"><UiIcon name="close" :size="17" /></button></header><dl><dt>当前选择</dt><dd>{{ selectedProviderLabel }} · {{ aiRoute.countryCode || '地区待检测' }}</dd><dt>整理状态</dt><dd>{{ organizer.organizationRun.message || aiRoute.message }}</dd></dl><p v-if="organizer.organizationRun.lastError" class="service-error">{{ organizer.organizationRun.lastError }}</p><p v-if="organization?.analysis?.provider === 'local'">{{ organization.analysis.localReason === 'quota' ? 'API 额度不足，本次使用本地整理。' : '网络不可用，本次使用本地整理。' }}</p><div><button :disabled="busy || aiRoute.phase === 'checking'" @click="retryAiService">重新检测</button><button :disabled="busy || !clues.length" @click="aiStatusOpen = false; runOrganization()">继续整理</button><button @click="aiStatusOpen = false; switchView('settings')">管理密钥</button></div></section></div><button v-if="reviewUndo && reviewUndo.scriptId === activeScriptId" class="secondary-button topbar-undo" :disabled="busy" :title="`撤销${reviewUndo.label}`" @click="undoLastChange"><UiIcon name="rotate" :size="17" />撤销</button><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
+        <header class="topbar"><div class="topbar-title"><button v-if="activeNavId === 'organize' && view !== 'organize'" class="icon-button breadcrumb-back" title="返回整理总览" @click="switchView('organize')"><UiIcon name="arrowLeft" :size="18" /></button><span class="topbar-parent">{{ activeScript?.name || '我的剧本' }}</span><UiIcon name="chevron" :size="14" /><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><button v-if="activeScript" class="icon-button workspace-search-trigger" title="搜索当前剧本（⌘ / Ctrl + K）" aria-label="搜索当前剧本的线索、人物、事件和笔记" @click="openWorkspaceSearch"><UiIcon name="search" :size="20" /></button><button v-if="activeScript" class="icon-button workspace-guide-trigger" title="使用指南" aria-label="打开使用指南" @click="workspaceGuideOpen = true; aiStatusOpen = false"><UiIcon name="info" :size="19" /></button><div class="ai-service-menu"><button class="ai-route-indicator" :class="aiStatusTone" :title="aiStatusTitle" :aria-expanded="aiStatusOpen" @click="openAiStatus"><span class="ai-route-dot" aria-hidden="true"></span><span aria-live="polite">{{ aiStatusLabel }}</span></button><section v-if="aiStatusOpen" class="ai-service-popover" aria-label="AI 服务状态"><header><strong>AI 服务状态</strong><button aria-label="关闭服务状态" @click="aiStatusOpen = false"><UiIcon name="close" :size="17" /></button></header><dl><dt>当前选择</dt><dd>{{ selectedProviderLabel }} · {{ aiRoute.countryCode || '地区待检测' }}</dd><dt>整理状态</dt><dd>{{ organizer.organizationRun.message || aiRoute.message }}</dd></dl><p v-if="organizer.organizationRun.lastError" class="service-error">{{ organizer.organizationRun.lastError }}</p><p v-if="organization?.analysis?.provider === 'local'">{{ organization.analysis.localReason === 'quota' ? 'API 额度不足，本次使用本地整理。' : '网络不可用，本次使用本地整理。' }}</p><div><button :disabled="busy || aiRoute.phase === 'checking'" @click="retryAiService">重新检测</button><button :disabled="busy || !clues.length" @click="aiStatusOpen = false; runOrganization()">继续整理</button><button @click="aiStatusOpen = false; switchView('settings')">管理密钥</button></div></section></div><button v-if="reviewUndo && reviewUndo.scriptId === activeScriptId" class="secondary-button topbar-undo" :disabled="busy" :title="`撤销${reviewUndo.label}`" @click="undoLastChange"><UiIcon name="rotate" :size="17" />撤销</button><span v-if="busy" class="working-state" role="status"><span></span>处理中</span><button v-if="activeScript && view !== 'clues'" class="secondary-button topbar-capture" :disabled="busy" @click="capture"><UiIcon name="camera" :size="17" />拍照</button><button class="icon-button topbar-export" title="导出剧本档案" :disabled="!activeScript" @click="exportArchive"><UiIcon name="download" :size="19" /></button></div></header>
         <div v-if="!activeScript" class="empty-home"><div class="empty-art"><div class="art-paper art-paper-one"></div><div class="art-paper art-paper-two"></div><div class="art-paper art-paper-three"><UiIcon name="search" :size="38" /></div></div><h1>从一个剧本开始</h1><p>拍下线索，OCR 文字在本机识别。需要时可选择 AI 整理。</p><div class="empty-home-actions"><button class="primary-button" @click="openScriptDialog()"><UiIcon name="plus" :size="18" />新建剧本</button><button class="secondary-button" @click="importArchive"><UiIcon name="upload" :size="18" />导入档案</button></div></div>
         <template v-else>
           <section v-if="view === 'clues'" class="page page-clues">
             <div class="page-header capture-header"><div><span class="capture-eyebrow">当前剧本</span><h1>线索库</h1><p>拍照录入，文字自动识别并保存。</p></div><div class="header-actions capture-actions"><label class="capture-round-control">当前轮次<select v-model="captureRound" :disabled="busy || !captureRoundReady" aria-label="当前搜证轮次"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select></label><button class="secondary-button" :disabled="busy || !captureRoundReady" @click="importPhotos"><UiIcon name="image" :size="18" />选照片</button><button class="primary-button capture-primary" :disabled="busy || !captureRoundReady" @click="capture"><UiIcon name="camera" :size="23" />拍照录入</button></div></div>
             <details v-if="recentClues.length" class="recent-capture" :open="recentCaptureOpen" @toggle="recentCaptureOpen = ($event.target as HTMLDetailsElement).open"><summary>最近录入 <span>最近 {{ recentClues.length }} 张 · 快速查看和调整</span></summary><div class="recent-capture-list"><article v-for="clue in recentClues" :key="clue.id"><button class="recent-clue-source" @click="openClue(clue)"><img v-if="imageUrls[clue.displayImagePath || clue.imagePath]" :src="imageUrls[clue.displayImagePath || clue.imagePath]" :alt="clue.title" /><span><strong>#{{ String(clue.number).padStart(3, '0') }} {{ clue.title }}</strong><small>{{ clue.ocrStatus === 'failed' ? '识别失败' : clue.ocrStatus === 'pending' ? '等待识别' : clue.ocrText.trim() ? 'OCR 已保存' : '暂无识别文字' }}</small></span></button><select :value="clue.round" :disabled="busy" aria-label="调整线索轮次" @change="changeRecentRound(clue.id, ($event.target as HTMLSelectElement).value)"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select><button v-if="!clue.ocrText.trim()" class="text-button" :disabled="busy" @click="retryOcr(clue)">重试识别</button><button class="icon-button" aria-label="删除最近录入线索" :disabled="busy" @click="removeClue(clue)"><UiIcon name="trash" :size="17" /></button></article></div></details>
             <div class="clue-toolbar"><label class="search-field"><UiIcon name="search" :size="19" /><input v-model="query" placeholder="搜索线索文字" aria-label="搜索线索" /><button v-if="query" class="text-clear" @click="query = ''"><UiIcon name="close" :size="15" /></button></label><details class="filter-disclosure"><summary>筛选</summary><div class="toolbar-selects"><select v-model="filterRound" aria-label="筛选轮次"><option value="">全部轮次</option><option v-for="round in rounds" :key="round" :value="round">{{ round }}</option></select><select v-model="filterCategory" aria-label="筛选分类"><option value="">全部分类</option><option v-for="category in categories" :key="category" :value="category">{{ category }}</option></select><select v-model="filterPerson" aria-label="筛选人物"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select><button :class="['filter-favorite', { active: favoriteOnly }]" @click="favoriteOnly = !favoriteOnly"><UiIcon name="heart" :size="17" />收藏</button></div></details></div>
-            <div class="round-quick-filter"><button :class="{ active: filterRound === captureRound }" @click="filterRound = captureRound">本轮</button><button :class="{ active: !filterRound }" @click="filterRound = ''">全部轮次</button></div><div class="result-bar"><span>{{ visibleClues.length }} 条线索<span v-if="query"> · 搜索「{{ query }}」</span></span><div class="view-toggle"><button :class="{ active: layout === 'grid' }" title="网格视图" @click="layout = 'grid'"><UiIcon name="grid" :size="18" /></button><button :class="{ active: layout === 'list' }" title="列表视图" @click="layout = 'list'"><UiIcon name="list" :size="18" /></button></div></div>
-            <div v-if="!visibleClues.length" class="section-empty"><div class="section-empty-icon"><UiIcon :name="clues.length ? 'search' : 'camera'" :size="31" /></div><h2>{{ clues.length ? '没有符合条件的线索' : '还没有线索' }}</h2><p>{{ clues.length ? '试着调整搜索词或筛选条件。' : '拍摄或导入第一张线索照片，文字会在本机自动识别。' }}</p><button v-if="!clues.length" class="primary-button" @click="capture"><UiIcon name="camera" :size="18" />拍摄线索</button></div>
+            <div class="round-quick-filter"><button :class="{ active: filterRound === captureRound }" @click="filterRound = captureRound">本轮</button><button :class="{ active: !filterRound }" @click="filterRound = ''">全部轮次</button></div><div v-if="hasClueFilters" class="active-clue-filters" aria-label="当前筛选条件"><button v-for="filter in activeClueFilters" :key="filter.kind" :aria-label="`移除${filter.label}筛选`" @click="clearClueFilter(filter.kind)">{{ filter.label }}<UiIcon name="close" :size="13" /></button><button class="clear-all-filters" @click="clearClueFilter()">清除全部</button></div><div class="result-bar"><span>{{ visibleClues.length }} 条线索<span v-if="query"> · 搜索「{{ query }}」</span></span><div class="view-toggle"><button :class="{ active: layout === 'grid' }" title="网格视图" @click="layout = 'grid'"><UiIcon name="grid" :size="18" /></button><button :class="{ active: layout === 'list' }" title="列表视图" @click="layout = 'list'"><UiIcon name="list" :size="18" /></button></div></div>
+            <div v-if="!visibleClues.length" class="section-empty"><div class="section-empty-icon"><UiIcon :name="clues.length ? 'search' : 'camera'" :size="31" /></div><h2>{{ clues.length ? '没有符合条件的线索' : '还没有线索' }}</h2><p>{{ clues.length ? '试着调整搜索词或筛选条件。' : '拍摄或导入第一张线索照片，文字会在本机自动识别。' }}</p><button v-if="clues.length && hasClueFilters" class="secondary-button" @click="clearClueFilter()">清除筛选，查看全部线索</button><button v-if="!clues.length" class="primary-button" @click="capture"><UiIcon name="camera" :size="18" />拍摄线索</button></div>
             <div v-else :class="['clue-collection', layout]"><article v-for="clue in visibleClues" :key="clue.id" class="clue-card" @click="openClue(clue)"><div class="clue-image"><img v-if="imageUrls[clue.displayImagePath || clue.imagePath]" :src="imageUrls[clue.displayImagePath || clue.imagePath]" :alt="clue.title" :style="{ transform: `rotate(${clue.rotation}deg)` }" /><UiIcon v-else name="image" :size="31" /><span class="clue-number">#{{ String(clue.number).padStart(3, '0') }}</span><button :class="['favorite-button', { active: clue.favorite }]" title="收藏线索" @click.stop="toggleFavorite(clue)"><UiIcon name="heart" :size="17" /></button></div><div class="clue-card-body"><div class="clue-card-meta"><span v-if="clue.round">{{ clue.round }}</span><span v-if="clue.category">{{ clue.category }}</span></div><h2 v-html="highlight(clue.title)"></h2><p v-if="clue.ocrText" v-html="highlight(shortText(clue.ocrText, layout === 'list' ? 165 : 74))"></p><p v-else class="muted">暂无识别文字</p><div class="clue-card-foot"><span>{{ dateLabel(clue.createdAt) }}</span><button :class="['compare-pick', { active: compareIds.includes(clue.id) }]" @click.stop="toggleCompare(clue.id)"><UiIcon name="compare" :size="15" />{{ compareIds.includes(clue.id) ? '已对照' : '加入对照' }}</button></div></div></article></div>
           </section>
           <template v-else-if="view === 'organize'">
@@ -995,6 +1092,8 @@ onUnmounted(() => { flushEditorDrafts(); window.removeEventListener('pagehide', 
       <RecoveryPanel v-if="recoveryOpen" :script-id="activeScriptId" @close="recoveryOpen = false" @restored="loadWorkspace" />
     <Teleport to="body">
       <div v-if="toast" class="toast" role="status">{{ toast }}</div>
+      <WorkspaceSearch v-if="workspaceSearchOpen && activeScript" :key="activeScriptId" :script-id="activeScriptId" :script-name="activeScript.name" :clues="clues" :people="people" :events="events" :notes="notes" @close="workspaceSearchOpen = false" @open-clue="openSearchClue" @open-person="openSearchPerson" @open-event="openSearchEvent" @open-note="openSearchNote" />
+      <WorkspaceGuide v-if="workspaceGuideOpen && activeScript" :key="activeScriptId" :script-name="activeScript.name" @close="workspaceGuideOpen = false" @navigate="navigateFromGuide" @open-search="openWorkspaceSearch" />
       <div v-if="scriptDialog" class="modal-backdrop" @click.self="scriptDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ editingScriptId ? '编辑剧本' : '新建剧本' }}</h2><button title="关闭" @click="scriptDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>剧本名称<input v-model="scriptForm.name" maxlength="80" placeholder="输入剧本名称" /></label><label>游玩日期<input v-model="scriptForm.playDate" type="date" /></label><div class="image-picker-row"><div class="image-picker-preview" :style="scriptForm.coverPath ? { backgroundImage: `url(${scriptForm.coverPath.startsWith('data:') ? scriptForm.coverPath : imageUrls[scriptForm.coverPath] || ''})` } : {}"><UiIcon v-if="!scriptForm.coverPath" name="image" :size="22" /></div><button class="secondary-button" @click="chooseCover">选择封面照片</button></div></div><div class="modal-actions"><button class="secondary-button" @click="scriptDialog = false">取消</button><button class="primary-button" :disabled="busy" @click="saveScript">保存剧本</button></div></div></div>
       <div v-if="clueDialog && selectedClue" class="modal-backdrop clue-backdrop" @click.self="clueDialog = false"><div class="modal clue-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">线索 #{{ String(selectedClue.number).padStart(3, '0') }}</span><h2>{{ selectedClue.title }}</h2></div><button title="关闭" @click="clueDialog = false"><UiIcon name="close" :size="20" /></button></div><div class="clue-detail-layout"><div class="clue-photo-panel"><CluePhotoViewer v-if="imageUrls[selectedClue.imagePath]" v-model:zoom="photoZoom" :src="imageUrls[selectedClue.imagePath]" :alt="selectedClue.title" :rotation="selectedClue.rotation" /><div v-else class="photo-stage"><UiIcon name="image" :size="40" /></div><div class="photo-tools"><span>原始照片</span><button @click="capture"><UiIcon name="camera" :size="18" />继续拍摄</button><button title="放大或缩小" @click="photoZoom = !photoZoom"><UiIcon name="zoomIn" :size="18" />{{ photoZoom ? '缩小' : '放大' }}</button><button @click="rotatePhoto(selectedClue)"><UiIcon name="rotate" :size="18" />旋转</button><button @click="openCrop"><UiIcon name="image" :size="18" />裁剪</button><button @click="annotationOpen = true"><UiIcon name="edit" :size="18" />标注</button></div></div><div class="clue-editor" :inert="busy || undefined"><div class="editor-draft-status" role="status"><span>{{ clueDraftStatus }}</span><button class="text-button" :disabled="busy" @click="discardClueDraft">丢弃草稿</button><p v-if="clueDraftConflict">正式记录已发生变化；当前恢复的是旧草稿，请核对后再保存。</p></div><section v-if="sourceExcerpt" class="source-excerpt"><header><strong>对应原文</strong><button aria-label="收起出处摘录" @click="sourceExcerpt = ''"><UiIcon name="close" :size="16" /></button></header><p>{{ sourceExcerpt }}</p></section><div class="editor-section"><span class="section-label">基础信息</span><label>标题<input v-model="clueForm.title" /></label><div class="two-fields"><label>搜证轮次<input v-model="clueForm.round" placeholder="如：第一轮" /></label><label>分类<input v-model="clueForm.category" placeholder="如：物证" /></label></div><label>标签<input v-model="clueForm.tags" placeholder="用逗号分隔" /></label></div><div class="editor-section"><span class="section-label">OCR 识别文字 <small>可直接修正错误</small></span><textarea v-model="clueForm.ocrText" rows="8" placeholder="照片中暂未识别出文字"></textarea></div><div class="editor-section"><span class="section-label">备注</span><textarea v-model="clueForm.notes" rows="3" placeholder="写下你的观察"></textarea></div><div class="clue-editor-bottom"><button class="danger-text" @click="removeClue(selectedClue)"><UiIcon name="trash" :size="17" />删除线索</button><div><button class="secondary-button" @click="toggleCompare(selectedClue.id)"><UiIcon name="compare" :size="17" />{{ compareIds.includes(selectedClue.id) ? '移出对照' : '加入对照' }}</button><button class="primary-button" :disabled="busy" @click="saveClue">保存修改</button></div></div></div></div></div></div>
       <div v-if="personDialog" class="modal-backdrop" @click.self="personDialog = false"><div class="modal compact-modal" role="dialog" aria-modal="true"><div class="modal-head"><h2>{{ editingPersonId ? '编辑人物' : '添加人物' }}</h2><button title="关闭" @click="personDialog = false"><UiIcon name="close" :size="19" /></button></div><div class="form-stack"><label>姓名<input v-model="personForm.name" placeholder="人物姓名" /></label><div class="image-picker-row"><div class="image-picker-preview round" :style="personForm.photoPath ? { backgroundImage: `url(${personForm.photoPath.startsWith('data:') ? personForm.photoPath : imageUrls[personForm.photoPath] || ''})` } : {}"><UiIcon v-if="!personForm.photoPath" name="person" :size="22" /></div><button class="secondary-button" @click="choosePersonPhoto">选择人物照片</button></div><label>别名<input v-model="personForm.aliases" placeholder="多个别名用逗号分隔" /></label><label>备注<textarea v-model="personForm.notes" rows="4" placeholder="人物档案备注"></textarea></label></div><div class="modal-actions"><button v-if="editingPersonId && people.length > 1" class="secondary-button" :disabled="busy" @click="openPersonMerge(editingPersonId)">合并人物</button><button class="secondary-button" @click="personDialog = false">取消</button><button class="primary-button" @click="savePerson">保存人物</button></div></div></div>

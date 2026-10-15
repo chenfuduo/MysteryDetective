@@ -8,7 +8,7 @@ type Side = 'upper' | 'lower'
 type TimeWindow = { start: Date; end: Date }
 type DensityGroup = { id: string; side: Side; start: number; end: number; members: TimelineRecord[] }
 type VisibleDensityGroup = DensityGroup & { visibleMembers: TimelineRecord[] }
-const props = defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; scale: number; readOnly?: boolean }>()
+const props = withDefaults(defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; scale: number; readOnly?: boolean; sourceReviewEventIds?: string[] }>(), { sourceReviewEventIds: () => [] })
 const emit = defineEmits<{
   'update:personId': [value: string]
   'update:scale': [value: number]
@@ -78,6 +78,7 @@ const densitySummary = computed(() => {
   return groups.length ? `${groups.reduce((total, group) => total + group.visibleMembers.length, 0)} 个事件收拢为 ${groups.length} 组 · 点数量逐条查看` : '当前间距无需收拢 · 放大后自动展开'
 })
 const selectedEvent = computed(() => visibleEvents.value.find(event => event.id === selectedId.value))
+const sourceReviewIds = computed(() => new Set(props.sourceReviewEventIds))
 const selectedPeople = computed(() => props.people.filter(person => selectedEvent.value?.personIds.includes(person.id)))
 const viewCacheKey = computed(() => `cluevault:timeline-view:${encodeURIComponent(props.scriptId)}:${referenceYear.value}`)
 const selectedEvidence = computed(() => {
@@ -485,12 +486,12 @@ onUnmounted(() => {
       <aside v-if="selectedCluster" ref="clusterPanel" class="event-cluster-panel" role="dialog" aria-label="密集事件列表" tabindex="-1">
         <header><div><strong>{{ selectedCluster.visibleMembers.length }} 个事件</strong><p>{{ clusterLabel(selectedCluster) }}</p><span>{{ clusterKinds(selectedCluster) }}<template v-if="personId"> · 全组 {{ selectedCluster.members.length }} 个，当前筛选 {{ selectedCluster.visibleMembers.length }} 个</template></span></div><button class="detail-close" aria-label="关闭密集事件列表" @click="closeCluster"><UiIcon name="close" :size="18" /></button></header>
         <p class="cluster-explanation">{{ selectedCluster.start === selectedCluster.end ? '这些事件位于同一时刻，可逐条查看；收拢未合并或删除事件。' : '事件按原时间顺序保留，筛选只隐藏成员，不改变本组在时间轴的位置。' }}</p>
-        <ol class="cluster-members"><li v-for="event in selectedCluster.visibleMembers" :key="event.id"><button @click="selectEvent(event.id)"><span class="cluster-member-time">{{ event.approximate ? '约 ' : '' }}{{ dateLabel(event.startsAt) }}<small :class="{ 'is-yearless': event.startsAt.startsWith('--') }">{{ event.startsAt.startsWith('--') ? '无年份' : '有年份' }}</small></span><strong>{{ eventTitle(event) }}</strong><span>{{ precisionLabel(event) }}<template v-if="memberPeople(event)"> · {{ memberPeople(event) }}</template></span><em>查看详情与原始线索 ›</em></button></li></ol>
+        <ol class="cluster-members"><li v-for="event in selectedCluster.visibleMembers" :key="event.id"><button @click="selectEvent(event.id)"><span class="cluster-member-time">{{ event.approximate ? '约 ' : '' }}{{ dateLabel(event.startsAt) }}<small :class="{ 'is-yearless': event.startsAt.startsWith('--') }">{{ event.startsAt.startsWith('--') ? '无年份' : '有年份' }}</small></span><strong>{{ eventTitle(event) }}</strong><span v-if="sourceReviewIds.has(event.id)" class="source-review-hint">来源已修改，待核对</span><span>{{ precisionLabel(event) }}<template v-if="memberPeople(event)"> · {{ memberPeople(event) }}</template></span><em>查看详情与原始线索 ›</em></button></li></ol>
         <footer v-if="selectedCluster.end > selectedCluster.start"><button class="explorer-button" @click="expandCluster"><UiIcon name="zoomIn" :size="16" />放大这一段</button></footer>
       </aside>
       <aside v-if="selectedEvent" class="event-detail" aria-live="polite">
         <button class="detail-close" aria-label="收起事件详情" @click="closeDetail"><UiIcon name="close" :size="18" /></button>
-        <div class="detail-main"><div class="detail-time"><UiIcon name="clock" :size="17" /><strong>{{ selectedEvent.approximate ? '约 ' : '' }}{{ dateLabel(selectedEvent.startsAt) }}</strong><span v-if="selectedEvent.startsAt.startsWith('--') && !selectedEvent.yearlessMarkerIgnored" class="yearless-badge">无年份</span></div><h3>{{ eventTitle(selectedEvent) }}</h3><div class="detail-people"><span class="precision-badge">{{ selectedEvent.approximate ? '约时 · ' : '' }}{{ precisionLabel(selectedEvent) }}</span><span v-for="person in selectedPeople" :key="person.id"><UiIcon name="person" :size="13" />{{ person.name }}</span><button v-if="!readOnly && selectedEvent.startsAt.startsWith('--')" class="marker-button" @click="emit('toggle-marker', selectedEvent)">{{ selectedEvent.yearlessMarkerIgnored ? '恢复无年份标记' : '忽略无年份标记' }}</button></div></div>
+        <div class="detail-main"><div class="detail-time"><UiIcon name="clock" :size="17" /><strong>{{ selectedEvent.approximate ? '约 ' : '' }}{{ dateLabel(selectedEvent.startsAt) }}</strong><span v-if="selectedEvent.startsAt.startsWith('--') && !selectedEvent.yearlessMarkerIgnored" class="yearless-badge">无年份</span></div><h3>{{ eventTitle(selectedEvent) }}</h3><p v-if="sourceReviewIds.has(selectedEvent.id)" class="source-review-hint">来源已修改，待核对</p><div class="detail-people"><span class="precision-badge">{{ selectedEvent.approximate ? '约时 · ' : '' }}{{ precisionLabel(selectedEvent) }}</span><span v-for="person in selectedPeople" :key="person.id"><UiIcon name="person" :size="13" />{{ person.name }}</span><button v-if="!readOnly && selectedEvent.startsAt.startsWith('--')" class="marker-button" @click="emit('toggle-marker', selectedEvent)">{{ selectedEvent.yearlessMarkerIgnored ? '恢复无年份标记' : '忽略无年份标记' }}</button></div></div>
         <div class="detail-evidence" v-if="selectedEvidence.length"><div v-for="source in selectedEvidence" :key="`${source.clue.id}:${source.quote}`" class="evidence-entry"><button class="explorer-button" @click="emit('open-clue', source.clue.id, source.quote || undefined)"><UiIcon name="image" :size="16" />原线索 #{{ String(source.clue.number).padStart(3, '0') }}</button><blockquote v-if="source.quote">{{ source.quote }}</blockquote></div></div>
         <div v-if="!readOnly" class="detail-actions"><button class="explorer-button edit-button" @click="emit('edit-event', selectedEvent)"><UiIcon name="edit" :size="17" />编辑事件</button></div>
       </aside>
@@ -588,6 +589,7 @@ onUnmounted(() => {
 .evidence-entry blockquote { margin: 0; padding-left: 9px; border-left: 2px solid #d9e4d6; color: #7b8978; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .detail-time { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 12px; color: #47614d; }
 .yearless-badge { padding: 2px 6px; border-radius: 5px; background: #f7eee5; color: #a87b58; font-size: 10px; }
+.source-review-hint { margin: 5px 0; color: #a06432; font-size: 11px; line-height: 1.4; }
 .detail-main h3 { margin: 7px 0; color: #294432; font-size: 15px; font-weight: 600; line-height: 1.45; }
 .detail-people { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 .detail-people > span { display: inline-flex; align-items: center; gap: 3px; padding: 3px 7px; border-radius: 5px; background: #f0f4ed; color: #74836e; font-size: 10px; }

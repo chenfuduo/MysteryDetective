@@ -24,12 +24,12 @@ function inHistoryQueue<T>(scriptId: string, action: () => Promise<T>): Promise<
   return current
 }
 
-async function readHistory(scriptId: string): Promise<PersistedHistory> {
+async function readHistory(scriptId: string, persistMigration = true): Promise<PersistedHistory> {
   const history = await vault.getLocalState<PersistedHistory>(scriptId, historyKey)
   if (history?.version === 2 && history.scriptId === scriptId) return history
   const legacy = await vault.getLocalState<PersistedUndo>(scriptId, legacyUndoKey)
   const migrated: PersistedHistory = { version: 2, scriptId, undo: legacy?.version === 1 && legacy.scriptId === scriptId ? [{ ...legacy, createdAt: legacy.createdAt || '' }] : [], redo: [] }
-  await vault.applyRecordChanges(scriptId, [], { save: [{ key: historyKey, value: migrated }], remove: [legacyUndoKey] })
+  if (persistMigration) await vault.applyRecordChanges(scriptId, [], { save: [{ key: historyKey, value: migrated }], remove: [legacyUndoKey] })
   return migrated
 }
 
@@ -138,78 +138,98 @@ export function timelineEvidence(item: OrganizationTimelineSuggestion, clues: Cl
 }
 
 export async function reviewSuggestions(scriptId: string, selection: ReviewSelection[], mode: 'accept' | 'ignore'): Promise<{ applied: number; skipped: number; undo: ReviewUndo | null; warning?: string }> {
-  const [before, people, relationships, events, clues] = await Promise.all([
-    vault.getOrganization(scriptId), vault.listPeople(scriptId), vault.listRelationships(scriptId), vault.listTimelineEvents(scriptId), vault.listClues(scriptId),
-  ])
-  if (!before) return { applied: 0, skipped: selection.length, undo: null }
-  const changes: Change[] = []
-  const resolved: ReviewSelection[] = []
-  const remember = (kind: Change['kind'], old: unknown, value: { id: string }) => {
-    const existing = changes.find(change => change.kind === kind && change.id === value.id)
-    if (existing) existing.after = copy(value)
-    else changes.push({ kind, id: value.id, before: copy(old), after: copy(value) })
-  }
-  async function findPerson(name: string, aliases: string[] = []) {
-    const found = people.find(person => normalized(person.name) === normalized(name) || [...person.aliases, ...(person.ocrNames || [])].some(alias => normalized(alias) === normalized(name)))
-    if (found) return found
-    const created = await vault.createPerson(scriptId, { name, aliases })
-    people.push(created); remember('people', null, created)
-    return created
-  }
-  let applied = 0, skipped = 0
-  let warning = ''
-  try {
+  return inHistoryQueue(scriptId, async () => {
+    const [before, people, relationships, events, clues] = await Promise.all([
+      vault.getOrganization(scriptId), vault.listPeople(scriptId), vault.listRelationships(scriptId), vault.listTimelineEvents(scriptId), vault.listClues(scriptId),
+    ])
+    if (!before) return { applied: 0, skipped: selection.length, undo: null }
+    const after = copy(before)
+    const changes: Change[] = []
+    const resolvedKeys = new Set(after.resolvedKeys || [])
+    const remember = (kind: Change['kind'], old: unknown, value: { id: string }) => {
+      const existing = changes.find(change => change.kind === kind && change.id === value.id)
+      if (existing) existing.after = copy(value)
+      else changes.push({ kind, id: value.id, before: copy(old), after: copy(value) })
+    }
+    const findPerson = (name: string, aliases: string[] = []): PersonRecord => {
+      const found = people.find(person => normalized(person.name) === normalized(name) || [...person.aliases, ...(person.ocrNames || [])].some(alias => normalized(alias) === normalized(name)))
+      if (found) return found
+      const created: PersonRecord = { id: crypto.randomUUID(), scriptId, name: name.trim(), aliases, photoPath: '', notes: '' }
+      people.push(created); remember('people', null, created)
+      return created
+    }
+    const validSource = (item: { sourceNo: number; quote: string }): boolean => {
+      const clue = clues.find(clue => clue.number === item.sourceNo)
+      return Boolean(clue && item.quote.trim() && clue.ocrText.includes(item.quote))
+    }
+    const eventIdentity = (event: Pick<TimelineRecord, 'title' | 'startsAt' | 'personIds'>): string => JSON.stringify([vault.organizationTextKey(event.title), event.startsAt, [...new Set(event.personIds)].sort()])
+    const mergeEvidence = (previous: TimelineRecord, incoming: TimelineRecord): TimelineRecord => {
+      const evidence = new Map<string, vault.OrganizationEvidence>()
+      for (const source of [...(previous.evidence || []), ...(incoming.evidence || [])]) {
+        const clue = clues.find(clue => clue.id === source.clueId)
+        if (clue) evidence.set(JSON.stringify([clue.id, source.quote]), { ...source, clueId: clue.id, sourceNo: clue.number })
+      }
+      for (const clueId of [previous.clueId, incoming.clueId]) {
+        const clue = clues.find(clue => clue.id === clueId)
+        if (clue && ![...evidence.values()].some(source => source.clueId === clue.id)) evidence.set(JSON.stringify([clue.id, '']), { clueId: clue.id, sourceNo: clue.number, quote: '' })
+      }
+      return { ...previous, evidence: [...evidence.values()], clueId: previous.clueId || evidence.values().next().value?.clueId || '' }
+    }
+    let applied = 0, skipped = 0
     for (const entry of selection.filter((entry, index, entries) => entries.findIndex(other => other.kind === entry.kind && other.id === entry.id) === index)) {
-      if (mode === 'ignore') {
-        if (before[entry.kind].some(item => item.id === entry.id)) { resolved.push(entry); applied++ }
-        continue
-      }
-      if (entry.kind === 'people') {
-        const item = before.people.find(item => item.id === entry.id)
-        if (!item) continue
-        await findPerson(item.name, item.aliases)
-      } else if (entry.kind === 'relationships') {
-        const item = before.relationships.find(item => item.id === entry.id)
-        if (!item) continue
-        const from = await findPerson(item.from), to = await findPerson(item.to)
-        if (!relationships.some(relation => normalized(relation.label) === normalized(item.label) && ((relation.fromId === from.id && relation.toId === to.id) || (relation.toId === from.id && relation.fromId === to.id)))) {
-          const created = await vault.createRelationship(scriptId, { fromId: from.id, toId: to.id, label: item.label })
-          relationships.push(created); remember('relationships', null, created)
+      const suggestion = before[entry.kind].find(item => item.id === entry.id)
+      if (!suggestion) { skipped++; continue }
+      if (mode === 'accept') {
+        if (entry.kind === 'people') {
+          const item = before.people.find(item => item.id === entry.id)!
+          if (!validSource(item)) { skipped++; continue }
+          findPerson(item.name, item.aliases)
+        } else if (entry.kind === 'relationships') {
+          const item = before.relationships.find(item => item.id === entry.id)!
+          if (!validSource(item)) { skipped++; continue }
+          const from = findPerson(item.from), to = findPerson(item.to)
+          if (!relationships.some(relation => normalized(relation.label) === normalized(item.label) && ((relation.fromId === from.id && relation.toId === to.id) || (relation.toId === from.id && relation.fromId === to.id)))) {
+            const created: RelationshipRecord = { id: crypto.randomUUID(), scriptId, fromId: from.id, toId: to.id, label: item.label }
+            relationships.push(created); remember('relationships', null, created)
+          }
+        } else if (entry.kind === 'timeline') {
+          const item = before.timeline.find(item => item.id === entry.id)!
+          if (item.requiresTitle || !item.title.trim() || item.title === '待补充事件') { skipped++; continue }
+          const evidence = timelineEvidence(item, clues)
+          if (!evidence.length) { skipped++; continue }
+          const created: TimelineRecord = { id: crypto.randomUUID(), scriptId, title: item.title, startsAt: item.startsAt, personIds: item.people.map(name => findPerson(name).id), clueId: evidence[0]!.clueId, evidence, precision: item.precision, approximate: item.approximate, confirmed: true, yearlessMarkerIgnored: false }
+          const previous = !/待确认|待补充/.test(created.title) ? events.find(event => event.confirmed === created.confirmed && eventIdentity(event) === eventIdentity(created)) : undefined
+          const next = previous ? mergeEvidence(previous, created) : created
+          if (!same(previous || null, next)) remember('timeline', previous || null, next)
+          if (previous) events[events.indexOf(previous)] = next
+          else events.push(next)
+        } else {
+          const item = before.cluePoints.find(item => item.id === entry.id)!
+          const clue = clues.find(clue => clue.number === item.sourceNo)
+          if (!clue || !validSource(item)) { skipped++; continue }
+          const updated: ClueRecord = { ...clue, title: item.title, category: item.category || clue.category, tags: [...new Set([...clue.tags, ...item.tags])] }
+          remember('clues', clue, updated)
+          clues[clues.indexOf(clue)] = updated
         }
-      } else if (entry.kind === 'timeline') {
-        const item = before.timeline.find(item => item.id === entry.id)
-        if (!item) continue
-        if (item.requiresTitle || !item.title.trim() || item.title === '待补充事件') { skipped++; continue }
-        const evidence = timelineEvidence(item, clues)
-        if (!evidence.length) { skipped++; continue }
-        const participants = []
-        for (const name of item.people) participants.push(await findPerson(name))
-        const created = await vault.createTimelineEvent(scriptId, { title: item.title, startsAt: item.startsAt, personIds: participants.map(person => person.id), clueId: evidence[0]!.clueId, evidence, precision: item.precision, approximate: item.approximate, confirmed: true })
-        const previous = events.find(event => event.id === created.id) || null
-        if (!same(previous, created)) remember('timeline', previous, created)
-        if (previous) events[events.indexOf(previous)] = created
-        else events.push(created)
-      } else {
-        const item = before.cluePoints.find(item => item.id === entry.id)
-        const clue = item && clues.find(clue => clue.number === item.sourceNo)
-        if (!item || !clue) { skipped++; continue }
-        const updated = await vault.updateClue(clue.id, { title: item.title, category: item.category || clue.category, tags: [...new Set([...clue.tags, ...item.tags])] })
-        remember('clues', clue, updated)
-        clues[clues.indexOf(clue)] = updated
       }
-      resolved.push(entry); applied++
+      resolvedKeys.add(vault.suggestionKey(entry.kind, suggestion))
+      if (entry.kind === 'timeline') for (const source of (suggestion as OrganizationTimelineSuggestion).evidence || []) resolvedKeys.add(vault.suggestionKey(entry.kind, { ...suggestion, sourceNo: source.sourceNo, quote: source.quote }))
+      if (entry.kind === 'people') after.people = after.people.filter(item => item.id !== entry.id)
+      else if (entry.kind === 'relationships') after.relationships = after.relationships.filter(item => item.id !== entry.id)
+      else if (entry.kind === 'timeline') after.timeline = after.timeline.filter(item => item.id !== entry.id)
+      else after.cluePoints = after.cluePoints.filter(item => item.id !== entry.id)
+      applied++
     }
-  } catch (error) {
-    if (!applied && !changes.length) throw error
-    warning = error instanceof Error ? error.message : '部分内容未完成，剩余建议已保留'
-  } finally {
-    for (const entry of resolved) {
-      try { await vault.resolveOrganizationSuggestion(scriptId, entry.kind, entry.id) }
-      catch (error) { warning = error instanceof Error ? error.message : '部分建议状态未保存'; break }
-    }
-  }
-  const after = await vault.getOrganization(scriptId)
-  return { applied, skipped, warning, undo: applied || changes.length ? await makeUndo(scriptId, `${mode === 'ignore' ? '忽略' : '录入'}整理建议（${applied} 条）`, before, after, changes) : null }
+    if (!applied) return { applied, skipped, undo: null }
+    after.resolvedKeys = [...resolvedKeys]
+    after.updatedAt = new Date().toISOString()
+    remember('organization', before, after)
+    const label = `${mode === 'ignore' ? '忽略' : '录入'}整理建议（${applied} 条）`
+    const entry: PersistedUndo = copy({ version: 1, id: crypto.randomUUID(), scriptId, label, createdAt: new Date().toISOString(), before, after, changes })
+    const history = appendHistory(await readHistory(scriptId, false), entry)
+    await vault.applyRecordChanges(scriptId, changes, { save: [{ key: historyKey, value: history }], remove: [legacyUndoKey] })
+    return { applied, skipped, undo: actionFromState(entry, 'undo') }
+  })
 }
 
 export async function recordUndo(scriptId: string, label: string, kind: Change['kind'], before: { id: string } | null, after: { id: string } | null, organizationBefore?: OrganizationSnapshot | null): Promise<ReviewUndo> {

@@ -31,9 +31,15 @@ const props = defineProps<{
   apiProvider: string
   canUndo?: boolean
   progress?: string
+  pendingOcrCount?: number
+  unfinishedTaskCount?: number
+  organizationActive?: boolean
 }>()
 const emit = defineEmits<{
   analyze: []
+  capture: []
+  'retry-ocr': []
+  resume: []
   discuss: []
   openWorkbench: []
   navigate: [view: 'clues' | 'people' | 'timeline' | 'board' | 'notes' | 'compare' | 'settings', section?: 'profiles' | 'relationships']
@@ -72,6 +78,33 @@ const allSuggestions = computed<Suggestion[]>(() => {
   ]
 })
 const pendingCount = computed(() => allSuggestions.value.length)
+const hasOcrText = computed(() => props.clues.some(clue => clue.ocrText.trim()))
+type NextActionId = 'processing' | 'capture' | 'ocr' | 'resume' | 'review' | 'analyze' | 'configure' | 'discuss'
+const nextAction = computed<{ id: NextActionId; label: string; detail: string }>(() => {
+  if (props.organizationActive) return { id: 'processing', label: '整理中…', detail: '当前阶段会自动保存，可以在顶部暂停整理。' }
+  if (!props.clues.length) return { id: 'capture', label: '拍照录入', detail: '拍下第一张线索，OCR 文字会自动识别并保存在本机。' }
+  if (props.pendingOcrCount) return { id: 'ocr', label: '处理待识别照片', detail: `还有 ${props.pendingOcrCount} 张照片需要识别，先补齐文字再整理。` }
+  if (props.unfinishedTaskCount) return { id: 'resume', label: '继续整理', detail: `还有 ${props.unfinishedTaskCount} 条线索待继续，已完成阶段会保留。` }
+  if (pendingCount.value) return { id: 'review', label: '逐条核对', detail: `有 ${pendingCount.value} 条建议待确认，查看原文后加入档案。` }
+  if (!hasOcrText.value) return { id: 'ocr', label: '处理待识别照片', detail: '已有照片尚无识别文字，先完成 OCR。' }
+  if (!props.organization) return props.apiConfigured
+    ? { id: 'analyze', label: '整理线索', detail: '已识别的文字可以整理为人物、关系、时间和线索点。' }
+    : { id: 'configure', label: '配置 AI', detail: '照片与 OCR 已保存在本机，配置 AI 后可生成整理建议。' }
+  return { id: 'discuss', label: '讨论查看', detail: '当前没有待确认建议，可以查阅已确认的人物、关系和时间。' }
+})
+const canAnalyze = computed(() => props.apiConfigured && hasOcrText.value && !props.busy)
+const showAnalyzeSecondary = computed(() => ['review', 'discuss', 'resume', 'ocr'].includes(nextAction.value.id) && hasOcrText.value)
+const emptyHeading = computed(() => ({ capture: '先收集第一条线索', ocr: '先补齐识别文字', resume: '已有进度，接着整理', analyze: '文字已就绪', configure: '开始整理已识别的文字', discuss: '待确认建议已处理', processing: '正在整理线索', review: '核对原文，再加入档案' })[nextAction.value.id] || '开始整理线索')
+function runNextAction() {
+  if (props.busy) return
+  if (nextAction.value.id === 'capture') emit('capture')
+  else if (nextAction.value.id === 'ocr') emit('retry-ocr')
+  else if (nextAction.value.id === 'resume') emit('resume')
+  else if (nextAction.value.id === 'review') emit('openWorkbench')
+  else if (nextAction.value.id === 'analyze') emit('analyze')
+  else if (nextAction.value.id === 'configure') emit('navigate', 'settings')
+  else if (nextAction.value.id === 'discuss') emit('discuss')
+}
 const cluePointCount = computed(() => new Set((props.organization?.cluePoints || []).map(item => item.sourceNo)).size)
 const reviewInfo = computed(() => new Map(allSuggestions.value.map(suggestion => [selectionKey(suggestion), classifyReview(suggestion, props.clues, props.organization?.timelineAudit, reviewedKeys.value.includes(selectionKey(suggestion)))])))
 const classification = (suggestion: Suggestion) => reviewInfo.value.get(selectionKey(suggestion))!
@@ -185,12 +218,15 @@ function accept(suggestion: Suggestion) {
 <template>
   <section class="page organization-page" :aria-busy="busy">
     <header class="organize-header">
-      <div><h1>整理线索</h1><p>人物、关系、时间和线索点都在这里核对。</p></div>
-      <button class="secondary-button discussion-entry" :disabled="busy" @click="emit('discuss')">讨论查看</button><button v-if="apiConfigured" class="primary-button" :disabled="busy || !clues.some(item => item.ocrText.trim())" @click="emit('analyze')"><span v-if="busy" class="organize-spinner" aria-hidden="true"></span>{{ busy ? '整理中…' : '整理线索' }}</button>
-      <button v-else class="primary-button" @click="emit('navigate', 'settings')">配置 AI</button>
+      <div><h1>整理总览</h1><p>{{ nextAction.detail }}</p></div>
+      <div class="organize-header-actions">
+        <button v-if="clues.length && nextAction.id !== 'discuss'" class="secondary-button discussion-entry" :disabled="busy" @click="emit('discuss')">讨论查看</button>
+        <button v-if="showAnalyzeSecondary" class="secondary-button" :disabled="!canAnalyze" @click="emit('analyze')">{{ nextAction.id === 'review' ? '整理新增／修改' : '整理线索' }}</button>
+        <button class="primary-button" :disabled="busy || organizationActive" @click="runNextAction"><span v-if="organizationActive" class="organize-spinner" aria-hidden="true"></span>{{ nextAction.label }}</button>
+      </div>
     </header>
 
-    <div class="organize-summary">
+    <div v-if="clues.length" class="organize-summary">
       <button @click="emit('navigate', 'clues')"><strong>{{ clues.length }}</strong><span>条线索</span></button>
       <button class="pending-summary" @click="focusSuggestions"><strong>{{ pendingCount }}</strong><span>待确认建议</span></button>
       <button @click="emit('navigate', 'people', 'profiles')"><strong>{{ people.length }}</strong><span>个人物</span></button>
@@ -228,7 +264,7 @@ function accept(suggestion: Suggestion) {
           <span class="shortcut-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M7.5 10h5M7.5 13h5" /></svg></span><span class="shortcut-label">笔记</span><span class="shortcut-arrow">›</span>
         </button>
         <button class="shortcut-button" @click="emit('navigate', 'compare')">
-          <span class="shortcut-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="4" width="8" height="11" rx="1.5" /><rect x="8.5" y="6" width="8" height="11" rx="1.5" /><path d="M6 7h3M11 9h3M11 12h3" /></svg></span><span class="shortcut-label">线索对照</span><span class="shortcut-arrow">›</span>
+          <span class="shortcut-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="4" width="8" height="11" rx="1.5" /><rect x="8.5" y="6" width="8" height="11" rx="1.5" /><path d="M6 7h3M11 9h3M11 12h3" /></svg></span><span class="shortcut-label">记录对照</span><span class="shortcut-arrow">›</span>
         </button>
       </div>
     </nav>
@@ -244,8 +280,17 @@ function accept(suggestion: Suggestion) {
       </div>
     </details>
 
-    <section ref="reviewElement" class="review-section">
-      <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><div class="review-heading-actions"><button v-if="pendingCount" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条核对 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
+    <section v-if="!pendingCount" class="review-section next-step-section">
+      <div class="review-empty next-step-empty" role="status">
+        <span class="next-step-label">{{ nextAction.id === 'discuss' ? '查阅已确认记录' : '下一步' }}</span>
+        <strong>{{ emptyHeading }}</strong>
+        <p>{{ nextAction.detail }}</p>
+      </div>
+      <div v-if="canUndo" class="empty-undo"><button class="text-button" :disabled="busy" @click="emit('undo')">撤销上一步</button></div>
+    </section>
+
+    <section v-else ref="reviewElement" class="review-section">
+      <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><div class="review-heading-actions"><button v-if="nextAction.id !== 'review'" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条核对 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
       <nav class="review-groups" aria-label="按处理步骤筛选">
         <button v-for="group in groups" :key="group.id" :class="{ active: effectiveGroup === group.id }" :aria-pressed="effectiveGroup === group.id" @click="activeGroup = group.id">{{ group.label }} <span>{{ group.count }}</span></button>
       </nav>
@@ -258,8 +303,7 @@ function accept(suggestion: Suggestion) {
         <div class="batch-actions"><button :disabled="busy || !selectedAcceptable.length" class="batch-accept" @click="bulk('accept')">录入可用项{{ selectedAcceptable.length ? ` ${selectedAcceptable.length}` : '' }}</button><button :disabled="busy || !selectedCount" @click="bulk('ignore')">忽略所选{{ selectedCount ? ` ${selectedCount}` : '' }}</button><button :disabled="busy || !canUndo" @click="emit('undo')">撤销上一步</button></div>
         <p v-if="blockedSelectedCount" class="batch-incomplete">所选 {{ blockedSelectedCount }} 项需要补充或核对，将跳过录入；“忽略所选”仍适用于全部所选项。</p><p v-if="batchMessage" class="batch-incomplete" role="status">{{ batchMessage }}</p>
       </div>
-      <div v-if="!organization" class="review-empty"><strong>还没有整理结果</strong><p>点击右上角“整理线索”生成待核对建议。</p></div>
-      <div v-else-if="!visibleSuggestions.length" class="review-empty"><strong>{{ pendingCount ? '当前筛选下没有建议' : '没有待确认的建议' }}</strong><p>{{ pendingCount ? '切换处理分组或人物、关系等分类查看其他建议。' : '录入新线索后可以再次整理。' }}</p></div>
+      <div v-if="!visibleSuggestions.length" class="review-empty"><strong>当前筛选下没有建议</strong><p>切换处理分组或人物、关系等分类查看其他建议。</p><button class="text-button" @click="focusSuggestions">显示待处理建议</button></div>
       <div v-else class="suggestion-list">
         <article v-for="suggestion in visibleSuggestions" :key="selectionKey(suggestion)" class="suggestion-row" :class="{ 'is-selected': selectedKeys.includes(selectionKey(suggestion)) }">
           <label class="suggestion-select"><input type="checkbox" :checked="selectedKeys.includes(selectionKey(suggestion))" :disabled="busy" :aria-label="`选择${title(suggestion)}`" @change="selectSuggestion(suggestion)" /></label>
@@ -292,6 +336,8 @@ function accept(suggestion: Suggestion) {
   box-sizing: border-box;
 }
 .organize-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.organize-header-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 9px; flex-shrink: 0; }
+.organize-header-actions .secondary-button { min-height: 44px; white-space: nowrap; }
 .organize-header h1 { margin: 0 0 6px; color: #253d31; font-size: 30px; font-weight: 720; letter-spacing: -.035em; }
 .organize-header p { margin: 0; color: #7a857f; font-size: 14px; line-height: 1.6; }
 .organize-header .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 46px; padding: 0 21px; border-radius: 12px; font-size: 14px; white-space: nowrap; }
@@ -398,6 +444,11 @@ function accept(suggestion: Suggestion) {
 .precision-pill, .needs-title-pill { display: inline-flex; align-items: center; padding: 3px 6px; border-radius: 5px; background: #f0f4f6; color: #7b8b96; font-size: 10px; white-space: nowrap; }
 .precision-pill.is-approximate, .needs-title-pill { background: #fcf2e7; color: #b18452; }
 .review-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 190px; padding: 25px; text-align: center; }
+.next-step-empty { align-items: flex-start; min-height: 170px; text-align: left; gap: 4px; }
+.next-step-label { color: #8e9a90; font-size: 11px; }
+.review-empty.next-step-empty strong { font-size: 19px; }
+.empty-undo { padding: 0 25px 15px; }
+.review-empty > .text-button { margin-top: 12px; }
 .review-empty strong { color: #4c6253; font-size: 15px; font-weight: 620; }
 .review-empty p { margin: 9px 0 0; color: #94a097; font-size: 13px; line-height: 1.6; }
 .review-footnote { padding: 13px 21px; border-top: 1px solid #edf0eb; border-radius: 0 0 17px 17px; background: #fafbf9; color: #9aa49c; font-size: 11px; line-height: 1.6; }
@@ -414,6 +465,7 @@ button:focus-visible { outline: 2px solid #638772; outline-offset: 3px; }
 }
 @keyframes organize-spin { to { transform: rotate(360deg); } }
 @keyframes organize-pulse { 50% { opacity: .3; } }
+@media (min-width: 821px) { .organize-shortcuts { display: none; } }
 @media (max-width: 1050px) {
   .shortcut-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .shortcut-button { padding: 10px 13px; }
@@ -425,6 +477,8 @@ button:focus-visible { outline: 2px solid #638772; outline-offset: 3px; }
 }
 @media (max-width: 700px) {
   .organization-page { gap: 15px; }
+  .organize-header { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .organize-header-actions { justify-content: flex-start; flex-shrink: 1; }
   .organize-header h1 { font-size: 27px; }
   .organize-header p { font-size: 13px; }
   .organize-header .primary-button { min-height: 44px; padding: 0 15px; font-size: 13px; }

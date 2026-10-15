@@ -6,10 +6,11 @@ import { CapgoFilePicker } from '@capgo/capacitor-file-picker'
 import { Ocr } from '@jcesarmobile/capacitor-ocr'
 import JSZip from 'jszip'
 import { normalizedOcrRegions, type OcrRegion } from './ocrLocation'
+import { buildSourceRevisionState, withSourceRevisionLock, type SourceRevisionState } from './sourceRevision'
 export type { OcrRegion } from './ocrLocation'
 
 export type ScriptRecord = { id: string; name: string; playDate: string; coverPath: string; createdAt: string }
-export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; displayImageKind?: 'crop' | 'perspective' | 'retake'; ocrText: string; ocrRegions?: OcrRegion[]; ocrImagePath?: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
+export type ClueRecord = { id: string; scriptId: string; number: number; title: string; imagePath: string; displayImagePath: string; displayImageKind?: 'crop' | 'perspective' | 'retake'; ocrText: string; sourceRevision?: number; ocrRegions?: OcrRegion[]; ocrImagePath?: string; ocrStatus?: 'pending' | 'complete' | 'failed'; ocrError?: string; imageHash?: string; round: number; category: string; tags: string[]; favorite: boolean; notes: string; rotation: number; createdAt: string }
 export type CluePhotoImportResult = { clues: ClueRecord[]; skippedDuplicates: number }
 export type PersonRecord = { id: string; scriptId: string; name: string; aliases: string[]; photoPath: string; notes: string; photoPaths?: string[]; ocrNames?: string[] }
 export type RelationshipRecord = { id: string; scriptId: string; fromId: string; toId: string; label: string }
@@ -463,10 +464,25 @@ export async function importCluePhotos(scriptId: string, round = 1): Promise<Clu
   return { clues: added, skippedDuplicates }
 }
 export async function updateClue(id: string, patch: Partial<ClueRecord>): Promise<ClueRecord> {
-  const existing = await getRecord<ClueRecord>('clues', id)
-  if (!existing) throw new Error('线索不存在')
-  const ocrState = patch.ocrText?.trim() ? { ocrStatus: 'complete' as const, ocrError: '' } : {}
-  return putRecord('clues', { ...existing, ...patch, ...ocrState, id, scriptId: existing.scriptId, imagePath: existing.imagePath })
+  return withSourceRevisionLock(id, async () => {
+    const existing = await getRecord<ClueRecord>('clues', id)
+    if (!existing) throw new Error('线索不存在')
+    const ocrState = patch.ocrText?.trim() ? { ocrStatus: 'complete' as const, ocrError: '' } : {}
+    const updated: ClueRecord = { ...existing, ...patch, ...ocrState, id, scriptId: existing.scriptId, imagePath: existing.imagePath, sourceRevision: existing.sourceRevision }
+    if (patch.ocrText !== undefined && existing.ocrText.trim()) {
+      const [previous, events, organization] = await Promise.all([
+        getLocalState<SourceRevisionState>(existing.scriptId, `source-revision:${id}`),
+        listTimelineEvents(existing.scriptId), getOrganization(existing.scriptId),
+      ])
+      const revision = buildSourceRevisionState(existing, updated.ocrText, previous, events, organization)
+      if (revision) {
+        updated.sourceRevision = revision.revision
+        await applyRecordChanges(existing.scriptId, [{ kind: 'clues', id, before: existing, after: updated }], { save: [{ key: `source-revision:${id}`, value: revision }] })
+        return updated
+      }
+    }
+    return putRecord('clues', updated)
+  })
 }
 type ClueTrashRecord = { id: string; label: string; deletedAt: string; kind: 'clue'; changes: VaultRecordChange[] }
 export async function listTrash(scriptId: string): Promise<{ id: string; label: string; deletedAt: string; kind: 'clue' }[]> {

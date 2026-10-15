@@ -9,6 +9,7 @@ type Props = {
   people: PersonRecord[]
   relationships: RelationshipRecord[]
   positions: Record<string, Point>
+  depths: Record<string, number>
   pan: Point
   zoom: number
   rotation: Point
@@ -300,10 +301,11 @@ function rebuild() {
 }
 
 function depthFor(person: PersonRecord, index: number) {
-  if (person.id === props.selectedId) return 14
-  if (person.id === props.centerId) return 3
-  if (person.id === props.linkSourceId || person.id === props.linkTargetId) return 10
-  return 2 + index % 3
+  const offset = Math.max(-180, Math.min(180, props.depths[person.id] || 0))
+  if (person.id === props.selectedId) return 14 + offset
+  if (person.id === props.centerId) return 3 + offset
+  if (person.id === props.linkSourceId || person.id === props.linkTargetId) return 10 + offset
+  return 2 + index % 3 + offset
 }
 
 function updateCamera() {
@@ -483,7 +485,7 @@ function resize() {
 
 watch(() => props.people.map(person => `${person.id}:${person.name}:${person.aliases.join(',')}:${person.photoPath}:${props.clueCounts[person.id] || 0}:${props.imageUrls[person.photoPath] || ''}`).join('|'), () => rebuild())
 watch(() => props.relationships.map(relationship => `${relationship.id}:${relationship.fromId}:${relationship.toId}:${relationship.label}`).join('|'), () => rebuild())
-watch(() => [props.positions, props.pan, props.zoom, props.rotation, props.selectedId, props.linkSourceId, props.linkTargetId, props.hideUnrelated], () => syncScene(), { deep: true })
+watch(() => [props.positions, props.depths, props.pan, props.zoom, props.rotation, props.selectedId, props.linkSourceId, props.linkTargetId, props.hideUnrelated], () => syncScene(), { deep: true })
 
 onMounted(init)
 onUnmounted(() => {

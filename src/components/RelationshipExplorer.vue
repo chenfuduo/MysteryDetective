@@ -23,16 +23,18 @@ const emit = defineEmits<{
 }>()
 
 type Point = { x: number; y: number }
-type Gesture = { kind: 'pan' | 'person' | 'connect'; start: Point; pan: Point; personId?: string; position?: Point; beforePositions?: Record<string, Point>; moved: boolean }
+type Gesture = { kind: 'pan' | 'person' | 'depth' | 'connect'; start: Point; pan: Point; personId?: string; position?: Point; depth?: number; beforePositions?: Record<string, Point>; beforeDepths?: Record<string, number>; moved: boolean }
 type Pinch = { distance: number; zoom: number; anchor: Point; start: Point; angle: number; rotation: Point }
 const stage = ref<HTMLElement | null>(null)
 const positions = ref<Record<string, Point>>({})
 const pan = ref<Point>({ x: 0, y: 0 })
 const zoom = ref(1)
-const moveHistory = ref<Record<string, Point>[]>([])
+const depths = ref<Record<string, number>>({})
+const moveHistory = ref<{ positions: Record<string, Point>; depths: Record<string, number> }[]>([])
 let activeScriptId = props.scriptId
 let viewReady = false
 const spatial = ref(false)
+const depthMode = ref(false)
 const spatialSceneReady = ref(false)
 const projectedPositions = ref<Record<string, Point & { width?: number; height?: number }>>({})
 const cameraRotation = ref<Point>({ x: 0, y: 0 })
@@ -155,6 +157,21 @@ function personStyle(person: PersonRecord, index: number) {
   return { left: `${point.x}px`, top: `${point.y}px`, width: `${width}px`, height: `${height}px`, marginLeft: `${-width / 2}px`, marginTop: `${-height / 2}px`, display: hidden ? 'none' : '', '--card-depth': `${index % 3 * 4}px` }
 }
 function layoutKey(): string { return `clue-vault:relationship-layout:${props.scriptId}:v1` }
+function depthKey(): string { return `clue-vault:relationship-depth:${props.scriptId}:v1` }
+function persistDepths() {
+  if (props.readOnly) return
+  try { localStorage.setItem(depthKey(), JSON.stringify(depths.value)) } catch { /* The view remains usable when storage is full. */ }
+}
+function syncDepths(load = false) {
+  let saved = depths.value
+  if (load) {
+    try { const data = JSON.parse(localStorage.getItem(depthKey()) || '{}'); saved = data && typeof data === 'object' && !Array.isArray(data) ? data : {} } catch { saved = {} }
+  }
+  depths.value = Object.fromEntries(people.value.map(person => {
+    const value = Number(saved[person.id])
+    return [person.id, Number.isFinite(value) ? Math.max(-180, Math.min(180, value)) : 0]
+  }))
+}
 function viewKey() { return `clue-vault:relationship-view:${activeScriptId}:v2` }
 function spatialSceneState(ready: boolean) { spatialSceneReady.value = ready; if (!ready) projectedPositions.value = {}; if (ready) requestAnimationFrame(measure) }
 function persistView() {
@@ -177,16 +194,24 @@ function finishPersonMove() {
   if (gesture?.kind !== 'person' || !gesture.personId || !gesture.position || !gesture.beforePositions) return
   const current = positions.value[gesture.personId]
   if (!current || (current.x === gesture.position.x && current.y === gesture.position.y)) return
-  moveHistory.value = [...moveHistory.value.slice(-19), gesture.beforePositions]
+  moveHistory.value = [...moveHistory.value.slice(-19), { positions: gesture.beforePositions, depths: gesture.beforeDepths || { ...depths.value } }]
   persistLayout()
+}
+function finishDepthMove() {
+  if (props.readOnly || gesture?.kind !== 'depth' || !gesture.personId || gesture.depth === undefined || !gesture.beforePositions) return
+  if ((depths.value[gesture.personId] || 0) === gesture.depth) return
+  moveHistory.value = [...moveHistory.value.slice(-19), { positions: gesture.beforePositions, depths: gesture.beforeDepths || { ...depths.value } }]
+  persistDepths()
 }
 function undoPersonMove() {
   if (props.readOnly) return
   if (!moveHistory.value.length || linkSourceId.value || awaitingRelationship.value || pointers.size) return
   const previous = moveHistory.value[moveHistory.value.length - 1]
   moveHistory.value = moveHistory.value.slice(0, -1)
-  positions.value = Object.fromEntries(people.value.map(person => [person.id, previous[person.id] ? { ...previous[person.id] } : positions.value[person.id]]))
+  positions.value = Object.fromEntries(people.value.map(person => [person.id, previous.positions[person.id] ? { ...previous.positions[person.id] } : positions.value[person.id]]))
+  depths.value = Object.fromEntries(people.value.map(person => [person.id, previous.depths[person.id] || 0]))
   persistLayout()
+  persistDepths()
 }
 function persistLayout() {
   if (props.readOnly) return
@@ -277,10 +302,10 @@ function pointerDown(event: PointerEvent) {
   stage.value?.setPointerCapture(event.pointerId)
   if (pointers.size >= 2) { startPinch(); return }
   const personId = (event.target as Element).closest<HTMLElement>('[data-person]')?.dataset.person
-  gesture = { kind: linkSourceId.value ? 'connect' : personId ? 'person' : 'pan', start: point, pan: { ...pan.value }, personId, position: personId ? { ...positions.value[personId] } : undefined, beforePositions: personId && !linkSourceId.value ? Object.fromEntries(Object.entries(positions.value).map(([id, position]) => [id, { ...position }])) : undefined, moved: false }
+  gesture = { kind: linkSourceId.value ? 'connect' : personId ? (depthMode.value && spatial.value ? 'depth' : 'person') : 'pan', start: point, pan: { ...pan.value }, personId, position: personId ? { ...positions.value[personId] } : undefined, depth: personId ? depths.value[personId] || 0 : undefined, beforePositions: personId && !linkSourceId.value ? Object.fromEntries(Object.entries(positions.value).map(([id, position]) => [id, { ...position }])) : undefined, beforeDepths: personId && !linkSourceId.value ? { ...depths.value } : undefined, moved: false }
   dragging.value = !linkSourceId.value
   if (linkSourceId.value) updateConnection(event)
-  else if (!props.readOnly && personId && people.value.length > 1) {
+  else if (!props.readOnly && !depthMode.value && personId && people.value.length > 1) {
     longPressTimer = setTimeout(() => {
       if (gesture?.kind === 'person' && !gesture.moved && pointers.size === 1) beginConnection(personId)
     }, 500)
@@ -304,7 +329,9 @@ function pointerMove(event: PointerEvent) {
   const dx = point.x - gesture.start.x, dy = point.y - gesture.start.y
   if (Math.hypot(dx, dy) > 5) { gesture.moved = true; clearLongPress() }
   if (gesture.kind === 'connect') { updateConnection(event); return }
-  if (!props.readOnly && gesture.kind === 'person' && gesture.personId && gesture.position) {
+  if (!props.readOnly && gesture.kind === 'depth' && gesture.personId && gesture.depth !== undefined) {
+    depths.value[gesture.personId] = Math.max(-180, Math.min(180, gesture.depth - dy * 1.5))
+  } else if (!props.readOnly && gesture.kind === 'person' && gesture.personId && gesture.position) {
     if (gesture.moved) positions.value[gesture.personId] = { x: gesture.position.x + dx / zoom.value, y: gesture.position.y + dy / zoom.value }
   } else pan.value = { x: gesture.pan.x + dx, y: gesture.pan.y + dy }
 }
@@ -317,6 +344,9 @@ function pointerEnd(event: PointerEvent) {
   if (connecting && !cancelled) { updateConnection(event); targetId = linkTargetId.value }
   else if (gesture?.kind === 'person') {
     if (gesture.moved) finishPersonMove()
+    else if (!cancelled) selectedId.value = gesture.personId || ''
+  } else if (gesture?.kind === 'depth') {
+    if (gesture.moved) finishDepthMove()
     else if (!cancelled) selectedId.value = gesture.personId || ''
   } else if (gesture?.kind === 'pan' && !gesture.moved && !cancelled) selectedId.value = ''
   pointers.delete(event.pointerId)
@@ -349,11 +379,11 @@ function onKey(event: KeyboardEvent) {
 }
 watch(() => props.scriptId, async () => {
   persistView(); viewReady = false; activeScriptId = props.scriptId; moveHistory.value = []
-  cancelConnection(); selectedId.value = ''; search.value = ''; spatial.value = false; cameraRotation.value = { x: 0, y: 0 }; syncPeople(true)
+  cancelConnection(); selectedId.value = ''; search.value = ''; spatial.value = false; depthMode.value = false; cameraRotation.value = { x: 0, y: 0 }; syncPeople(true); syncDepths(true)
   await nextTick(); measure(); if (!restoreView()) fit(); viewReady = true; persistView()
 })
 watch([pan, zoom, spatial, cameraRotation], persistView, { deep: true, flush: 'sync' })
-watch(spatial, () => { spatialSceneReady.value = false; projectedPositions.value = {} })
+watch(spatial, value => { spatialSceneReady.value = false; projectedPositions.value = {}; if (!value) depthMode.value = false })
 watch(() => people.value.map(person => person.id).join('|'), async () => {
   if (linkSourceId.value && (!peopleById.value.has(linkSourceId.value) || (linkTargetId.value && !peopleById.value.has(linkTargetId.value)))) cancelConnection()
   syncPeople(); await nextTick(); measure(); if (!initialized) fit()
@@ -370,6 +400,7 @@ watch(fullscreen, async value => {
 })
 onMounted(async () => {
   syncPeople(true)
+  syncDepths(true)
   await nextTick()
   measure(); if (!restoreView()) fit(); initialized = true; viewReady = true; persistView()
   observer = new ResizeObserver(measure)
@@ -387,7 +418,7 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body" :disabled="!fullscreen">
-    <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-spatial': spatial && spatialSceneReady, 'is-webgl': spatial && spatialSceneReady, 'is-readonly': readOnly }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
+    <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-spatial': spatial && spatialSceneReady, 'is-webgl': spatial && spatialSceneReady, 'is-readonly': readOnly, 'is-depth-mode': depthMode }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>{{ people.length }} 位人物</strong><span>{{ relationships.length }} 条手动关系</span></div>
         <div class="graph-actions">
@@ -399,11 +430,11 @@ onBeforeUnmount(() => {
       </header>
           <div class="graph-hud">
             <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
-            <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '空间视图' : '空间预览' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button></div>
+            <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '空间视图' : '空间预览' }}</button><button v-if="spatial && !readOnly" type="button" class="graph-mode" :class="{ active: depthMode }" :aria-pressed="depthMode" @click="depthMode = !depthMode">{{ depthMode ? '前后拖动中' : '调整前后' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button></div>
           </div>
       <div class="graph-layout">
-        <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging, 'is-linking': linkSourceId }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @lostpointercapture="pointerEnd" @contextmenu.prevent @wheel="wheel">
-          <RelationshipSpatialScene v-if="spatial" :people="people" :relationships="relationships" :positions="positions" :pan="pan" :zoom="zoom" :rotation="cameraRotation" :selected-id="selectedId" :link-source-id="linkSourceId" :link-target-id="linkTargetId" :image-urls="imageUrls" :clue-counts="clueCounts" :center-id="centerId" :hide-unrelated="isolateRelated" @ready="spatialSceneState" @projected="projectedPositions = $event" />
+        <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging, 'is-linking': linkSourceId, 'is-depth-mode': depthMode }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @lostpointercapture="pointerEnd" @contextmenu.prevent @wheel="wheel">
+          <RelationshipSpatialScene v-if="spatial" :people="people" :relationships="relationships" :positions="positions" :depths="depths" :pan="pan" :zoom="zoom" :rotation="cameraRotation" :selected-id="selectedId" :link-source-id="linkSourceId" :link-target-id="linkTargetId" :image-urls="imageUrls" :clue-counts="clueCounts" :center-id="centerId" :hide-unrelated="isolateRelated" @ready="spatialSceneState" @projected="projectedPositions = $event" />
           <div class="graph-ground" aria-hidden="true"></div>
           <div class="graph-world" :style="worldStyle">
             <svg class="graph-edges" width="1" height="1" aria-hidden="true">
@@ -425,7 +456,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="linkSourceId" class="graph-connection-bar" role="status"><div><strong>连线模式 · {{ peopleById.get(linkSourceId)?.name }}</strong><span>{{ linkTargetId ? `连接到 ${peopleById.get(linkTargetId)?.name}` : '拖到目标人物，或松手后点选人物' }}</span></div><button type="button" @click="cancelConnection"><UiIcon name="close" :size="16" />取消连线</button></div>
           <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
-          <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : spatial ? '长按人物连线 · 拖动画布 · 双指缩放与旋转' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
+          <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : depthMode ? '上下拖动人物，调整它在空间中的前后位置 · 再次点按“调整前后”退出' : spatial ? '长按人物连线 · 拖动画布 · 双指缩放与旋转' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
         </div>
         <aside v-if="selected && !linkSourceId" class="graph-inspector">
           <header><span>人物详情</span><button type="button" class="graph-icon-button" aria-label="关闭人物详情" @click="selectedId = ''"><UiIcon name="close" :size="18" /></button></header>
@@ -473,6 +504,8 @@ onBeforeUnmount(() => {
 .graph-layout { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
 .graph-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: #f6f8fa; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
 .graph-stage.is-dragging { cursor: grabbing; }
+.graph-stage.is-depth-mode { cursor: default; }
+.is-depth-mode .person-node { cursor: ns-resize; }
 .graph-stage.is-linking, .is-linking .person-node { cursor: crosshair; }
 .graph-stage, .person-node, .person-node * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .graph-ground { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(#cbd5dd .7px, transparent .7px); background-size: 28px 28px; opacity: .45; }

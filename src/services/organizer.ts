@@ -12,9 +12,13 @@ type RawCluePoint = { source?: unknown; title?: unknown; category?: unknown; tag
 type RawResult = { people?: unknown; relationships?: unknown; timeline?: unknown; cluePoints?: unknown }
 
 const keyNames: Record<AiProvider, string> = { deepseek: 'deepseek_api_key', openai: 'openai_api_key' }
+const browserKeyNames: Record<AiProvider, string> = { deepseek: 'clue-vault:deepseek_api_key', openai: 'clue-vault:openai_api_key' }
 
 export async function hasApiKey(provider: AiProvider = 'deepseek'): Promise<boolean> {
   if (!Capacitor.isNativePlatform()) {
+    try {
+      if (localStorage.getItem(browserKeyNames[provider])?.trim()) return true
+    } catch { return false }
     if (!import.meta.env.DEV || provider !== 'openai') return false
     try {
       const response = await fetch('/__local-ai/openai/key-status')
@@ -26,22 +30,32 @@ export async function hasApiKey(provider: AiProvider = 'deepseek'): Promise<bool
 }
 
 export async function saveApiKey(value: string, provider: AiProvider = 'deepseek'): Promise<void> {
-  if (!Capacitor.isNativePlatform()) throw new Error('请在 iPad App 中配置 API Key')
   const key = value.trim()
   if (!key) throw new Error(`请粘贴 ${providerLabel(provider)} API Key`)
+  if (!Capacitor.isNativePlatform()) {
+    localStorage.setItem(browserKeyNames[provider], key)
+    return
+  }
   await SecureStorage.setSynchronize(false)
   await SecureStorage.setItem(keyNames[provider], key)
 }
 
 export async function removeApiKey(provider: AiProvider = 'deepseek'): Promise<void> {
-  if (!Capacitor.isNativePlatform()) return
+  if (!Capacitor.isNativePlatform()) {
+    localStorage.removeItem(browserKeyNames[provider])
+    return
+  }
   await SecureStorage.setSynchronize(false)
   await SecureStorage.removeItem(keyNames[provider])
 }
 
 async function readApiKey(provider: AiProvider): Promise<string> {
-  if (!Capacitor.isNativePlatform() && import.meta.env.DEV && provider === 'openai') return ''
-  if (!Capacitor.isNativePlatform()) throw new Error('请在 iPad App 中配置 API Key')
+  if (!Capacitor.isNativePlatform()) {
+    const browserKey = localStorage.getItem(browserKeyNames[provider])
+    if (browserKey?.trim()) return browserKey.trim()
+    if (import.meta.env.DEV && provider === 'openai') return ''
+    throw new Error(`请先在「档案管理」中保存 ${providerLabel(provider)} API Key`)
+  }
   await SecureStorage.setSynchronize(false)
   const key = await SecureStorage.getItem(keyNames[provider])
   if (!key?.trim()) throw new Error(`请先在「档案管理」中保存 ${providerLabel(provider)} API Key`)

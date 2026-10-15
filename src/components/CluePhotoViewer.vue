@@ -143,7 +143,7 @@ function movePointer(event: PointerEvent) {
     const [a, b] = [...pointers.values()]
     const point = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
     const distanceRatio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance
-    setScaleAt(pinch.scale * Math.pow(distanceRatio, 1.7), point)
+    setScaleAt(pinch.scale * Math.pow(distanceRatio, 2.4), point)
     return
   }
   moveDrag(event)

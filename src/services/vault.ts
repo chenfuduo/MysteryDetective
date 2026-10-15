@@ -37,6 +37,7 @@ type Table = 'scripts' | 'clues' | 'people' | 'relationships' | 'timeline' | 'bo
 type Stored = { id: string; scriptId?: string }
 const tables: Table[] = ['scripts', 'clues', 'people', 'relationships', 'timeline', 'board_items', 'board_links', 'notes', 'annotations', 'organization', 'workspace_state']
 const native = Capacitor.isNativePlatform()
+let browserOcrWorker: Promise<import('tesseract.js').Worker> | null = null
 let database: any = null
 let initialized = false
 let ftsReady = false
@@ -375,16 +376,64 @@ async function sourceBase64(uri: string): Promise<string> {
   const response = await fetch(uri)
   return bytesToBase64(new Uint8Array(await response.arrayBuffer()))
 }
+async function recognizeInBrowser(base64: string, mime: string): Promise<{ text: string; regions: OcrRegion[] }> {
+  if (!browserOcrWorker) {
+    browserOcrWorker = import('tesseract.js').then(({ createWorker }) => {
+      const base = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/tesseract`
+      return createWorker(['chi_sim', 'eng'], 1, {
+        workerPath: `${base}/worker.min.js`,
+        corePath: `${base}/core`,
+        langPath: `${base}/lang`,
+        workerBlobURL: false,
+        gzip: true,
+      })
+    }).catch(error => {
+      browserOcrWorker = null
+      throw error
+    })
+  }
+  const worker = await browserOcrWorker
+  const imageUrl = `data:${mime};base64,${base64}`
+  const { data } = await worker.recognize(imageUrl, {}, { blocks: true })
+  let regions: OcrRegion[] = []
+  if (data.blocks?.length) {
+    try {
+      const image = new Image()
+      image.src = imageUrl
+      await image.decode()
+      const lines = data.blocks.flatMap(block => block.paragraphs.flatMap(paragraph => paragraph.lines))
+      regions = normalizedOcrRegions(lines.map(line => ({
+        text: line.text,
+        confidence: Math.max(0, Math.min(1, line.confidence / 100)),
+        boundingBox: {
+          x: line.bbox.x0 / image.naturalWidth,
+          y: line.bbox.y0 / image.naturalHeight,
+          width: (line.bbox.x1 - line.bbox.x0) / image.naturalWidth,
+          height: (line.bbox.y1 - line.bbox.y0) / image.naturalHeight,
+        },
+      })))
+    } catch {
+      // Text recognition remains useful even when the browser cannot expose image bounds.
+    }
+  }
+  return { text: data.text, regions }
+}
 async function recognizeSavedClue(clue: ClueRecord, data?: string): Promise<ClueRecord> {
   let ocrText = ''
   let ocrRegions: OcrRegion[] = []
   let error = ''
   try {
     const base64 = data || await readImage(clue.imagePath)
-    const result = native ? await Ocr.process({ image: `data:${mimeForPath(clue.imagePath)};base64,${base64}` }) : { results: [] as { text: string }[] }
-    ocrText = result.results.map(item => item.text).join('\n')
-    ocrRegions = normalizedOcrRegions(result.results)
-    if (!ocrText.trim()) error = '未识别到文字，原始照片已保存，可以重新识别或手动输入'
+    if (native) {
+      const result = await Ocr.process({ image: `data:${mimeForPath(clue.imagePath)};base64,${base64}` })
+      ocrText = result.results.map(item => item.text).join('\n')
+      ocrRegions = normalizedOcrRegions(result.results)
+    } else {
+      const result = await recognizeInBrowser(base64, mimeForPath(clue.imagePath))
+      ocrText = result.text
+      ocrRegions = result.regions
+    }
+    if (!ocrText.trim()) error = native ? '未识别到文字，原始照片已保存，可以重新识别或手动输入' : '浏览器本地 OCR 未识别到文字，原始照片已保存，可重试或手动输入'
   } catch {
     error = '文字识别失败，原始照片已保存，请重新识别或手动输入'
   }

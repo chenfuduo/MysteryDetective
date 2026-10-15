@@ -769,6 +769,21 @@ async function retryOcr(clue: ClueRecord) {
     notify('文字识别完成，可以继续整理')
   })
 }
+async function recoverLegacyBrowserOcr() {
+  const scriptId = activeScriptId.value
+  if (!scriptId || Capacitor.isNativePlatform()) return
+  const legacyError = '未识别到文字，原始照片已保存，可以重新识别或手动输入'
+  const pending = (await vault.listClues(scriptId)).filter(clue => !clue.ocrText.trim() && clue.ocrStatus === 'failed' && clue.ocrError === legacyError)
+  for (const clue of pending) {
+    if (activeScriptId.value !== scriptId) return
+    try {
+      const result = await vault.retryClueOcr(scriptId, clue.id)
+      clues.value = clues.value.map(item => item.id === result.id ? result : item)
+    } catch {
+      // Keep older clues available for a manual retry if browser OCR cannot initialize.
+    }
+  }
+}
 async function changeRecentRound(clueId: string, round: string) {
   if (!clues.value.some(clue => clue.id === clueId && clue.scriptId === activeScriptId.value)) return
   await action(async () => { await vault.updateClue(clueId, { round: Number(round) || 1 }); await loadWorkspace() }, '轮次已更新')
@@ -1347,6 +1362,7 @@ onMounted(async () => {
   updateTimelineOrientation()
   timelineOrientationQuery.addEventListener('change', updateTimelineOrientation)
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
+  void recoverLegacyBrowserOcr()
 })
 onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(importPreview.value.token); if (organizationElapsedTimer) clearInterval(organizationElapsedTimer); organizationPauseRequested.value = true; document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
 </script>

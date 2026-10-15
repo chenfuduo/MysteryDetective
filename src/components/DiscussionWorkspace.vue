@@ -15,7 +15,7 @@ const tab = ref<Tab>('clues'), query = ref(''), fontScale = ref(1.25), selectedP
 const selectedClueId = ref(''), selectedPersonId = ref(''), selectedNoteId = ref(''), focusQuote = ref('')
 const photoUrl = ref(''), photoError = ref(false), photoZoom = ref(false), photoLocationCount = ref(0)
 const photoTab = ref<'photo' | 'text'>('photo'), innerFullscreen = ref(false), photoRetry = ref(0)
-const timelinePerson = ref(''), timelineScale = ref(1)
+const timelinePerson = ref('')
 const timeline = ref<InstanceType<typeof TimelineExplorer> | null>(null)
 const relationshipGraph = ref<InstanceType<typeof RelationshipExplorer> | null>(null)
 const closeButton = ref<HTMLButtonElement | null>(null)
@@ -125,7 +125,7 @@ onBeforeUnmount(() => { imageSequence += 1; window.removeEventListener('keydown'
             <div v-else class="discussion-empty"><UiIcon name="archive" :size="40" /><h3>{{ selectedPersonFilter ? '这个人物暂无相关线索' : '还没有线索' }}</h3><p>退出讨论模式后可拍照或导入资料。</p><button v-if="selectedPersonFilter" type="button" class="discussion-action" @click="selectedPersonFilter = ''">查看全部线索</button></div>
           </template>
           <RelationshipExplorer v-else-if="tab === 'relationships'" ref="relationshipGraph" :key="`relationship:${scriptId}`" :script-id="scriptId" :people="people" :relationships="relationships" :image-urls="emptyImages" :clue-counts="clueCounts" :read-only="true" @view-person="openPerson" @view-clues="viewPersonClues" @fullscreen-change="innerFullscreen = $event" />
-          <TimelineExplorer v-else-if="tab === 'timeline'" ref="timeline" :key="`timeline:${scriptId}`" :script-id="scriptId" :events="events" :people="people" :clues="clues" v-model:person-id="timelinePerson" v-model:scale="timelineScale" :read-only="true" @open-clue="openClue" @fullscreen-change="innerFullscreen = $event" />
+          <TimelineExplorer v-else-if="tab === 'timeline'" ref="timeline" :key="`timeline:${scriptId}`" :script-id="scriptId" :events="events" :people="people" :clues="clues" v-model:person-id="timelinePerson" :read-only="true" @open-clue="openClue" @fullscreen-change="innerFullscreen = $event" />
           <section v-else class="discussion-notes"><div class="discussion-section-heading"><div><h3>笔记</h3><span>{{ notes.length }} 篇 · 仅供查看</span></div></div><button v-for="note in notes" :key="note.id" type="button" class="discussion-note-card" @click="openNote(note.id)"><strong>{{ note.text.split('\n')[0] || '未命名笔记' }}</strong><p>{{ note.text }}</p><span>{{ peopleById.get(note.personId)?.name || '剧本笔记' }}{{ note.clueId && clues.some(clue => clue.id === note.clueId) ? ' · 附原线索' : '' }}</span></button><div v-if="!notes.length" class="discussion-empty"><UiIcon name="note" :size="40" /><h3>还没有笔记</h3><p>退出讨论模式后可创建文字笔记。</p></div></section>
         </main>
         <aside v-if="detailsOpen" class="discussion-details" aria-label="只读资料详情">

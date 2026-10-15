@@ -5,13 +5,18 @@ import UiIcon from './UiIcon.vue'
 import type { ClueRecord, PersonRecord, TimelineRecord } from '../services/vault'
 
 type Side = 'upper' | 'lower'
+type LayoutMode = 'proportional' | 'sequence'
+const sequenceStep = 60_000
+const sequenceOrigin = Date.UTC(2000, 0, 1)
+function savedLayoutMode(scriptId: string): LayoutMode {
+  try { return localStorage.getItem(`cluevault:timeline-layout:${encodeURIComponent(scriptId)}`) === 'sequence' ? 'sequence' : 'proportional' } catch { return 'proportional' }
+}
 type TimeWindow = { start: Date; end: Date }
 type DensityGroup = { id: string; side: Side; start: number; end: number; members: TimelineRecord[] }
 type VisibleDensityGroup = DensityGroup & { visibleMembers: TimelineRecord[] }
-const props = withDefaults(defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; scale: number; readOnly?: boolean; sourceReviewEventIds?: string[] }>(), { sourceReviewEventIds: () => [] })
+const props = withDefaults(defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; readOnly?: boolean; sourceReviewEventIds?: string[] }>(), { sourceReviewEventIds: () => [] })
 const emit = defineEmits<{
   'update:personId': [value: string]
-  'update:scale': [value: number]
   'edit-event': [event: TimelineRecord]
   'open-clue': [clueId: string, quote?: string]
   'toggle-marker': [event: TimelineRecord]
@@ -24,13 +29,13 @@ const elements: Record<Side, HTMLElement | null> = { upper: null, lower: null }
 const instances: Record<Side, Timeline | null> = { upper: null, lower: null }
 const fullscreen = ref(false)
 const dimensional = ref(true)
+const layoutMode = ref<LayoutMode>(savedLayoutMode(props.scriptId))
 const densityEnabled = ref(true)
 const clusterPanel = ref<HTMLElement | null>(null)
 const selectedClusterId = ref('')
 const selectedId = ref('')
 const timeWindow = ref<TimeWindow | null>(null)
 const plotWidth = ref(800)
-let appliedScale = props.scale || 1
 let resizeObserver: ResizeObserver | null = null
 let redrawFrame = 0
 let densityFrame = 0
@@ -49,21 +54,25 @@ const allEvents = computed(() => props.events.filter(event => event.scriptId ===
 const visibleEvents = computed(() => allEvents.value.filter(event => !props.personId || event.personIds.includes(props.personId)))
 const datedCount = computed(() => allEvents.value.filter(event => !event.startsAt.startsWith('--')).length)
 const yearlessCount = computed(() => allEvents.value.length - datedCount.value)
-const eventSides = computed(() => new Map([...allEvents.value].sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id)).map((event, index) => [event.id, sides[index % 2]])))
+const orderedEvents = computed(() => [...allEvents.value].sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id)))
+// Coordinates always use every event in the script; filters only hide cards.
+const sequencePositions = computed(() => new Map(orderedEvents.value.map((event, index) => [event.id, sequenceOrigin + index * sequenceStep])))
+const eventSides = computed(() => new Map(orderedEvents.value.map((event, index) => [event.id, sides[index % 2]])))
+function eventPosition(event: TimelineRecord) { return layoutMode.value === 'sequence' ? sequencePositions.value.get(event.id)! : eventTime(event) }
 // Use the full script and a zoom bucket so person filters and panning never move group anchors.
 const densityTimePerPixel = computed(() => {
-  const range = timeWindow.value ?? fullWindow(props.scale || 1)
+  const range = timeWindow.value ?? initialWindow()
   const value = Math.max(1, (range.end.getTime() - range.start.getTime()) / Math.max(200, plotWidth.value))
   return Math.pow(1.12, Math.round(Math.log(value) / Math.log(1.12)))
 })
 const densityGroups = computed<DensityGroup[]>(() => {
-  const threshold = densityEnabled.value ? densityTimePerPixel.value * 170 : -1
+  const threshold = layoutMode.value === 'proportional' && densityEnabled.value ? densityTimePerPixel.value * 170 : -1
   const groups: DensityGroup[] = []
   for (const side of sides) {
     const members = [...allEvents.value].filter(event => eventSides.value.get(event.id) === side).sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id))
     let group: DensityGroup | undefined
     for (const event of members) {
-      const time = eventTime(event)
+      const time = eventPosition(event)
       if (group && time - group.start <= threshold) { group.members.push(event); group.end = time }
       else { group = { id: event.id, side, start: time, end: time, members: [event] }; groups.push(group) }
     }
@@ -80,7 +89,7 @@ const densitySummary = computed(() => {
 const selectedEvent = computed(() => visibleEvents.value.find(event => event.id === selectedId.value))
 const sourceReviewIds = computed(() => new Set(props.sourceReviewEventIds))
 const selectedPeople = computed(() => props.people.filter(person => selectedEvent.value?.personIds.includes(person.id)))
-const viewCacheKey = computed(() => `cluevault:timeline-view:${encodeURIComponent(props.scriptId)}:${referenceYear.value}`)
+const viewCacheKey = computed(() => `cluevault:timeline-view:${encodeURIComponent(props.scriptId)}:${referenceYear.value}:${layoutMode.value}`)
 const selectedEvidence = computed(() => {
   const event = selectedEvent.value
   if (!event || event.scriptId !== props.scriptId) return []
@@ -182,18 +191,26 @@ function clusterContent(group: VisibleDensityGroup) {
 function memberPeople(event: TimelineRecord) {
   return props.people.filter(person => person.scriptId === props.scriptId && event.personIds.includes(person.id)).map(person => person.name).join('、')
 }
-function fullWindow(scale = 1): TimeWindow {
-  const times = allEvents.value.map(eventTime)
+function fullWindow(): TimeWindow {
+  const times = allEvents.value.map(eventPosition)
   const first = times.length ? Math.min(...times) : Date.now()
   const last = times.length ? Math.max(...times) : first
-  const span = Math.max(last - first, 3 * 60 * 60_000) * 1.18 / scale
+  const span = Math.max(last - first, layoutMode.value === 'sequence' ? sequenceStep * 2 : 3 * 60 * 60_000) * 1.18
   const center = (first + last) / 2
   return { start: new Date(center - span / 2), end: new Date(center + span / 2) }
+}
+function initialWindow(): TimeWindow {
+  if (layoutMode.value === 'proportional' || !orderedEvents.value.length) return fullWindow()
+  const whole = fullWindow()
+  const span = Math.min(whole.end.getTime() - whole.start.getTime(), Math.max(3, plotWidth.value / 150) * sequenceStep)
+  const selected = selectedEvent.value
+  const start = selected ? eventPosition(selected) - span / 2 : eventPosition(orderedEvents.value[0]!) - sequenceStep * .65
+  return { start: new Date(start), end: new Date(start + span) }
 }
 function bounds() {
   const range = fullWindow()
   const span = range.end.getTime() - range.start.getTime()
-  return { min: new Date(range.start.getTime() - span * .35), max: new Date(range.end.getTime() + span * .35), zoomMin: 60_000, zoomMax: span * 1.7 }
+  return { min: new Date(range.start.getTime() - span * .35), max: new Date(range.end.getTime() + span * .35), zoomMin: layoutMode.value === 'sequence' ? sequenceStep * 2 : 60_000, zoomMax: span * 1.7 }
 }
 function items(side: Side) {
   return visibleDensityGroups.value.filter(group => group.side === side).map(group => {
@@ -202,7 +219,7 @@ function items(side: Side) {
       return { id: group.id, start: new Date(group.start), content: clusterContent(group), className: `timeline-density-cluster ${yearless === group.visibleMembers.length ? 'timeline-node-yearless' : yearless ? 'timeline-node-mixed' : 'timeline-node-dated'}` }
     }
     const event = group.visibleMembers[0]!
-    return { id: event.id, start: new Date(eventTime(event)), content: eventContent(event), className: `${event.startsAt.startsWith('--') ? 'timeline-node-yearless' : 'timeline-node-dated'}${event.yearlessMarkerIgnored ? ' timeline-marker-ignored' : ''}` }
+    return { id: event.id, start: new Date(eventPosition(event)), content: eventContent(event), className: `${event.startsAt.startsWith('--') ? 'timeline-node-yearless' : 'timeline-node-dated'}${event.yearlessMarkerIgnored ? ' timeline-marker-ignored' : ''}` }
   })
 }
 function selectRenderedItem(id: string) {
@@ -263,7 +280,7 @@ async function syncCharts() {
     timeWindow.value = null
     return
   }
-  const range = timeWindow.value ?? fullWindow(props.scale || 1)
+  const range = timeWindow.value ?? initialWindow()
   timeWindow.value = range
   for (const side of sides) {
     const element = elements[side]
@@ -301,22 +318,21 @@ async function syncCharts() {
   if (selectedEvent.value) selectEvent(selectedId.value)
   scheduleRedraw()
 }
-function fitAll() {
-  appliedScale = 1
-  emit('update:scale', 1)
-  applyWindow(fullWindow())
-}
-function zoom(factor: number) {
-  const range = timeWindow.value
-  if (!range) return
-  const center = (range.start.getTime() + range.end.getTime()) / 2
-  const span = Math.max(60_000, (range.end.getTime() - range.start.getTime()) / factor)
-  applyWindow({ start: new Date(center - span / 2), end: new Date(center + span / 2) })
-}
+function fitAll() { applyWindow(fullWindow()) }
 const axisTicks = computed(() => {
   const range = timeWindow.value
   if (!range) return []
   const start = range.start.getTime(), end = range.end.getTime(), span = end - start
+  if (layoutMode.value === 'sequence') {
+    let lastLeft = -Infinity
+    return orderedEvents.value.flatMap((event, index) => {
+      const position = (eventPosition(event) - start) / span * 100
+      const left = position * plotWidth.value / 100
+      if (position <= 2 || position >= 98 || left - lastLeft < 126) return []
+      lastLeft = left
+      return [{ id: event.id, left: `${position}%`, label: `第 ${index + 1} 个`, context: dateLabel(event.startsAt) }]
+    })
+  }
   const target = span / Math.max(2, Math.floor(plotWidth.value / 126))
   const intervals = [60_000, 5*60_000, 15*60_000, 30*60_000, 3600_000, 3*3600_000, 6*3600_000, 12*3600_000, 86400_000, 2*86400_000, 7*86400_000]
   const interval = intervals.find(value => value >= target)
@@ -353,11 +369,11 @@ const axisEvents = computed(() => {
   const range = timeWindow.value
   if (!range) return []
   const start = range.start.getTime(), span = range.end.getTime() - start
-  return visibleEvents.value.map(event => ({ event, position: (eventTime(event) - start) / span * 100 })).filter(item => item.position >= 0 && item.position <= 100)
+  return visibleEvents.value.map(event => ({ event, position: (eventPosition(event) - start) / span * 100 })).filter(item => item.position >= 0 && item.position <= 100)
 })
 function overviewMarkers() {
   const range = fullWindow(), span = range.end.getTime() - range.start.getTime()
-  return allEvents.value.map(event => ({ id: event.id, left: `${(eventTime(event) - range.start.getTime()) / span * 100}%`, yearless: event.startsAt.startsWith('--'), visible: !props.personId || event.personIds.includes(props.personId) }))
+  return allEvents.value.map(event => ({ id: event.id, left: `${(eventPosition(event) - range.start.getTime()) / span * 100}%`, yearless: event.startsAt.startsWith('--'), visible: !props.personId || event.personIds.includes(props.personId) }))
 }
 function overviewWindow() {
   const whole = fullWindow(), current = timeWindow.value ?? whole
@@ -389,9 +405,9 @@ async function focusEvent(eventId: string): Promise<boolean> {
   const event = visibleEvents.value.find(item => item.id === eventId && item.scriptId === props.scriptId)
   if (!event) return false
   if (!timeWindow.value) await syncCharts()
-  const range = timeWindow.value ?? fullWindow(props.scale || 1)
+  const range = timeWindow.value ?? initialWindow()
   const span = range.end.getTime() - range.start.getTime()
-  const center = eventTime(event)
+  const center = eventPosition(event)
   applyWindow({ start: new Date(center - span / 2), end: new Date(center + span / 2) })
   selectEvent(event.id)
   scheduleRedraw()
@@ -415,14 +431,13 @@ function onKeydown(event: KeyboardEvent) {
 }
 watch(() => [props.events, props.personId], syncCharts, { deep: true })
 watch(() => visibleDensityGroups.value.map(group => `${group.id}:${group.visibleMembers.map(event => event.id).join(',')}`).join('|'), scheduleDensityRefresh)
-watch(() => props.scale, next => {
-  if (!Number.isFinite(next) || next <= 0) return
-  zoom(next / appliedScale); appliedScale = next
+watch(layoutMode, value => {
+  try { localStorage.setItem(`cluevault:timeline-layout:${encodeURIComponent(props.scriptId)}`, value) } catch {}
 })
 watch(viewCacheKey, async () => {
   persistView()
   for (const side of sides) { instances[side]?.destroy(); instances[side] = null }
-  selectedId.value = ''; selectedClusterId.value = ''; appliedScale = props.scale || 1
+  selectedClusterId.value = ''
   restoreView()
   await syncCharts()
 })
@@ -466,14 +481,14 @@ onUnmounted(() => {
         <button class="explorer-button fullscreen-button" :aria-label="fullscreen ? '退出全屏时间线' : '全屏查看时间线'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'close' : 'fullscreen'" :size="19" /><span>{{ fullscreen ? '退出全屏' : '全屏' }}</span></button>
       </header>
       <div class="explorer-scale-row">
-        <div class="explorer-scale"><span>时间间距</span><button aria-label="缩小时间线" @click="emit('update:scale', Math.max(.25, scale / 1.3))"><UiIcon name="zoomOut" :size="18" /></button><input type="range" min="0.25" max="4" step="0.05" :value="scale" aria-label="时间线间距缩放" @input="emit('update:scale', Number(($event.target as HTMLInputElement).value))" /><button aria-label="放大时间线" @click="emit('update:scale', Math.min(4, scale * 1.3))"><UiIcon name="zoomIn" :size="18" /></button><output>{{ Math.round(scale * 100) }}%</output></div>
+        <div class="explorer-layout-toggle" role="group" aria-label="时间线排列方式"><button :class="{ active: layoutMode === 'proportional' }" :aria-pressed="layoutMode === 'proportional'" @click="layoutMode = 'proportional'">按时间比例</button><button :class="{ active: layoutMode === 'sequence' }" :aria-pressed="layoutMode === 'sequence'" @click="layoutMode = 'sequence'">按事件顺序</button></div>
         <span class="explorer-hint"><UiIcon name="move" :size="15" />拖动平移 · 双指缩放 · 点事件看详情</span>
       </div>
-      <div v-if="allEvents.length" class="density-controls"><label class="density-toggle"><input v-model="densityEnabled" type="checkbox" />收拢密集事件</label><span aria-live="polite">{{ densitySummary }}</span></div>
+      <div v-if="allEvents.length && layoutMode === 'proportional'" class="density-controls"><label class="density-toggle"><input v-model="densityEnabled" type="checkbox" />收拢密集事件</label><span aria-live="polite">{{ densitySummary }}</span></div>
       <div v-if="allEvents.length" class="explorer-stage">
         <article class="timeline-lane unified-lane">
           <div class="lane-heading"><strong>事件时间线</strong><span class="timeline-legend"><i class="dated-swatch"></i>有年份 {{ datedCount }}<i class="yearless-swatch"></i>无年份 {{ yearlessCount }}</span><small>{{ visibleEvents.length }} 个事件</small></div>
-          <p v-if="yearlessCount" class="timeline-reference">{{ datedCount ? `无年份事件按月日对齐至 ${referenceYear} 年的位置，仅用于显示，未补全年份。` : '按月日与时刻排列，卡片保留无年份标记。' }}</p>
+          <p class="timeline-reference"><template v-if="layoutMode === 'sequence'">按时间先后紧凑排列，间距不代表时长；人物筛选保留原位置。</template><template v-else-if="yearlessCount">{{ datedCount ? `无年份事件按月日对齐至 ${referenceYear} 年的位置，仅用于显示，未补全年份。` : '按月日与时刻排列，卡片保留无年份标记。' }}</template><template v-else>按实际时间差排列；人物筛选保留原位置。</template></p>
           <div ref="plotElement" class="unified-chart">
             <div v-for="side in sides" :key="side" class="timeline-half" :class="`half-${side}`"><div class="lane-chart" @pointerdown.capture="beginChartPointer" @pointermove.capture="moveChartPointer" @click.capture="selectChartEvent"><div :ref="element => setChartElement(side, element)" class="explorer-vis-host"></div></div></div>
             <div class="shared-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="tick in axisTicks" :key="tick.id" class="shared-axis-tick" :style="{ left: tick.left }"><span>{{ tick.label }}</span><small v-if="tick.context">{{ tick.context }}</small></i><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ left: `${item.position}%` }"></i></div>
@@ -517,11 +532,10 @@ onUnmounted(() => {
 .explorer-button:active, .explorer-view-toggle button:active { transform: scale(.97); }
 .fullscreen-button { color: #fff; background: var(--explorer-green); border-color: var(--explorer-green); }
 .explorer-scale-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 0 18px 10px; flex-shrink: 0; background: #fff; border-bottom: 1px solid #e7ece4; }
-.explorer-scale { display: flex; align-items: center; gap: 7px; min-width: 0; width: 370px; max-width: 52%; }
-.explorer-scale > span { color: #839086; font-size: 11px; white-space: nowrap; }
-.explorer-scale button { display: grid; place-items: center; flex-shrink: 0; width: 34px; height: 36px; padding: 0; border: 0; background: transparent; color: #56755f; cursor: pointer; }
-.explorer-scale input { width: 100%; min-width: 30px; height: 28px; margin: 0; padding: 0; border: 0; box-shadow: none; accent-color: var(--explorer-green); }
-.explorer-scale output { min-width: 37px; color: #46674f; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+.explorer-layout-toggle { display:flex;align-items:center;gap:4px;padding:4px;border-radius:12px;background:#f0f3ed;flex-shrink:0; }
+.explorer-layout-toggle button { border:0;border-radius:9px;background:transparent;color:#82917b;padding:0 14px;min-height:40px;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s,box-shadow .15s; }
+.explorer-layout-toggle button.active { background:#fff;color:#315c48;font-weight:650;box-shadow:0 2px 6px #29452b0c; }
+.explorer-layout-toggle button:focus-visible { outline:2px solid #75986b;outline-offset:2px; }
 .explorer-hint { display: flex; align-items: center; gap: 5px; color: #94a095; font-size: 11px; }
 .density-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 14px; flex-shrink: 0; padding: 7px 18px; border-bottom: 1px solid #e7ece4; background: #fff; }
 .density-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: #45634d; font-size: 11px; cursor: pointer; }
@@ -635,6 +649,6 @@ onUnmounted(() => {
 .is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-selected.vis-box) { border-color: #b28460 !important; background: linear-gradient(145deg, #fffaf2, #f8e5ce) !important; box-shadow: inset 0 1px 0 #fff, 0 0 0 2px #bd947430, 0 3px 0 #d6b698, 0 5px 0 #e6cdb5, 0 12px 22px #795b3024; }
 @keyframes detail-appear { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 950px) { .explorer-toolbar { gap: 7px; padding: 11px 12px 8px; } .explorer-heading { gap: 6px; } .explorer-heading-icon { width: 32px; height: 32px; border-radius: 9px; } .explorer-heading strong { font-size: 13px; } .person-filter { min-width: 112px; } .explorer-button { padding: 0 9px; font-size: 11px; } .explorer-view-toggle button { padding: 0 8px; font-size: 11px; } .explorer-scale-row { padding: 0 12px 8px; } .explorer-hint { font-size: 10px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 12px; } .timeline-reference { padding-inline: 12px; } .unified-chart { margin-inline: 10px; } .lane-overview { margin-inline: 10px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
-@media (max-width: 650px) { .event-cluster-panel { top: 190px; right: 10px; bottom: 12px; max-height: calc(100% - 202px); width: calc(100% - 20px); } .density-controls { padding: 6px 12px; } .explorer-heading { width: calc(100% - 125px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-scale { max-width: 100%; width: 100%; } .explorer-hint { display: none; } .lane-heading { gap: 6px 10px; } .timeline-legend { font-size: 9px; } .timeline-reference { font-size: 9px; } .shared-axis-tick > span { font-size: 9px; } .shared-axis-tick > small { font-size: 8px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail { gap: 10px; flex-wrap: wrap; padding: 12px 38px 12px 14px; } .detail-evidence { order: 3; flex-basis: 100%; max-width: none; } .detail-actions { max-width: 115px; } .detail-main h3 { font-size: 13px; } }
+@media (max-width: 650px) { .event-cluster-panel { top: 190px; right: 10px; bottom: 12px; max-height: calc(100% - 202px); width: calc(100% - 20px); } .density-controls { padding: 6px 12px; } .explorer-heading { width: calc(100% - 125px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-layout-toggle { max-width:100%; } .explorer-layout-toggle button { padding-inline:12px; } .explorer-hint { display: none; } .lane-heading { gap: 6px 10px; } .timeline-legend { font-size: 9px; } .timeline-reference { font-size: 9px; } .shared-axis-tick > span { font-size: 9px; } .shared-axis-tick > small { font-size: 8px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail { gap: 10px; flex-wrap: wrap; padding: 12px 38px 12px 14px; } .detail-evidence { order: 3; flex-basis: 100%; max-width: none; } .detail-actions { max-width: 115px; } .detail-main h3 { font-size: 13px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button { transition: none; } }
 </style>

@@ -36,9 +36,9 @@ const typeMaterials: Record<string, THREE.MeshPhysicalMaterial> = {
   dated: new THREE.MeshPhysicalMaterial({ color: '#62788d', metalness: 0.28, roughness: 0.33, clearcoat: 0.52, clearcoatRoughness: 0.24 }),
   yearless: new THREE.MeshPhysicalMaterial({ color: '#8d654b', metalness: 0.22, roughness: 0.34, clearcoat: 0.58, clearcoatRoughness: 0.23 }),
   mixed: new THREE.MeshPhysicalMaterial({ color: '#65727e', metalness: 0.25, roughness: 0.38, clearcoat: 0.42, clearcoatRoughness: 0.3 }),
-  selected: new THREE.MeshPhysicalMaterial({ color: '#718ba3', metalness: 0.32, roughness: 0.26, clearcoat: 0.64, clearcoatRoughness: 0.2 }),
-  yearlessSelected: new THREE.MeshPhysicalMaterial({ color: '#a97450', metalness: 0.3, roughness: 0.28, clearcoat: 0.62, clearcoatRoughness: 0.2 }),
-  mixedSelected: new THREE.MeshPhysicalMaterial({ color: '#b5c4d1', metalness: 0.32, roughness: 0.28, clearcoat: 0.54, clearcoatRoughness: 0.22 }),
+  selected: new THREE.MeshPhysicalMaterial({ color: '#4d687e', metalness: 0.16, roughness: 0.37, clearcoat: 0.38, clearcoatRoughness: 0.3 }),
+  yearlessSelected: new THREE.MeshPhysicalMaterial({ color: '#75533b', metalness: 0.12, roughness: 0.4, clearcoat: 0.38, clearcoatRoughness: 0.32 }),
+  mixedSelected: new THREE.MeshPhysicalMaterial({ color: '#536978', metalness: 0.15, roughness: 0.38, clearcoat: 0.38, clearcoatRoughness: 0.3 }),
 }
 const dotMaterials = {
   dated: new THREE.MeshPhysicalMaterial({ color: '#afc5d9', metalness: 0.42, roughness: 0.24, clearcoat: 0.58 }),
@@ -167,14 +167,15 @@ function syncObjects() {
     const event = eventById.get(id)
     const type = cardType(element, event)
     const selected = id === props.selectedId
+    card.castShadow = !selected
     card.material = selected ? typeMaterials[type === 'yearless' ? 'yearlessSelected' : type === 'mixed' ? 'mixedSelected' : 'selected']! : typeMaterials[type]!
     const centerX = rect.left - containerRect.left + rect.width / 2
     const centerY = rect.top - containerRect.top + rect.height / 2
-    const depth = selected ? 36 : id.startsWith('timeline-cluster:') ? 18 : 12
+    const depth = selected ? 20 : id.startsWith('timeline-cluster:') ? 18 : 12
     card.position.x = centerX
     card.position.y = height - centerY
     card.userData.targetDepth = depth
-    card.rotation.set((element.classList.contains('half-upper') ? 1 : -1) * 0.045, (selected ? -1 : 1) * 0.085, 0)
+    card.rotation.set((element.classList.contains('half-upper') ? 1 : -1) * 0.035, 0.035, 0)
     card.scale.set(Math.max(44, rect.width - 4) / 2, Math.max(30, rect.height - 5), 12 / 0.14)
     card.visible = true
 
@@ -191,7 +192,7 @@ function syncObjects() {
     const stemLength = Math.max(0, Math.abs(axisY - card.position.y) - 10)
     stem.position.set(centerX, (axisY + card.position.y) / 2, 12)
     stem.scale.set(1.8, stemLength, 1.8)
-    stem.userData.targetDepth = selected ? 33 : 12
+    stem.userData.targetDepth = selected ? 18 : 12
     stem.visible = stemLength > 4
   }
   for (const [id, card] of cards) if (!seen.has(id)) { scene.remove(card); card.geometry !== unitBox && card.geometry.dispose(); cards.delete(id) }
@@ -220,8 +221,8 @@ function syncObjects() {
     marker.material = item.event.startsAt.startsWith('--') ? dotMaterials.yearless : dotMaterials.dated
     marker.position.x = (item.position / 100) * width
     marker.position.y = height / 2
-    marker.userData.targetDepth = id === props.selectedId ? 30 : 14
-    marker.scale.setScalar(id === props.selectedId ? 7.5 : 5.6)
+    marker.userData.targetDepth = id === props.selectedId ? 20 : 14
+    marker.scale.setScalar(id === props.selectedId ? 6.5 : 5.6)
     marker.visible = true
   }
   for (const [id, marker] of markers) if (!dotIds.has(id)) { scene.remove(marker); markers.delete(id) }

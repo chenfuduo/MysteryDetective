@@ -681,7 +681,7 @@ async function retryTimeExtraction(sourceNo: number) {
   await action(async () => {
     await performOrganization([clue.id])
     await loadWorkspace()
-    notify(organizationPaused.value ? '已保存进度，可稍后继续' : '这条线索已重新提取，建议已更新')
+    notify(organizationPaused.value ? '已保存进度，可稍后继续' : '重新查找完成；到“整理建议”里点“直接录入”，即可把新时间加入时间线')
   })
 }
 async function ignoreTimeIssues(ids: string[]) {

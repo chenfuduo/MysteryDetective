@@ -21,8 +21,27 @@ let floor: THREE.Mesh | null = null
 let observer: ResizeObserver | null = null
 let mutations: MutationObserver | null = null
 let frame = 0
+let previousFrame = 0
+let visibleIds: string[] = []
+const depthById = new Map<string, number>()
+const targetDepthById = new Map<string, number>()
 let previousSize = ''
 let actualCount = 0
+
+function instanceCapacity(count: number) {
+  let capacity = 16
+  while (capacity < count) capacity *= 2
+  return capacity
+}
+
+function createCards() {
+  if (!scene || !renderer) return
+  cards = new THREE.InstancedMesh(geometry, material, instanceCapacity(props.clues.length))
+  cards.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+  cards.castShadow = renderer.shadowMap.enabled
+  cards.receiveShadow = true
+  scene.add(cards)
+}
 
 function init() {
   if (!props.container || !canvasElement.value) return
@@ -65,11 +84,7 @@ function init() {
   floor.receiveShadow = renderer.shadowMap.enabled
   scene.add(floor)
 
-  cards = new THREE.InstancedMesh(geometry, material, Math.max(1, props.clues.length))
-  cards.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-  cards.castShadow = renderer.shadowMap.enabled
-  cards.receiveShadow = true
-  scene.add(cards)
+  createCards()
   observer = new ResizeObserver(resize)
   observer.observe(props.container)
   mutations = new MutationObserver(schedule)
@@ -97,13 +112,19 @@ function resize() {
 }
 
 function syncInstances() {
-  if (!props.container || !cards || !camera || !renderer) return
+  if (!props.container || !scene || !camera || !renderer) return
+  if (!cards || cards.instanceMatrix.count < props.clues.length) {
+    if (cards) { scene.remove(cards); cards.dispose() }
+    createCards()
+  }
+  if (!cards) return
   const parent = props.container.getBoundingClientRect()
   const visibleElements = [...props.container.querySelectorAll<HTMLElement>('.clue-card[data-clue-id]')]
   const visible = new Map(visibleElements.map(element => [element.dataset.clueId || '', element]))
   const width = Math.max(1, props.container.clientWidth)
   const height = Math.max(1, props.container.clientHeight)
   actualCount = 0
+  visibleIds = []
 
   props.clues.forEach((clue, index) => {
     const element = visible.get(clue.id)
@@ -113,9 +134,13 @@ function syncInstances() {
     const x = rect.left - parent.left + rect.width / 2
     const y = height - (rect.top - parent.top + rect.height / 2)
     const isSelected = clue.id === props.selectedId
-    const depth = isSelected ? 34 : 10 + (index % 4) * 3
+    const targetDepth = isSelected ? 34 : 10 + (index % 4) * 3
+    const currentDepth = depthById.get(clue.id) ?? targetDepth
+    targetDepthById.set(clue.id, targetDepth)
+    depthById.set(clue.id, currentDepth)
+    visibleIds.push(clue.id)
     const relativeX = x - width / 2
-    dummy.position.set(x, y, depth)
+    dummy.position.set(x, y, currentDepth)
     dummy.rotation.set(((index % 2) ? 1 : -1) * 0.026, Math.max(-0.06, Math.min(0.06, relativeX / 9000)), 0)
     const compactList = element.closest('.clue-collection')?.classList.contains('list')
     dummy.scale.set(Math.max(80, rect.width - 6) / 2, Math.max(70, rect.height - 6), (compactList ? 8 : 12) / 0.16)
@@ -137,11 +162,32 @@ function syncInstances() {
 
 function schedule() {
   if (!renderer || frame) return
-  frame = requestAnimationFrame(() => {
-    frame = 0
-    if (!renderer || !scene || !camera) return
-    renderer.render(scene, camera)
+  frame = requestAnimationFrame(renderFrame)
+}
+
+function renderFrame(now: number) {
+  frame = 0
+  if (!renderer || !scene || !camera || !cards) return
+  const delta = previousFrame ? Math.min((now - previousFrame) / 1000, 0.05) : 1 / 60
+  previousFrame = now
+  let moving = false
+  visibleIds.forEach((id, index) => {
+    const target = targetDepthById.get(id)
+    const current = depthById.get(id)
+    if (target === undefined || current === undefined || Math.abs(target - current) < 0.04) return
+    const next = THREE.MathUtils.damp(current, target, 13, delta)
+    depthById.set(id, next)
+    cards!.getMatrixAt(index, dummy.matrix)
+    dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale)
+    dummy.position.z = next
+    dummy.updateMatrix()
+    cards!.setMatrixAt(index, dummy.matrix)
+    moving = true
   })
+  if (moving) cards.instanceMatrix.needsUpdate = true
+  renderer.render(scene, camera)
+  if (moving) frame = requestAnimationFrame(renderFrame)
+  else previousFrame = 0
 }
 
 function onScroll() {
@@ -179,6 +225,9 @@ onUnmounted(() => {
   camera = null
   canvas = null
   cards = null
+  visibleIds = []
+  depthById.clear()
+  targetDepthById.clear()
   floor = null
 })
 </script>

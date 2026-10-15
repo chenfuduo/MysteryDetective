@@ -20,6 +20,7 @@ let renderer: THREE.WebGLRenderer | null = null
 let resizeObserver: ResizeObserver | null = null
 let mutationObserver: MutationObserver | null = null
 let frame = 0
+let previousFrame = 0
 let lastChartWidth = 0
 let lastChartHeight = 0
 let axisRail: THREE.Mesh | null = null
@@ -160,7 +161,9 @@ function syncObjects() {
     const centerX = rect.left - containerRect.left + rect.width / 2
     const centerY = rect.top - containerRect.top + rect.height / 2
     const depth = selected ? 36 : id.startsWith('timeline-cluster:') ? 18 : 12
-    card.position.set(centerX, height - centerY, depth)
+    card.position.x = centerX
+    card.position.y = height - centerY
+    card.userData.targetDepth = depth
     card.rotation.set((element.classList.contains('half-upper') ? 1 : -1) * 0.028, (selected ? -1 : 1) * 0.045, 0)
     card.scale.set(Math.max(44, rect.width - 4) / 2, Math.max(30, rect.height - 5), 12 / 0.14)
     card.visible = true
@@ -189,7 +192,9 @@ function syncObjects() {
       markers.set(id, marker)
     }
     marker.material = item.event.startsAt.startsWith('--') ? dotMaterials.yearless : dotMaterials.dated
-    marker.position.set((item.position / 100) * width, height / 2, id === props.selectedId ? 30 : 14)
+    marker.position.x = (item.position / 100) * width
+    marker.position.y = height / 2
+    marker.userData.targetDepth = id === props.selectedId ? 30 : 14
     marker.scale.setScalar(id === props.selectedId ? 7.5 : 5.6)
     marker.visible = true
   }
@@ -199,11 +204,26 @@ function syncObjects() {
 
 function schedule() {
   if (!renderer || frame) return
-  frame = requestAnimationFrame(() => {
-    frame = 0
-    if (!renderer || !scene || !camera) return
-    renderer.render(scene, camera)
-  })
+  frame = requestAnimationFrame(renderFrame)
+}
+
+function renderFrame(now: number) {
+  frame = 0
+  if (!renderer || !scene || !camera) return
+  const delta = previousFrame ? Math.min((now - previousFrame) / 1000, 0.05) : 1 / 60
+  previousFrame = now
+  let moving = false
+  const animateDepth = (mesh: THREE.Mesh) => {
+    const target = Number(mesh.userData.targetDepth)
+    if (!Number.isFinite(target) || Math.abs(target - mesh.position.z) < 0.04) return
+    mesh.position.z = THREE.MathUtils.damp(mesh.position.z, target, 13, delta)
+    moving = true
+  }
+  cards.forEach(animateDepth)
+  markers.forEach(animateDepth)
+  renderer.render(scene, camera)
+  if (moving) frame = requestAnimationFrame(renderFrame)
+  else previousFrame = 0
 }
 
 watch(() => [props.events, props.axisEvents, props.selectedId], () => syncObjects(), { deep: true })

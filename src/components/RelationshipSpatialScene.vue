@@ -41,11 +41,17 @@ const toPoint = new THREE.Vector3()
 const direction = new THREE.Vector3()
 const centerPoint = new THREE.Vector3()
 const screenPoint = new THREE.Vector3()
+const desiredCameraPosition = new THREE.Vector3()
+const desiredCameraTarget = new THREE.Vector3()
+const currentCameraTarget = new THREE.Vector3()
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let renderer: THREE.WebGLRenderer | null = null
 let observer: ResizeObserver | null = null
 let frame = 0
+let previousFrame = 0
+let cameraMotionActive = false
+let cameraMotionInitialized = false
 let renderEpoch = 0
 let disposed = false
 let projectedCache: Record<string, Point & { width: number; height: number }> = {}
@@ -297,12 +303,18 @@ function updateCamera() {
   const distance = baseDistance / zoom
   const yaw = props.rotation.x
   const pitch = props.rotation.y
-  camera.position.set(
+  desiredCameraPosition.set(
     target.x + Math.sin(yaw) * Math.cos(pitch) * distance,
     target.y + Math.sin(pitch) * distance,
     target.z + Math.cos(yaw) * Math.cos(pitch) * distance,
   )
-  camera.lookAt(target)
+  desiredCameraTarget.copy(target)
+  if (!cameraMotionInitialized) {
+    camera.position.copy(desiredCameraPosition)
+    currentCameraTarget.copy(desiredCameraTarget)
+    camera.lookAt(currentCameraTarget)
+    cameraMotionInitialized = true
+  } else cameraMotionActive = true
   camera.updateProjectionMatrix()
 }
 
@@ -419,12 +431,32 @@ function syncScene() {
 
 function scheduleRender() {
   if (!renderer || frame) return
-  frame = requestAnimationFrame(() => {
-    frame = 0
-    if (!renderer || !scene || !camera) return
-    renderer.render(scene, camera)
-    emitProjected()
-  })
+  frame = requestAnimationFrame(renderFrame)
+}
+
+function renderFrame(now: number) {
+  frame = 0
+  if (!renderer || !scene || !camera) return
+  const delta = previousFrame ? Math.min((now - previousFrame) / 1000, 0.05) : 1 / 60
+  previousFrame = now
+  if (cameraMotionActive) {
+    const alpha = 1 - Math.exp(-12 * delta)
+    camera.position.lerp(desiredCameraPosition, alpha)
+    currentCameraTarget.lerp(desiredCameraTarget, alpha)
+    camera.lookAt(currentCameraTarget)
+    updateEdges()
+    if (camera.position.distanceToSquared(desiredCameraPosition) < 0.04 && currentCameraTarget.distanceToSquared(desiredCameraTarget) < 0.04) {
+      camera.position.copy(desiredCameraPosition)
+      currentCameraTarget.copy(desiredCameraTarget)
+      camera.lookAt(currentCameraTarget)
+      cameraMotionActive = false
+      previousFrame = 0
+    }
+  }
+  renderer.render(scene, camera)
+  emitProjected()
+  if (cameraMotionActive) frame = requestAnimationFrame(renderFrame)
+  else previousFrame = 0
 }
 
 function resize() {

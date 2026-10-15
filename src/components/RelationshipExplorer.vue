@@ -209,7 +209,8 @@ function syncPeople(load = false) {
           const index = ringIndex.get(person.id) || 0
           const ring = Math.floor(index / 6)
           const count = Math.min(6, others.length - ring * 6)
-          const angle = -Math.PI / 2 + (index % 6) / Math.max(1, count) * Math.PI * 2 + ring * Math.PI / 6
+          const startAngle = count <= 2 ? 0 : -Math.PI / 2
+          const angle = startAngle + (index % 6) / Math.max(1, count) * Math.PI * 2 + ring * Math.PI / 6
           return { x: 400 + Math.cos(angle) * (260 + ring * 250), y: 240 + Math.sin(angle) * (112 + ring * 142) }
         })()
     return [person.id, point]
@@ -475,7 +476,7 @@ onBeforeUnmount(() => {
 .graph-connection-bar span { color: #87977f; font-size: 11px; }
 .graph-connection-bar button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 40px; padding: 0 10px; border: 1px solid #dce6d8; border-radius: 9px; background: #f7faf4; color: #57764f; font: inherit; font-size: 12px; }
 .graph-ground { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(#dce3da 1px, transparent 1px); background-size: 24px 24px; opacity: .7; transition: transform .3s ease, opacity .3s ease; }
-.is-webgl .graph-stage { background: radial-gradient(ellipse at 50% 34%, #151e28 0%, #0b0f15 64%, #080a0f 100%); }
+.is-webgl .graph-stage { background-color: #202c36; background-image: radial-gradient(ellipse 64% 66% at 50% 48%, rgba(151,177,199,.46) 0%, rgba(89,116,138,.26) 46%, transparent 100%), radial-gradient(ellipse at 14% 8%, rgba(159,184,216,.18), transparent 36%), radial-gradient(rgba(205,220,234,.075) .8px, transparent .8px), linear-gradient(155deg, #303e4b 0%, #202c36 52%, #151e27 100%); background-size: auto, auto, 48px 48px, auto; }
 .is-webgl .graph-ground { display: none; }
 .is-webgl .graph-world { z-index: 1; }
 .graph-world { position: absolute; top: 0; left: 0; width: 1px; height: 1px; transform-origin: 0 0; will-change: transform; }

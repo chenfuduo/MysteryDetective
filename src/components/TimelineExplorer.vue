@@ -646,22 +646,26 @@ onUnmounted(() => {
 .is-webgl .timeline-legend .dated-swatch { background: #9fb8d8; }
 .is-webgl .timeline-legend .yearless-swatch { background: #c99a73; }
 .is-webgl .timeline-spatial-canvas { z-index: 0; }
-.is-webgl .unified-chart { background: radial-gradient(ellipse at 50% 48%, #18212b 0%, #0e141c 58%, #0b1016 100%); }
+.is-webgl .unified-chart { background: radial-gradient(ellipse at 50% 48%, #263642 0%, #1b2732 48%, #141d26 100%); }
 .is-webgl .timeline-half, .is-webgl .lane-chart { z-index: 1; background: transparent; }
 .is-webgl .shared-time-axis { z-index: 3; }
 .is-webgl .shared-axis-line, .is-webgl .shared-axis-dot { visibility: hidden; }
-.is-webgl .shared-axis-tick > span { color: #bac5d0; }
-.is-webgl .shared-axis-tick > small { color: #78899a; }
+.is-webgl .shared-axis-tick > span, .is-webgl .shared-axis-tick > small { border: 1px solid rgba(174,195,215,.16); background: rgba(31,44,56,.96); }
+.is-webgl .shared-axis-tick > span { color: #d5e0e9; }
+.is-webgl .shared-axis-tick > small { color: #a6b5c3; }
 .is-webgl .explorer-vis-host :deep(.vis-timeline), .is-webgl .explorer-vis-host :deep(.vis-panel), .is-webgl .explorer-vis-host :deep(.vis-time-axis) { border-color: transparent !important; background: transparent !important; }
 .is-webgl .explorer-vis-host :deep(.vis-item.vis-box) { border-color: transparent !important; background: transparent !important; box-shadow: none !important; color: #f0f4f8 !important; }
 .is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box) { color: #f0d4bb !important; }
 .is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-box) { color: #d6e0e8 !important; }
-.is-webgl .explorer-vis-host :deep(.timeline-node-time) { color: #aab9c8; }
-.is-webgl .explorer-vis-host :deep(.timeline-node-yearless .timeline-node-time) { color: #d3a982; }
-.is-webgl .explorer-vis-host :deep(.timeline-node-precision) { color: #8796a5; }
-.is-webgl .explorer-vis-host :deep(.timeline-node-title) { color: #f2f5f8; }
+.is-webgl .explorer-vis-host :deep(.vis-item.vis-box .vis-item-content) { min-width: 184px; padding: 13px 16px; }
+.is-webgl .explorer-vis-host :deep(.vis-grid.vis-vertical.vis-minor) { border-color: rgba(190,205,219,.09) !important; }
+.is-webgl .explorer-vis-host :deep(.vis-grid.vis-vertical.vis-major) { border-color: rgba(190,205,219,.17) !important; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-time) { color: #e3ebf2; font-size: 13px; font-weight: 650; letter-spacing: .025em; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-yearless .timeline-node-time) { color: #f3c49f; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-precision) { color: #c3ced8; font-size: 11px; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-title) { color: #fff; font-size: 15px; font-weight: 650; line-height: 1.42; max-width: 240px; }
 .is-webgl .explorer-vis-host :deep(.timeline-cluster-content) { color: #f2f5f8; }
-.is-webgl .explorer-vis-host :deep(.timeline-node-mixed .timeline-node-time), .is-webgl .explorer-vis-host :deep(.timeline-node-mixed .timeline-node-precision) { color: #aeb9c4; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-mixed .timeline-node-time), .is-webgl .explorer-vis-host :deep(.timeline-node-mixed .timeline-node-precision) { color: #c5d0d9; }
 .is-webgl .lane-overview { border-color: rgba(180,197,213,.18); background: #161e27; }
 .is-webgl .lane-overview .overview-window { border-color: #9fb8d8; background: rgba(159,184,216,.16); }
 .is-webgl .lane-overview i { background: #a7bacd; }

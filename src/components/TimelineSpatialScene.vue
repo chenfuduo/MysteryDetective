@@ -26,17 +26,23 @@ let lastChartHeight = 0
 let axisRail: THREE.Mesh | null = null
 let floor: THREE.Mesh | null = null
 let axisGeometry: THREE.CylinderGeometry | null = null
+let stemGeometry: THREE.CylinderGeometry | null = null
+const stems = new Map<string, THREE.Mesh>()
+const stemMaterials = {
+  dated: new THREE.MeshPhysicalMaterial({ color: '#72879b', metalness: 0.4, roughness: 0.3, clearcoat: 0.42 }),
+  yearless: new THREE.MeshPhysicalMaterial({ color: '#a87956', metalness: 0.3, roughness: 0.31, clearcoat: 0.48 }),
+}
 const typeMaterials: Record<string, THREE.MeshPhysicalMaterial> = {
-  dated: new THREE.MeshPhysicalMaterial({ color: '#516477', metalness: 0.46, roughness: 0.36, clearcoat: 0.35, clearcoatRoughness: 0.3 }),
-  yearless: new THREE.MeshPhysicalMaterial({ color: '#80624c', metalness: 0.38, roughness: 0.42, clearcoat: 0.26, clearcoatRoughness: 0.36 }),
-  mixed: new THREE.MeshPhysicalMaterial({ color: '#5c6671', metalness: 0.34, roughness: 0.44, clearcoat: 0.22, clearcoatRoughness: 0.4 }),
-  selected: new THREE.MeshPhysicalMaterial({ color: '#93abc2', metalness: 0.52, roughness: 0.29, clearcoat: 0.5, clearcoatRoughness: 0.24 }),
-  yearlessSelected: new THREE.MeshPhysicalMaterial({ color: '#d6ab83', metalness: 0.48, roughness: 0.29, clearcoat: 0.46, clearcoatRoughness: 0.26 }),
-  mixedSelected: new THREE.MeshPhysicalMaterial({ color: '#b5c4d1', metalness: 0.44, roughness: 0.31, clearcoat: 0.42, clearcoatRoughness: 0.28 }),
+  dated: new THREE.MeshPhysicalMaterial({ color: '#62788d', metalness: 0.28, roughness: 0.33, clearcoat: 0.52, clearcoatRoughness: 0.24 }),
+  yearless: new THREE.MeshPhysicalMaterial({ color: '#8d654b', metalness: 0.22, roughness: 0.34, clearcoat: 0.58, clearcoatRoughness: 0.23 }),
+  mixed: new THREE.MeshPhysicalMaterial({ color: '#65727e', metalness: 0.25, roughness: 0.38, clearcoat: 0.42, clearcoatRoughness: 0.3 }),
+  selected: new THREE.MeshPhysicalMaterial({ color: '#718ba3', metalness: 0.32, roughness: 0.26, clearcoat: 0.64, clearcoatRoughness: 0.2 }),
+  yearlessSelected: new THREE.MeshPhysicalMaterial({ color: '#a97450', metalness: 0.3, roughness: 0.28, clearcoat: 0.62, clearcoatRoughness: 0.2 }),
+  mixedSelected: new THREE.MeshPhysicalMaterial({ color: '#b5c4d1', metalness: 0.32, roughness: 0.28, clearcoat: 0.54, clearcoatRoughness: 0.22 }),
 }
 const dotMaterials = {
-  dated: new THREE.MeshPhysicalMaterial({ color: '#b9cde1', metalness: 0.56, roughness: 0.26, clearcoat: 0.46 }),
-  yearless: new THREE.MeshPhysicalMaterial({ color: '#d6ab83', metalness: 0.44, roughness: 0.32, clearcoat: 0.38 }),
+  dated: new THREE.MeshPhysicalMaterial({ color: '#afc5d9', metalness: 0.42, roughness: 0.24, clearcoat: 0.58 }),
+  yearless: new THREE.MeshPhysicalMaterial({ color: '#c99870', metalness: 0.34, roughness: 0.28, clearcoat: 0.52 }),
 }
 
 function init() {
@@ -77,12 +83,13 @@ function init() {
   scene.add(fill)
 
   axisGeometry = new THREE.CylinderGeometry(2.8, 2.8, 1, 14, 1, false)
-  axisRail = new THREE.Mesh(axisGeometry, new THREE.MeshPhysicalMaterial({ color: '#9fb8d8', metalness: 0.66, roughness: 0.3, clearcoat: 0.44 }))
+  stemGeometry = new THREE.CylinderGeometry(1, 1, 1, 10, 1, false)
+  axisRail = new THREE.Mesh(axisGeometry, new THREE.MeshPhysicalMaterial({ color: '#8498ac', metalness: 0.52, roughness: 0.3, clearcoat: 0.5 }))
   axisRail.rotation.z = Math.PI / 2
   axisRail.castShadow = true
   scene.add(axisRail)
 
-  floor = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ color: '#0d131a', roughness: 0.86, metalness: 0.22 }))
+  floor = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ color: '#111a23', roughness: 0.82, metalness: 0.16 }))
   floor.position.z = -28
   floor.receiveShadow = renderer.shadowMap.enabled
   scene.add(floor)
@@ -136,6 +143,9 @@ function syncObjects() {
   if (width !== lastChartWidth || height !== lastChartHeight) resize()
 
   const eventById = new Map(props.events.map(event => [event.id, event]))
+  const axisElement = props.container.querySelector<HTMLElement>('.shared-axis-line')
+  const axisRect = axisElement?.getBoundingClientRect()
+  const axisY = axisRect ? height - (axisRect.top - containerRect.top + axisRect.height / 2) : height / 2
   const seen = new Set<string>()
   for (const element of visibleItemElements()) {
     const content = element.querySelector<HTMLElement>('.timeline-event-content')
@@ -164,15 +174,31 @@ function syncObjects() {
     card.position.x = centerX
     card.position.y = height - centerY
     card.userData.targetDepth = depth
-    card.rotation.set((element.classList.contains('half-upper') ? 1 : -1) * 0.028, (selected ? -1 : 1) * 0.045, 0)
+    card.rotation.set((element.classList.contains('half-upper') ? 1 : -1) * 0.045, (selected ? -1 : 1) * 0.085, 0)
     card.scale.set(Math.max(44, rect.width - 4) / 2, Math.max(30, rect.height - 5), 12 / 0.14)
     card.visible = true
+
+    let stem = stems.get(id)
+    if (!stem) {
+      stem = new THREE.Mesh(stemGeometry!, stemMaterials[type as 'dated' | 'yearless'] || stemMaterials.dated)
+      stem.castShadow = true
+      stem.receiveShadow = true
+      stem.userData.id = id
+      scene.add(stem)
+      stems.set(id, stem)
+    }
+    stem.material = stemMaterials[type === 'mixed' ? 'dated' : type as 'dated' | 'yearless']
+    const stemLength = Math.max(0, Math.abs(axisY - card.position.y) - 10)
+    stem.position.set(centerX, (axisY + card.position.y) / 2, 12)
+    stem.scale.set(1.8, stemLength, 1.8)
+    stem.userData.targetDepth = selected ? 33 : 12
+    stem.visible = stemLength > 4
   }
   for (const [id, card] of cards) if (!seen.has(id)) { scene.remove(card); card.geometry !== unitBox && card.geometry.dispose(); cards.delete(id) }
+  for (const [id, stem] of stems) if (!seen.has(id)) { scene.remove(stem); stems.delete(id) }
 
-  const axisElement = props.container.querySelector<HTMLElement>('.shared-axis-line')
-  if (axisElement && axisRail) {
-    const rect = axisElement.getBoundingClientRect()
+  if (axisElement && axisRect && axisRail) {
+    const rect = axisRect
     const axisWidth = Math.max(1, rect.width)
     axisRail.position.set(rect.left - containerRect.left + axisWidth / 2, height - (rect.top - containerRect.top + rect.height / 2), 8)
     axisRail.scale.y = axisWidth
@@ -221,6 +247,7 @@ function renderFrame(now: number) {
   }
   cards.forEach(animateDepth)
   markers.forEach(animateDepth)
+  stems.forEach(animateDepth)
   renderer.render(scene, camera)
   if (moving) frame = requestAnimationFrame(renderFrame)
   else previousFrame = 0
@@ -236,8 +263,10 @@ onUnmounted(() => {
   if (frame) cancelAnimationFrame(frame)
   cards.forEach(card => scene?.remove(card))
   markers.forEach(marker => scene?.remove(marker))
+  stems.forEach(stem => scene?.remove(stem))
   cards.clear()
   markers.clear()
+  stems.clear()
   if (scene) scene.traverse(object => {
     if (!(object instanceof THREE.Mesh)) return
     if (object.geometry !== unitBox && object.geometry !== sphereGeometry) object.geometry.dispose()
@@ -245,6 +274,8 @@ onUnmounted(() => {
   unitBox.dispose()
   sphereGeometry.dispose()
   axisGeometry?.dispose()
+  stemGeometry?.dispose()
+  Object.values(stemMaterials).forEach(material => material.dispose())
   Object.values(typeMaterials).forEach(material => material.dispose())
   Object.values(dotMaterials).forEach(material => material.dispose())
   if (scene) scene.traverse(object => {

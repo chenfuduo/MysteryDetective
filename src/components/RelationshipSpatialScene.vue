@@ -48,6 +48,7 @@ let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let renderer: THREE.WebGLRenderer | null = null
 let observer: ResizeObserver | null = null
+let stageGrid: THREE.GridHelper | null = null
 let frame = 0
 let previousFrame = 0
 let cameraMotionActive = false
@@ -59,22 +60,28 @@ let edgeGeometry: THREE.CylinderGeometry | null = null
 
 function makePersonTexture(person: PersonRecord) {
   const surface = document.createElement('canvas')
-  surface.width = 600
-  surface.height = 300
+  surface.width = 720
+  surface.height = 360
   const context = surface.getContext('2d')
   if (!context) return null
-  const gradient = context.createLinearGradient(0, 0, 900, 450)
-  gradient.addColorStop(0, '#1d2731')
-  gradient.addColorStop(1, '#11171e')
+  const gradient = context.createLinearGradient(0, 0, 720, 360)
+  gradient.addColorStop(0, '#344555')
+  gradient.addColorStop(0.52, '#263541')
+  gradient.addColorStop(1, '#1b2732')
   context.fillStyle = gradient
-  context.fillRect(0, 0, 900, 450)
-  context.strokeStyle = 'rgba(159,184,216,.32)'
+  context.fillRect(0, 0, 720, 360)
+  context.strokeStyle = 'rgba(202,218,233,.44)'
   context.lineWidth = 2
-  context.strokeRect(14, 14, 572, 272)
+  context.strokeRect(14, 14, 692, 332)
+  const sheen = context.createLinearGradient(0, 0, 0, 112)
+  sheen.addColorStop(0, 'rgba(255,255,255,.09)')
+  sheen.addColorStop(1, 'rgba(255,255,255,0)')
+  context.fillStyle = sheen
+  context.fillRect(16, 16, 688, 112)
 
-  const avatarX = 97
-  const avatarY = 150
-  const avatarRadius = 64
+  const avatarX = 112
+  const avatarY = 180
+  const avatarRadius = 76
   context.fillStyle = '#263644'
   context.beginPath()
   context.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2)
@@ -85,25 +92,25 @@ function makePersonTexture(person: PersonRecord) {
   context.fillStyle = '#dce7f1'
   context.textAlign = 'center'
   context.textBaseline = 'middle'
-  context.font = '600 96px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
+  context.font = '600 112px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
   context.fillText([...person.name][0] || '人', avatarX, avatarY)
 
   context.textAlign = 'left'
   context.textBaseline = 'alphabetic'
   context.fillStyle = '#8b9bab'
-  context.font = '600 16px -apple-system, BlinkMacSystemFont, sans-serif'
-  context.fillText('PERSON FILE', 194, 83)
+  context.font = '600 18px -apple-system, BlinkMacSystemFont, sans-serif'
+  context.fillText('PERSON FILE', 224, 96)
   context.fillStyle = '#f5f7fa'
-  context.font = '600 36px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
+  context.font = '600 42px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
   const name = person.name || '未命名人物'
-  context.fillText(name.length > 8 ? `${name.slice(0, 8)}…` : name, 194, 137)
+  context.fillText(name.length > 8 ? `${name.slice(0, 8)}…` : name, 224, 158)
   context.fillStyle = '#a5b0bb'
-  context.font = '400 18px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
+  context.font = '400 21px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
   const alias = person.aliases.slice(0, 2).join(' · ') || '人物档案'
-  context.fillText(alias.length > 16 ? `${alias.slice(0, 16)}…` : alias, 194, 170)
+  context.fillText(alias.length > 16 ? `${alias.slice(0, 16)}…` : alias, 224, 204)
   context.fillStyle = '#9fb8d8'
-  context.font = '500 18px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
-  context.fillText(`${props.clueCounts[person.id] || 0} 条线索`, 194, 225)
+  context.font = '500 20px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
+  context.fillText(`${props.clueCounts[person.id] || 0} 条线索`, 224, 278)
 
   const url = props.imageUrls[person.photoPath] || props.imageUrls[person.id] || ''
   if (url) {
@@ -162,7 +169,7 @@ function makeLabelTexture(label: string) {
 function init() {
   if (!canvas.value) return
   try {
-    renderer = new THREE.WebGLRenderer({ canvas: canvas.value, antialias: true, alpha: false, powerPreference: 'low-power' })
+    renderer = new THREE.WebGLRenderer({ canvas: canvas.value, antialias: true, alpha: true, powerPreference: 'low-power' })
   } catch {
     emit('ready', false)
     return
@@ -178,8 +185,9 @@ function init() {
   renderer.shadowMap.type = THREE.PCFShadowMap
 
   scene = new THREE.Scene()
-  scene.background = new THREE.Color('#080a0f')
-  scene.fog = new THREE.Fog('#080a0f', 1250, 2800)
+  scene.background = null
+  scene.fog = new THREE.Fog('#15202a', 1500, 3200)
+  renderer.setClearColor(0x000000, 0)
   camera = new THREE.PerspectiveCamera(42, width / height, 1, 5000)
   scene.add(new THREE.HemisphereLight('#dce7f3', '#10151b', 1.55))
   scene.add(new THREE.AmbientLight('#9ba9b8', 0.38))
@@ -197,11 +205,16 @@ function init() {
   const rim = new THREE.DirectionalLight('#849bb5', 1.25)
   rim.position.set(420, 90, -250)
   scene.add(rim)
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshStandardMaterial({ color: '#10151b', roughness: 0.89, metalness: 0.24 }))
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshStandardMaterial({ color: '#1c2934', roughness: 0.78, metalness: 0.14 }))
   floor.rotation.x = -Math.PI / 2
   floor.position.y = -330
   floor.receiveShadow = renderer.shadowMap.enabled
   scene.add(floor)
+  stageGrid = new THREE.GridHelper(3600, 48, 0x70869b, 0x43576a)
+  stageGrid.position.y = -328
+  const gridMaterials = Array.isArray(stageGrid.material) ? stageGrid.material : [stageGrid.material]
+  gridMaterials.forEach(material => { material.transparent = true; material.opacity = 0.17; material.depthWrite = false })
+  scene.add(stageGrid)
   observer = new ResizeObserver(resize)
   observer.observe(canvas.value)
   rebuild()
@@ -248,7 +261,7 @@ function rebuild() {
   for (const person of props.people) {
     const group = new THREE.Group()
     group.userData.personId = person.id
-    const material = new THREE.MeshPhysicalMaterial({ color: '#27333d', metalness: 0.64, roughness: 0.32, clearcoat: 0.36, clearcoatRoughness: 0.34 })
+    const material = new THREE.MeshPhysicalMaterial({ color: '#52697c', metalness: 0.24, roughness: 0.34, clearcoat: 0.66, clearcoatRoughness: 0.22 })
     cardMaterials.set(person.id, material)
     const body = new THREE.Mesh(boxGeometry, material)
     body.castShadow = props.people.length <= 28
@@ -328,7 +341,7 @@ function updateCards() {
     const z = depthFor(person, index)
     group.visible = !props.hideUnrelated || !props.selectedId || person.id === props.selectedId || props.relationships.some(relationship => relationship.fromId === props.selectedId && relationship.toId === person.id || relationship.toId === props.selectedId && relationship.fromId === person.id)
     group.position.set(point.x - 400, 240 - point.y, z)
-    group.rotation.set(0.025 * Math.sin(index * 1.4), Math.max(-0.09, Math.min(0.09, (point.x - 400) / 4000)), 0)
+    group.rotation.set(0.035 * Math.sin(index * 1.4), Math.max(-0.14, Math.min(0.14, (point.x - 400) / 4000 + (index % 2 === 0 ? 0.055 : -0.055))), 0)
     group.userData.depth = z
     group.userData.cardPosition = group.position.clone()
     const dimmed = Boolean(props.linkSourceId && person.id !== props.linkSourceId && person.id !== props.linkTargetId)

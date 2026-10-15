@@ -22,7 +22,7 @@ const fitScale = computed(() => rotatedSize.value.width && rotatedSize.value.hei
 const baseZoomScale = computed(() => Math.max(1, fitScale.value * 2))
 const zoomMultiplier = ref(1)
 const displayScale = computed(() => props.zoom
-  ? Math.max(fitScale.value, Math.min(baseZoomScale.value * 8, baseZoomScale.value * zoomMultiplier.value))
+  ? Math.max(fitScale.value, Math.min(fitScale.value * 64, baseZoomScale.value * zoomMultiplier.value))
   : fitScale.value)
 const dimensions = computed(() => ({
   width: Math.max(size.width, rotatedSize.value.width * displayScale.value + 50),
@@ -108,7 +108,7 @@ function setScaleAt(nextScale: number, point: Pointer) {
   const localY = point.y - rect.top
   const anchorX = (element.scrollLeft + localX - oldDimensions.width / 2) / oldScale
   const anchorY = (element.scrollTop + localY - oldDimensions.height / 2) / oldScale
-  const scale = Math.max(fitScale.value, Math.min(baseZoomScale.value * 8, nextScale))
+  const scale = Math.max(fitScale.value, Math.min(fitScale.value * 64, nextScale))
   zoomMultiplier.value = scale / baseZoomScale.value
   if (!props.zoom) emit('update:zoom', true)
   nextTick(() => {
@@ -143,7 +143,7 @@ function movePointer(event: PointerEvent) {
     const [a, b] = [...pointers.values()]
     const point = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
     const distanceRatio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance
-    setScaleAt(pinch.scale * Math.pow(distanceRatio, 2.4), point)
+    setScaleAt(pinch.scale * Math.pow(distanceRatio, 1.7), point)
     return
   }
   moveDrag(event)

@@ -7,7 +7,7 @@ import { chooseOrganizationModel, type OrganizationModelInput } from './openaiMo
 
 type RawPerson = { name?: unknown; aliases?: unknown; source?: unknown; quote?: unknown }
 type RawRelationship = { from?: unknown; to?: unknown; label?: unknown; source?: unknown; quote?: unknown }
-type RawTimeline = { title?: unknown; startsAt?: unknown; people?: unknown; source?: unknown; quote?: unknown; approximate?: unknown }
+type RawTimeline = { title?: unknown; startsAt?: unknown; timeOfDay?: unknown; people?: unknown; source?: unknown; quote?: unknown; approximate?: unknown }
 type RawCluePoint = { source?: unknown; title?: unknown; category?: unknown; tags?: unknown; quote?: unknown }
 type RawResult = { people?: unknown; relationships?: unknown; timeline?: unknown; cluePoints?: unknown }
 
@@ -69,6 +69,7 @@ export const organizationRun = reactive({ phase: 'idle' as RunPhase, provider: n
 type DateToken = { index: number; end: number; year: string; month: number; day: number; value: string }
 type ClockToken = { index: number; end: number; hour: number; minute: number | null; approximate: boolean; value: string }
 type CheckedTime = { startsAt: string; precision: 'date' | 'hour' | 'minute'; approximate: boolean }
+type PeriodToken = { index: number; end: number; value: string }
 type NormalizedResult = { snapshot: OrganizationSnapshot; rejected: Map<number, number> }
 export type OrganizationStage = 'extracting' | 'checking' | 'complete' | 'failed' | 'paused'
 export type OrganizationCheckpoint = {
@@ -150,13 +151,27 @@ function dateForClock(dates: DateToken[], clock: ClockToken): DateToken | undefi
   if (previous) return previous
   return dates.find(date => date.index >= clock.end && date.index - clock.end <= 120)
 }
+const timeOfDayTerms = ['凌晨', '清晨', '早晨', '早上', '上午', '中午', '下午', '午后', '傍晚', '晚上', '晚间', '夜里', '夜间', '深夜', '半夜']
+function scanPeriods(value: string): PeriodToken[] {
+  const pattern = new RegExp(timeOfDayTerms.slice(0, -1).join('|') + '|晚', 'g')
+  const clocks = scanClocks(value)
+  return [...value.matchAll(pattern)].flatMap(match => {
+    const index = match.index ?? 0, end = index + match[0].length
+    return clocks.some(clock => index < clock.end && end > clock.index) ? [] : [{ index, end, value: match[0] }]
+  })
+}
+function dateForAnchor(dates: DateToken[], anchor: Pick<PeriodToken, 'index' | 'end'>): DateToken | undefined {
+  const previous = [...dates].reverse().find(date => date.end <= anchor.index)
+  if (previous) return previous
+  return dates.find(date => date.index >= anchor.end && date.index - anchor.end <= 120)
+}
 function quoteOffsets(source: string, quote: string): number[] {
   const positions: number[] = []
   let offset = source.indexOf(quote)
   while (offset >= 0) { positions.push(offset); offset = source.indexOf(quote, offset + 1) }
   return positions
 }
-function validDate(value: unknown, quote: string, clueText: string): CheckedTime | null {
+function validDate(value: unknown, quote: string, clueText: string, preservePeriodOnly = false): CheckedTime | null {
   const candidate = text(value, 40).replace(' ', 'T')
   const match = candidate.match(/^(?:(\d{4})-|--)(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
   if (!quote || !match) return null
@@ -173,6 +188,9 @@ function validDate(value: unknown, quote: string, clueText: string): CheckedTime
     const { clock, date } = exact[0]
     return { startsAt: `${date.value}${clock.value}`, precision: clock.minute === null ? 'hour' : 'minute', approximate: clock.approximate }
   }
+  const dateOnly = dates.find(item => matchingDate(item) && inQuote(item.index, item.end))
+    || quotePositions.map(position => [...dates].reverse().find(item => item.end <= position)).find((item): item is DateToken => Boolean(item && matchingDate(item)))
+  if (preservePeriodOnly) return dateOnly ? { startsAt: dateOnly.value, precision: 'date', approximate: /(?:约|大约|前后|左右)/.test(quote) } : null
   // A date-only API candidate with one explicit clock in its own quote retains that clock.
   const clockValues = new Set(clocks.map(({ clock, date }) => `${date.value}${clock.value}`))
   if (clockValues.size === 1) {
@@ -180,9 +198,7 @@ function validDate(value: unknown, quote: string, clueText: string): CheckedTime
     return { startsAt: `${date.value}${clock.value}`, precision: clock.minute === null ? 'hour' : 'minute', approximate: clock.approximate }
   }
   if (clockValues.size > 1) return null
-  const date = dates.find(item => matchingDate(item) && inQuote(item.index, item.end))
-    || quotePositions.map(position => [...dates].reverse().find(item => item.end <= position)).find((item): item is DateToken => Boolean(item && matchingDate(item)))
-  return date ? { startsAt: date.value, precision: 'date', approximate: /(?:约|大约|前后|左右)/.test(quote) } : null
+  return dateOnly ? { startsAt: dateOnly.value, precision: 'date', approximate: /(?:约|大约|前后|左右)/.test(quote) } : null
 }
 function normalize(raw: RawResult, clues: ClueRecord[]): NormalizedResult {
   const people: OrganizationSnapshot['people'] = []
@@ -208,10 +224,14 @@ function normalize(raw: RawResult, clues: ClueRecord[]): NormalizedResult {
     const sourceNo = number(item.source)
     const source = sourceQuote(sourceNo, item.quote, clues)
     const title = text(item.title, 100)
-    const checked = validDate(item.startsAt, source?.quote || '', source?.clue.ocrText || '')
+    const periodText = text(item.timeOfDay, 12)
+    const periodTokens = source ? scanPeriods(source.quote) : []
+    const hasPeriodOnly = Boolean(periodText && periodTokens.some(period => period.value === periodText)) || Boolean(source && !/T\d{2}/.test(text(item.startsAt, 40)) && periodTokens.length)
+    const checked = validDate(item.startsAt, source?.quote || '', source?.clue.ocrText || '', hasPeriodOnly)
     if (!source || !title || !checked) { rejected.set(sourceNo, (rejected.get(sourceNo) || 0) + 1); continue }
     const names = Array.isArray(item.people) ? item.people.map(value => text(value, 60)).filter(value => value && source.quote.includes(value)).slice(0, 8) : []
-    timeline.push({ id: crypto.randomUUID(), title, ...checked, approximate: checked.approximate || (item.approximate === true && /约|左右|大概|大约|前后|许/.test(source.quote)), people: names, sourceNo: source.clue.number, quote: source.quote, evidence: [{ clueId: source.clue.id, sourceNo: source.clue.number, quote: source.quote }] })
+    const timeOfDay = checked.precision === 'date' ? (periodTokens.find(period => period.value === periodText)?.value || (periodTokens.length === 1 ? periodTokens[0]!.value : undefined)) : undefined
+    timeline.push({ id: crypto.randomUUID(), title, ...checked, ...(timeOfDay ? { timeOfDay } : {}), approximate: checked.approximate || (item.approximate === true && /约|左右|大概|大约|前后|许/.test(source.quote)), people: names, sourceNo: source.clue.number, quote: source.quote, evidence: [{ clueId: source.clue.id, sourceNo: source.clue.number, quote: source.quote }] })
   }
   const cluePoints: OrganizationSnapshot['cluePoints'] = []
   for (const item of asArray(raw.cluePoints) as RawCluePoint[]) {
@@ -226,7 +246,7 @@ function normalize(raw: RawResult, clues: ClueRecord[]): NormalizedResult {
 function mergeTimeline(first: OrganizationSnapshot['timeline'], next: OrganizationSnapshot['timeline']): OrganizationSnapshot['timeline'] {
   const merged = [...first]
   for (const item of next) {
-    const existingIndex = merged.findIndex(previous => previous.sourceNo === item.sourceNo && previous.startsAt.slice(0, 7) === item.startsAt.slice(0, 7) && (previous.title === item.title || previous.quote.includes(item.quote) || item.quote.includes(previous.quote)) && (previous.startsAt === item.startsAt || (previous.startsAt.split('T')[0] === item.startsAt.split('T')[0] && (!previous.startsAt.includes('T') || !item.startsAt.includes('T')))))
+    const existingIndex = merged.findIndex(previous => previous.sourceNo === item.sourceNo && previous.timeOfDay === item.timeOfDay && previous.startsAt.slice(0, 7) === item.startsAt.slice(0, 7) && (previous.title === item.title || previous.quote.includes(item.quote) || item.quote.includes(previous.quote)) && (previous.startsAt === item.startsAt || (previous.startsAt.split('T')[0] === item.startsAt.split('T')[0] && (!previous.startsAt.includes('T') || !item.startsAt.includes('T')))))
     if (existingIndex < 0) { merged.push(item); continue }
     const previous = merged[existingIndex]
     const addsContinuousContext = item.quote.length > previous.quote.length && item.quote.includes(previous.quote)
@@ -236,20 +256,26 @@ function mergeTimeline(first: OrganizationSnapshot['timeline'], next: Organizati
 }
 function auditTimeline(clues: ClueRecord[], timeline: OrganizationSnapshot['timeline'], rejected: Map<number, number>, reviewed: boolean, reviewError = ''): NonNullable<OrganizationSnapshot['timelineAudit']> {
   return clues.map(clue => {
-    const dates = scanDates(clue.ocrText), clocks = scanClocks(clue.ocrText)
+    const dates = scanDates(clue.ocrText), clocks = scanClocks(clue.ocrText), periods = scanPeriods(clue.ocrText)
     const covered = clocks.filter(clock => {
       const date = dateForClock(dates, clock)
       if (!date) return false
       return timeline.some(item => item.sourceNo === clue.number && item.startsAt === `${date.value}${clock.value}` && quoteOffsets(clue.ocrText, item.quote).some(offset => clock.index >= offset && clock.end <= offset + item.quote.length))
     }).length
+    const periodCovered = periods.filter(period => {
+      const date = dateForAnchor(dates, period)
+      if (!date) return false
+      return timeline.some(item => item.sourceNo === clue.number && item.startsAt === date.value && item.timeOfDay === period.value && quoteOffsets(clue.ocrText, item.quote).some(offset => period.index >= offset && period.end <= offset + item.quote.length))
+    }).length
     const invalid = rejected.get(clue.number) || 0
     const unknownSource = [...rejected.keys()].some(source => !clues.some(item => item.number === source))
     const messages: string[] = []
     if (covered < clocks.length) messages.push(`${clocks.length - covered} 处原文时刻尚未对应到有效事件`)
+    if (periodCovered < periods.length) messages.push(`${periods.length - periodCovered} 处原文时段尚未对应到有效事件`)
     if (invalid) messages.push(`${invalid} 条时间建议的日期或原文出处未通过校验`)
     if (unknownSource) messages.push('存在无法对应原线索的时间建议')
     if (!reviewed) messages.push(reviewError || '尚未完成 API 完整性核对')
-    return { sourceNo: clue.number, clocks: clocks.length, covered, status: messages.length ? 'review' as const : 'complete' as const, message: messages.join('；') || (clocks.length ? `已核对 ${covered} 处原文时刻` : '已核对原文，未发现具体钟表时刻') }
+    return { sourceNo: clue.number, clocks: clocks.length, covered, periods: periods.length, periodCovered, status: messages.length ? 'review' as const : 'complete' as const, message: messages.join('；') || (clocks.length || periods.length ? `已核对 ${covered} 处原文时刻和 ${periodCovered} 处原文时段` : '已核对原文，未发现明确时间表达') }
   })
 }
 export type TimelineExtractionIssue = {
@@ -262,6 +288,7 @@ export type TimelineExtractionIssue = {
   startsAt?: string
   precision?: 'date' | 'hour' | 'minute'
   approximate?: boolean
+  timeOfDay?: string
 }
 
 /** Explain review audits without creating events or treating accepted suggestions as missing. */
@@ -290,6 +317,7 @@ export function timelineExtractionIssues(clues: ClueRecord[], snapshot: Organiza
     if (!clue) continue
     const dates = scanDates(clue.ocrText)
     const clocks = scanClocks(clue.ocrText)
+    const periods = scanPeriods(clue.ocrText)
     const suggestions = snapshot.timeline.filter(item => item.sourceNo === clue.number || item.evidence?.some(source => source.clueId === clue.id && source.sourceNo === clue.number))
     const sourcesFor = (item: OrganizationSnapshot['timeline'][number]): string[] => {
       const quotes = item.evidence?.length
@@ -322,9 +350,30 @@ export function timelineExtractionIssues(clues: ClueRecord[], snapshot: Organiza
         quote: nearbyQuote(clue.ocrText, clock.index, clock.end), ...(startsAt ? { startsAt } : {}), precision: clock.minute === null ? 'hour' : 'minute', approximate: clock.approximate,
       })
     }
+    for (const period of periods) {
+      const date = dateForAnchor(dates, period)
+      const startsAt = date?.value
+      const containsPeriod = (quote: string): boolean => quoteOffsets(clue.ocrText, quote).some(offset => period.index >= offset && period.end <= offset + quote.length)
+      const suggestionCovered = Boolean(startsAt && suggestions.some(item => item.startsAt === startsAt && item.timeOfDay === period.value && sourcesFor(item).some(containsPeriod)))
+      const eventCovered = Boolean(startsAt && confirmedEvents.some(event => {
+        if (!event.confirmed || event.scriptId !== clue.scriptId || event.startsAt !== startsAt || event.timeOfDay !== period.value) return false
+        const evidence = (event.evidence || []).filter(source => source.clueId === clue.id && source.sourceNo === clue.number)
+        const quotes = evidence.map(source => source.quote).filter(quote => quote.trim())
+        if (quotes.length) return quotes.some(containsPeriod)
+        return event.clueId === clue.id || evidence.length > 0
+      }))
+      if (suggestionCovered || eventCovered) continue
+      issues.push({
+        id: idFor('missing-time', `${period.index}:${startsAt || period.value}`), sourceNo: clue.number, kind: 'missing-time',
+        title: `原文时段“${period.value}”尚无对应事件`,
+        detail: startsAt ? `原文写明“${period.value}”但没有具体钟点。可按原文时段录入事件，不会换算成具体时分。` : `原文写明“${period.value}”，但附近没有明确日期。请补入你确认的日期，时段会保留为“${period.value}”。`,
+        quote: nearbyQuote(clue.ocrText, period.index, period.end), ...(startsAt ? { startsAt } : {}), precision: 'date', timeOfDay: period.value,
+      })
+    }
     const invalid = suggestions.find(item => !sourcesFor(item).length || !sourcesFor(item).some(quote => {
-      const checked = validDate(item.startsAt, quote, clue.ocrText)
-      return checked && checked.startsAt === item.startsAt
+      const checked = validDate(item.startsAt, quote, clue.ocrText, Boolean(item.timeOfDay))
+      const periodValid = !item.timeOfDay || scanPeriods(quote).some(period => period.value === item.timeOfDay)
+      return checked && checked.startsAt === item.startsAt && periodValid
     }))
     const dateOnlyInvalid = invalid && !invalid.startsAt.includes('T') && sourcesFor(invalid).some(quote => scanClocks(quote).length > 0)
     if (invalid || /未通过校验|无法对应原线索|日期或原文出处|只有日期|仅有日期/.test(audit.message)) {
@@ -351,7 +400,7 @@ export function timelineExtractionIssues(clues: ClueRecord[], snapshot: Organiza
 function localTimelineFallback(clues: ClueRecord[], reason: 'offline' | 'quota', previous?: OrganizationSnapshot): OrganizationSnapshot {
   const timeline: OrganizationSnapshot['timeline'] = []
   for (const clue of clues) {
-    const dates = scanDates(clue.ocrText), clocks = scanClocks(clue.ocrText)
+    const dates = scanDates(clue.ocrText), clocks = scanClocks(clue.ocrText), periods = scanPeriods(clue.ocrText)
     const usedDates = new Set<number>()
     for (const clock of clocks) {
       const date = dateForClock(dates, clock)
@@ -363,6 +412,12 @@ function localTimelineFallback(clues: ClueRecord[], reason: 'offline' | 'quota',
     for (const date of dates.filter(item => !usedDates.has(item.index))) {
       const quote = clue.ocrText.slice(Math.max(0, date.index - 36), Math.min(clue.ocrText.length, date.end + 90)).trim()
       timeline.push({ id: `ocr-time-${crypto.randomUUID()}`, title: '待补充事件', startsAt: date.value, precision: 'date', approximate: /约|左右|前后/.test(quote), people: [], sourceNo: clue.number, quote, requiresTitle: true, evidence: [{ clueId: clue.id, sourceNo: clue.number, quote }] })
+    }
+    for (const period of periods) {
+      const date = dateForAnchor(dates, period)
+      if (!date) continue
+      const quote = clue.ocrText.slice(Math.max(0, period.index - 36), Math.min(clue.ocrText.length, period.end + 110)).trim()
+      timeline.push({ id: `ocr-time-${crypto.randomUUID()}`, title: '待补充事件', startsAt: date.value, timeOfDay: period.value, precision: 'date', people: [], sourceNo: clue.number, quote, requiresTitle: true, evidence: [{ clueId: clue.id, sourceNo: clue.number, quote }] })
     }
   }
   const snapshot: OrganizationSnapshot = { id: '', scriptId: '', updatedAt: new Date().toISOString(), people: [], relationships: [], cluePoints: [], ...previous, timeline: mergeTimeline(previous?.timeline || [], timeline), analysis: { provider: 'local', localReason: reason, reviewed: false } }
@@ -379,16 +434,16 @@ class OrganizationApiError extends Error {
   constructor(message: string, readonly localReason?: 'offline' | 'quota', readonly invalidResult = false) { super(message) }
 }
 const organizationSystem = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
-时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分、十点二十七分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索必须从头扫描到最后一行，尤其检查后半部分和分项列表。
+时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记、钟表数字结构和时段词。没有具体时分但原文明确写出凌晨、清晨、早晨、早上、上午、中午、下午、午后、傍晚、晚上、晚间、夜里、夜间、深夜、半夜或晚时，也必须输出时间线事件，在 JSON 的 timeOfDay 字段逐字保留该时段；startsAt 只填写明确或沿用的日期，precision 为 date，不得换算、猜测具体时分。若没有明确日期，不得猜日期；仍应报告该时段并留待人工补日期。分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分、十点二十七分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索必须从头扫描到最后一行，尤其检查后半部分和分项列表。
 时间线规则：
 1. 每个明确时刻单独对应事件：到达、离开、打电话等发生在不同时刻时必须分开。原文写了几点几分，startsAt 必须保留分钟；例如“6月16日晚10点27分进入，10点29分离开”必须输出 --06-16T22:27 和 --06-16T22:29。只写到小时就只保留小时，不能补 :00。
 2. 无年份使用 --MM-DD、--MM-DDTHH 或 --MM-DDTHH:mm；明确有年份使用 YYYY-MM-DD、YYYY-MM-DDTHH 或 YYYY-MM-DDTHH:mm。不得猜年份、日期、时刻或分钟。
 3. 同线索前文明确月日，后续分项未出现新日期时沿用最近月日，跨段落/医院监控/城市监控等标题也继续检查，不得跨不同线索沿用日期。“6月17日早晨7点09分……城市监控显示：凌晨3时10分……3时24分……”必须分别保留后续每一时刻。
 4. 时段词和 OCR 错别字不应阻断时钟数字识别。全角数字、数字间的 OCR 空格/换行、中文数字和冒号均要识别，例如“１０点２７分”“1 0 点 2 7 分”“十点三刻”；quote 仍保留原文，不能改写成标准数字。“通话1分43秒”“停留约一分钟”“1524病房”“线索卡22”是时长、房号或编号，不能当作新的事件时刻。明确晚上/下午换算 24 小时制；没有时段依据不得擅自加 12 小时。约、左右、大概、前后等近似含义必须保留，approximate=true；不能把约十点写成精确 10:00。
-5. precision 为 date/hour/minute，与原文精度一致；约时仍保留原文实际精度。每个事件 title 只简述原文动作，无法提取标题时写“待补充事件”。不要为同一事件再重复一个仅日期建议。
+5. precision 为 date/hour/minute，与原文精度一致；约时仍保留原文实际精度。没有钟表时间但有明确时段词时，timeOfDay 必须填写原文中的词语，startsAt 只保留日期；不要把“凌晨”换算成 03:00、“上午”换算成 09:00 等任何具体时刻。输出 JSON 的 timeline 对象可包含 timeOfDay 字段。每个事件 title 只简述原文动作，无法提取标题时写“待补充事件”。不要为同一事件再重复一个仅日期建议。
 6. 没有具体钟表数字的相对时间也必须保留，不能因 startsAt 无法单独确定而漏掉。若“约两分钟后”“随后”“片刻后”等后续动作明确承接一个已有钟表时刻的事件，将后续动作合并进该锚点事件的 title 和 quote，startsAt 与 precision 沿用锚点；保留原文相对时间措辞，含“约/左右”等估计时 approximate=true。不要把时长换算成新钟表时刻，也不要另造一个没有独立钟表时刻的节点。例如“7点左右敲门，约两分钟后坠楼”合成一个约7点的事件，标题同时写出敲门与坠楼，quote 连续包含两段原文；若之后另有“7点12分报警”，仍单独保留该事件。
 7. 每条 quote 必须逐字连续摘录对应 OCR 原文，保留原标点/空格，不要改错字、不要拼接多段，优先含时刻、相对时间和事件动作；日期在前段时 quote 可只取当前时刻所在句，source 标明所属线索。每条 quote 尽量少于 400 字。
-输出纯 JSON：{"people":[{"name":"原文人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确动作","startsAt":"--06-16T22:27","precision":"minute","approximate":false,"people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
+输出纯 JSON：{"people":[{"name":"原文人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确动作","startsAt":"--06-16T22:27","timeOfDay":"","precision":"minute","approximate":false,"people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
 其他约束：人物姓名须逐字出现；关系须原文明说，不因共同出现推断。每项必须有 source 和逐字 quote。只归纳明确事实，不判断证词真假、不分析动机/因果、不预测凶手/身份、不揭示答案、不补全未知经过。`
 
 async function requestOrganization(provider: AiProvider, apiKey: string, user: string, input: OrganizationModelInput, shouldPause?: () => boolean): Promise<RawResult> {
@@ -492,6 +547,7 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     let reviewed = false, reviewError = ''
     // This inventory only directs the API to literal OCR spans; it never creates events online.
     const clockAnchors = clues.map(clue => ({ source: clue.number, occurrences: scanClocks(clue.ocrText).map(clock => ({ offset: clock.index, text: clue.ocrText.slice(clock.index, clock.end), context: clue.ocrText.slice(Math.max(0, clock.index - 48), Math.min(clue.ocrText.length, clock.end + 96)) })) }))
+    const periodAnchors = clues.map(clue => ({ source: clue.number, occurrences: scanPeriods(clue.ocrText).map(period => ({ offset: period.index, text: period.value, context: clue.ocrText.slice(Math.max(0, period.index - 48), Math.min(clue.ocrText.length, period.end + 96)) })) }))
     // Count literal, dated clock anchors only. Unclear dates do not trigger a paid upgrade.
     const clockCoverage = clues.flatMap(clue => {
       const dates = scanDates(clue.ocrText)
@@ -505,7 +561,7 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     const auditModelInput: OrganizationModelInput = { ...modelInput, task: 'timeline-audit', clockCount: clockCoverage.length, missingClocks: clockCoverage.filter(covered => !covered).length }
     stopIfRequested()
     try {
-      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。另检查没有钟表数字的相对时间表达，例如“约两分钟后”“随后”“片刻后”：若它明确承接最近的钟表时刻事件，必须把后续动作和原文相对时间合并写进该锚点事件的标题与连续 quote，沿用锚点时间，不要遗漏、不要换算成新时刻、不要另建无时刻节点。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}`, auditModelInput, context.shouldPause), clues)
+      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时；另检查没有钟表数字的时段词（凌晨、清晨、早晨、早上、上午、中午、下午、午后、傍晚、晚上、晚间、夜里、夜间、深夜、半夜），把它们作为日期级事件输出，并在 timeOfDay 字段逐字保留，不得补造钟点。再检查没有钟表数字的相对时间表达，例如“约两分钟后”“随后”“片刻后”：若它明确承接最近的钟表时刻事件，必须把后续动作和原文相对时间合并写进该锚点事件的标题与连续 quote，沿用锚点时间，不要遗漏、不要换算成新时刻、不要另建无时刻节点。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}\n待核对原文时段锚点：${JSON.stringify(periodAnchors)}`, auditModelInput, context.shouldPause), clues)
       first.snapshot.timeline = mergeTimeline(first.snapshot.timeline, second.snapshot.timeline)
       for (const [sourceNo, count] of second.rejected) first.rejected.set(sourceNo, Math.max(first.rejected.get(sourceNo) || 0, count))
       reviewed = true

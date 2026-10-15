@@ -182,7 +182,7 @@ const quote = (item: Suggestion['item']) => item.quote
 const title = (suggestion: Suggestion) => {
   if (suggestion.kind === 'people') return `${suggestion.item.name}${suggestion.item.aliases.length ? ` · 又名 ${suggestion.item.aliases.join('、')}` : ''}`
   if (suggestion.kind === 'relationships') return `${suggestion.item.from} · ${suggestion.item.label} · ${suggestion.item.to}`
-  if (suggestion.kind === 'timeline') return `${dateLabel(suggestion.item.startsAt)} · ${suggestion.item.title}`
+  if (suggestion.kind === 'timeline') return `${dateLabel(suggestion.item.startsAt)}${suggestion.item.timeOfDay && !/T\d{2}/.test(suggestion.item.startsAt) ? ` ${suggestion.item.timeOfDay}` : ''} · ${suggestion.item.title}`
   return `${suggestion.item.title}${suggestion.item.category ? ` · ${suggestion.item.category}` : ''}`
 }
 const actionLabel = (suggestion: Suggestion) => ({ ready: '直接录入', 'needs-content': '补充事件', 'needs-review': '重新整理' })[classification(suggestion).group]

@@ -54,7 +54,7 @@ const allEvents = computed(() => props.events.filter(event => event.scriptId ===
 const visibleEvents = computed(() => allEvents.value.filter(event => !props.personId || event.personIds.includes(props.personId)))
 const datedCount = computed(() => allEvents.value.filter(event => !event.startsAt.startsWith('--')).length)
 const yearlessCount = computed(() => allEvents.value.length - datedCount.value)
-const orderedEvents = computed(() => [...allEvents.value].sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id)))
+const orderedEvents = computed(() => [...allEvents.value].sort((a, b) => eventTime(a) - eventTime(b) || periodRank(a.timeOfDay) - periodRank(b.timeOfDay) || a.id.localeCompare(b.id)))
 // Coordinates always use every event in the script; filters only hide cards.
 const sequencePositions = computed(() => new Map(orderedEvents.value.map((event, index) => [event.id, sequenceOrigin + index * sequenceStep])))
 const eventSides = computed(() => new Map(orderedEvents.value.map((event, index) => [event.id, sides[index % 2]])))
@@ -69,7 +69,7 @@ const densityGroups = computed<DensityGroup[]>(() => {
   const threshold = layoutMode.value === 'proportional' && densityEnabled.value ? densityTimePerPixel.value * 170 : -1
   const groups: DensityGroup[] = []
   for (const side of sides) {
-    const members = [...allEvents.value].filter(event => eventSides.value.get(event.id) === side).sort((a, b) => eventTime(a) - eventTime(b) || a.id.localeCompare(b.id))
+    const members = [...allEvents.value].filter(event => eventSides.value.get(event.id) === side).sort((a, b) => eventTime(a) - eventTime(b) || periodRank(a.timeOfDay) - periodRank(b.timeOfDay) || a.id.localeCompare(b.id))
     let group: DensityGroup | undefined
     for (const event of members) {
       const time = eventPosition(event)
@@ -136,6 +136,8 @@ function dateLabel(value: string) {
   if (!match) return value
   return `${match[1] ? `${match[1]}年` : ''}${Number(match[2])}月${Number(match[3])}日${match[4] ? ` ${match[5] ? `${match[4]}:${match[5]}` : `${Number(match[4])}时`}` : ''}`
 }
+function eventDateLabel(event: TimelineRecord) { return `${dateLabel(event.startsAt)}${event.timeOfDay && !/T\d{2}/.test(event.startsAt) ? ` ${event.timeOfDay}` : ''}` }
+function periodRank(value = '') { return ['凌晨', '深夜', '半夜', '清晨', '早晨', '早上', '上午', '中午', '下午', '午后', '傍晚', '晚上', '晚间', '夜里', '夜间'].indexOf(value) }
 function eventTitle(event: TimelineRecord) {
   const match = event.startsAt.match(/^(?:--|\d{4}-)(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
   const title = event.title.trim()
@@ -151,7 +153,7 @@ function eventContent(event: TimelineRecord) {
   content.dataset.eventId = event.id
   const time = document.createElement('span')
   time.className = 'timeline-node-time'
-  time.textContent = `${event.approximate ? '约 ' : ''}${dateLabel(event.startsAt)}`
+  time.textContent = `${event.approximate ? '约 ' : ''}${eventDateLabel(event)}`
   const title = document.createElement('span')
   title.className = 'timeline-node-title'
   title.textContent = eventTitle(event)
@@ -162,8 +164,8 @@ function eventContent(event: TimelineRecord) {
   return content
 }
 function clusterLabel(group: DensityGroup) {
-  const first = dateLabel(group.members[0]!.startsAt)
-  const last = dateLabel(group.members[group.members.length - 1]!.startsAt)
+  const first = eventDateLabel(group.members[0]!)
+  const last = eventDateLabel(group.members[group.members.length - 1]!)
   return first === last ? first : `${first} — ${last}`
 }
 function clusterKinds(group: VisibleDensityGroup) {

@@ -131,9 +131,9 @@ export async function organizeIncrementally(
   const canonicalNames = new Map<string, string>()
   for (const person of people) for (const name of [person.name, ...person.aliases, ...(person.ocrNames || [])]) canonicalNames.set(organizationTextKey(name), organizationTextKey(person.name))
   const canonicalName = (name: string): string => canonicalNames.get(organizationTextKey(name)) || organizationTextKey(name)
-  const eventKey = (title: string, startsAt: string, names: string[]): string => JSON.stringify([organizationTextKey(title), startsAt, [...new Set(names)].sort()])
-  const timelineKey = (item: OrganizationTimelineSuggestion): string => eventKey(item.title, item.startsAt, item.people.map(canonicalName))
-  const knownEvents = new Map(input.events.filter(event => event.scriptId === scriptId && event.confirmed && !/待确认|待补充/.test(event.title)).map(event => [eventKey(event.title, event.startsAt, event.personIds.map(id => nameById.get(id) || `id:${id}`)), event]))
+  const eventKey = (title: string, startsAt: string, names: string[], timeOfDay = ''): string => JSON.stringify([organizationTextKey(title), startsAt, timeOfDay, [...new Set(names)].sort()])
+  const timelineKey = (item: OrganizationTimelineSuggestion): string => eventKey(item.title, item.startsAt, item.people.map(canonicalName), item.timeOfDay)
+  const knownEvents = new Map(input.events.filter(event => event.scriptId === scriptId && event.confirmed && !/待确认|待补充/.test(event.title)).map(event => [eventKey(event.title, event.startsAt, event.personIds.map(id => nameById.get(id) || `id:${id}`), event.timeOfDay), event]))
   const relationKey = (from: string, to: string, label: string): string => JSON.stringify([canonicalName(from), canonicalName(to), organizationTextKey(label)])
   const knownRelationships = new Set(input.relationships.filter(relation => relation.scriptId === scriptId).map(relation => JSON.stringify([nameById.get(relation.fromId) || `id:${relation.fromId}`, nameById.get(relation.toId) || `id:${relation.toId}`, organizationTextKey(relation.label)])))
 
@@ -150,7 +150,7 @@ export async function organizeIncrementally(
       const key = timelineKey(candidate)
       const known = knownEvents.get(key)
       if (known && !candidate.requiresTitle) {
-        knownEvents.set(key, await mergeTimelineEvidence(known, { evidence, clueId: evidence[0]!.clueId, precision: candidate.precision, approximate: candidate.approximate }))
+        knownEvents.set(key, await mergeTimelineEvidence(known, { evidence, clueId: evidence[0]!.clueId, timeOfDay: candidate.timeOfDay, precision: candidate.precision, approximate: candidate.approximate }))
       } else remaining.push(candidate)
     }
     snapshot.timeline = remaining

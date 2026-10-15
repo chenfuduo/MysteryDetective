@@ -79,7 +79,7 @@ const details = computed(() => {
   if (entry.kind === 'people') return entry.item.aliases.length ? [{ label: '别名', value: entry.item.aliases.join('、') }] : []
   if (entry.kind === 'relationships') return [{ label: '关系', value: entry.item.label }]
   if (entry.kind === 'timeline') return [
-    { label: '时间', value: dateLabel(entry.item.startsAt) },
+    { label: '时间', value: `${dateLabel(entry.item.startsAt)}${entry.item.timeOfDay && !/T\d{2}/.test(entry.item.startsAt) ? ` ${entry.item.timeOfDay}` : ''}` },
     { label: '精度', value: `${entry.item.startsAt.startsWith('--') ? '无年份 · ' : ''}${entry.item.approximate ? '约时 · ' : ''}${(entry.item.precision || (/T\d{2}:\d{2}$/.test(entry.item.startsAt) ? 'minute' : /T\d{2}$/.test(entry.item.startsAt) ? 'hour' : 'date')) === 'minute' ? '到分钟' : (entry.item.precision || (/T\d{2}$/.test(entry.item.startsAt) ? 'hour' : 'date')) === 'hour' ? '到小时' : '仅日期'}` },
     ...(entry.item.people.length ? [{ label: '人物', value: entry.item.people.join('、') }] : []),
   ]
@@ -123,7 +123,7 @@ watch(() => source.value?.quote, async () => { locatedCount.value = 0; await nex
 function keydown(event: KeyboardEvent) {
   const element = workbench.value
   if (event.defaultPrevented || !element || !(event.target instanceof Node) || !element.contains(event.target) || document.querySelector('.modal-backdrop')) return
-  if (event.key === 'Escape' && !disabled.value) { event.preventDefault(); emit('close'); return }
+  if (event.key === 'Escape') { event.preventDefault(); emit('close'); return }
   if (event.key !== 'Tab') return
   const controls = [...element.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]')].filter(control => control.getClientRects().length)
   const first = controls[0], last = controls[controls.length - 1]
@@ -136,11 +136,12 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
 
 <template>
   <Teleport to="body">
+    <div class="review-workbench-backdrop" @click.self="emit('close')">
     <section ref="workbench" class="review-workbench" role="dialog" aria-modal="true" aria-labelledby="workbench-title" :aria-busy="busy" @contextmenu.prevent>
       <header class="workbench-header">
         <div><span class="workbench-eyebrow">当前剧本 · 逐条录入</span><h1 id="workbench-title">原文与整理结果</h1></div>
         <div class="workbench-progress" role="status" aria-live="polite"><strong>{{ suggestions.length }}</strong> 项待处理<span v-if="completedCount"> · 本次已处理 {{ completedCount }} 项</span></div>
-        <button ref="closeButton" class="workbench-close" :disabled="disabled" aria-label="关闭逐条录入" @click="emit('close')">完成 <span aria-hidden="true">×</span></button>
+        <button ref="closeButton" class="workbench-close" aria-label="关闭逐条录入" @click="emit('close')">完成 <span aria-hidden="true">×</span></button>
       </header>
       <nav v-if="suggestion" class="workbench-navigation" aria-label="选择整理建议">
         <label>按原线索<select :value="suggestion.item.sourceNo" :disabled="disabled" @change="chooseSource"><option v-for="group in groups" :key="group.number" :value="group.number">#{{ String(group.number).padStart(3, '0') }} {{ group.title }} · {{ group.count }} 项</option></select></label>
@@ -164,11 +165,13 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
         </section>
       </div>
     </section>
+    </div>
   </Teleport>
 </template>
 
 <style scoped>
-.review-workbench { position: fixed; inset: 0; z-index: 1200; display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: max(16px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); background: #f5f7f2; color: #2e4337; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.review-workbench-backdrop { position: fixed; inset: 0; z-index: 1200; display: flex; min-width: 0; min-height: 0; background: rgba(22, 31, 25, .28); }
+.review-workbench { position: relative; display: flex; flex: 1; flex-direction: column; width: 100%; min-width: 0; min-height: 0; padding: max(16px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); background: #f5f7f2; color: #2e4337; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .review-workbench *, .review-workbench *::before, .review-workbench *::after { box-sizing: border-box; }
 .review-workbench button, .review-workbench select { font: inherit; }
 .review-workbench button { min-height: 42px; padding: 0 14px; border: 1px solid #dfe6dc; border-radius: 11px; background: #fff; color: #365944; cursor: pointer; }
@@ -225,7 +228,9 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
 .workbench-empty h2 { margin: 18px 0 8px; font-size: 23px; }
 .workbench-empty p { margin: 0 0 22px; color: #8b9780; font-size: 13px; }
 @media (orientation: portrait), (max-width: 760px) {
-  .review-workbench { padding-right: max(12px, env(safe-area-inset-right)); padding-left: max(12px, env(safe-area-inset-left)); }
+  .review-workbench-backdrop { align-items: flex-end; }
+  .review-workbench { flex: 0 0 auto; width: 100%; height: 50vh; height: 50dvh; max-height: 50vh; max-height: 50dvh; min-height: 0; padding: 12px max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); border-radius: 18px 18px 0 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; animation: workbench-sheet-in .22s ease-out both; }
+  @keyframes workbench-sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .workbench-header { gap: 10px; padding-bottom: 12px; }
   .workbench-header h1 { font-size: 19px; }
   .workbench-progress { font-size: 11px; }
@@ -236,7 +241,9 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
   .workbench-paging { gap: 5px; }
   .workbench-paging button { min-height: 40px; padding: 0 8px; font-size: 11px; }
   .workbench-paging span { min-width: 42px; font-size: 10px; }
-  .workbench-columns { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, .7fr) minmax(0, 1.3fr); gap: 10px; }
+  .workbench-columns { flex: 0 0 auto; display: flex; flex-direction: column; min-height: 0; gap: 10px; }
+  .workbench-photo-pane { flex: 0 0 auto; height: 30dvh; min-height: 180px; }
+  .workbench-review-pane { flex: 0 0 auto; height: 56dvh; min-height: 340px; }
   .workbench-pane-heading { padding: 8px 12px; }
   .workbench-proposal { padding: 14px 16px 11px; max-height: 55%; }
   .workbench-proposal h2 { font-size: 19px; margin: 10px 0 8px; }
@@ -246,5 +253,5 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
   .workbench-ocr { padding: 12px 16px; }
   .workbench-actions { padding: 10px 12px 9px; }
 }
-@media (prefers-reduced-motion: reduce) { .review-workbench * { scroll-behavior: auto !important; } }
+@media (prefers-reduced-motion: reduce) { .review-workbench * { scroll-behavior: auto !important; } .review-workbench { animation: none !important; } }
 </style>

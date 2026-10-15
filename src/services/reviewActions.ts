@@ -162,7 +162,7 @@ export async function reviewSuggestions(scriptId: string, selection: ReviewSelec
       const clue = clues.find(clue => clue.number === item.sourceNo)
       return Boolean(clue && item.quote.trim() && clue.ocrText.includes(item.quote))
     }
-    const eventIdentity = (event: Pick<TimelineRecord, 'title' | 'startsAt' | 'personIds'>): string => JSON.stringify([vault.organizationTextKey(event.title), event.startsAt, [...new Set(event.personIds)].sort()])
+    const eventIdentity = (event: Pick<TimelineRecord, 'title' | 'startsAt' | 'timeOfDay' | 'personIds'>): string => JSON.stringify([vault.organizationTextKey(event.title), event.startsAt, event.timeOfDay || '', [...new Set(event.personIds)].sort()])
     const mergeEvidence = (previous: TimelineRecord, incoming: TimelineRecord): TimelineRecord => {
       const evidence = new Map<string, vault.OrganizationEvidence>()
       for (const source of [...(previous.evidence || []), ...(incoming.evidence || [])]) {
@@ -173,7 +173,7 @@ export async function reviewSuggestions(scriptId: string, selection: ReviewSelec
         const clue = clues.find(clue => clue.id === clueId)
         if (clue && ![...evidence.values()].some(source => source.clueId === clue.id)) evidence.set(JSON.stringify([clue.id, '']), { clueId: clue.id, sourceNo: clue.number, quote: '' })
       }
-      return { ...previous, evidence: [...evidence.values()], clueId: previous.clueId || evidence.values().next().value?.clueId || '' }
+      return { ...previous, timeOfDay: previous.timeOfDay || incoming.timeOfDay, evidence: [...evidence.values()], clueId: previous.clueId || evidence.values().next().value?.clueId || '' }
     }
     let applied = 0, skipped = 0
     for (const entry of selection.filter((entry, index, entries) => entries.findIndex(other => other.kind === entry.kind && other.id === entry.id) === index)) {
@@ -197,7 +197,7 @@ export async function reviewSuggestions(scriptId: string, selection: ReviewSelec
           if (item.requiresTitle || !item.title.trim() || item.title === '待补充事件') { skipped++; continue }
           const evidence = timelineEvidence(item, clues)
           if (!evidence.length) { skipped++; continue }
-          const created: TimelineRecord = { id: crypto.randomUUID(), scriptId, title: item.title, startsAt: item.startsAt, personIds: item.people.map(name => findPerson(name).id), clueId: evidence[0]!.clueId, evidence, precision: item.precision, approximate: item.approximate, confirmed: true, yearlessMarkerIgnored: false }
+          const created: TimelineRecord = { id: crypto.randomUUID(), scriptId, title: item.title, startsAt: item.startsAt, timeOfDay: item.timeOfDay, personIds: item.people.map(name => findPerson(name).id), clueId: evidence[0]!.clueId, evidence, precision: item.precision, approximate: item.approximate, confirmed: true, yearlessMarkerIgnored: false }
           const previous = !/待确认|待补充/.test(created.title) ? events.find(event => event.confirmed === created.confirmed && eventIdentity(event) === eventIdentity(created)) : undefined
           const next = previous ? mergeEvidence(previous, created) : created
           if (!same(previous || null, next)) remember('timeline', previous || null, next)

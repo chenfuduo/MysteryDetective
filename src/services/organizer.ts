@@ -229,7 +229,8 @@ function mergeTimeline(first: OrganizationSnapshot['timeline'], next: Organizati
     const existingIndex = merged.findIndex(previous => previous.sourceNo === item.sourceNo && previous.startsAt.slice(0, 7) === item.startsAt.slice(0, 7) && (previous.title === item.title || previous.quote.includes(item.quote) || item.quote.includes(previous.quote)) && (previous.startsAt === item.startsAt || (previous.startsAt.split('T')[0] === item.startsAt.split('T')[0] && (!previous.startsAt.includes('T') || !item.startsAt.includes('T')))))
     if (existingIndex < 0) { merged.push(item); continue }
     const previous = merged[existingIndex]
-    if (item.startsAt.length > previous.startsAt.length || (previous.requiresTitle && !item.requiresTitle)) merged[existingIndex] = item
+    const addsContinuousContext = item.quote.length > previous.quote.length && item.quote.includes(previous.quote)
+    if (item.startsAt.length > previous.startsAt.length || (previous.requiresTitle && !item.requiresTitle) || addsContinuousContext) merged[existingIndex] = item
   }
   return merged
 }
@@ -385,7 +386,8 @@ const organizationSystem = `你是剧本杀线索的文字整理工具。只整�
 3. 同线索前文明确月日，后续分项未出现新日期时沿用最近月日，跨段落/医院监控/城市监控等标题也继续检查，不得跨不同线索沿用日期。“6月17日早晨7点09分……城市监控显示：凌晨3时10分……3时24分……”必须分别保留后续每一时刻。
 4. 时段词和 OCR 错别字不应阻断时钟数字识别。全角数字、数字间的 OCR 空格/换行、中文数字和冒号均要识别，例如“１０点２７分”“1 0 点 2 7 分”“十点三刻”；quote 仍保留原文，不能改写成标准数字。“通话1分43秒”“停留约一分钟”“1524病房”“线索卡22”是时长、房号或编号，不能当作新的事件时刻。明确晚上/下午换算 24 小时制；没有时段依据不得擅自加 12 小时。约、左右、大概、前后等近似含义必须保留，approximate=true；不能把约十点写成精确 10:00。
 5. precision 为 date/hour/minute，与原文精度一致；约时仍保留原文实际精度。每个事件 title 只简述原文动作，无法提取标题时写“待补充事件”。不要为同一事件再重复一个仅日期建议。
-6. 每条 quote 必须逐字连续摘录对应 OCR 原文，保留原标点/空格，不要改错字、不要拼接多段，优先含时刻和事件动作；日期在前段时 quote 可只取当前时刻所在句，source 标明所属线索。每条 quote 尽量少于 400 字。
+6. 没有具体钟表数字的相对时间也必须保留，不能因 startsAt 无法单独确定而漏掉。若“约两分钟后”“随后”“片刻后”等后续动作明确承接一个已有钟表时刻的事件，将后续动作合并进该锚点事件的 title 和 quote，startsAt 与 precision 沿用锚点；保留原文相对时间措辞，含“约/左右”等估计时 approximate=true。不要把时长换算成新钟表时刻，也不要另造一个没有独立钟表时刻的节点。例如“7点左右敲门，约两分钟后坠楼”合成一个约7点的事件，标题同时写出敲门与坠楼，quote 连续包含两段原文；若之后另有“7点12分报警”，仍单独保留该事件。
+7. 每条 quote 必须逐字连续摘录对应 OCR 原文，保留原标点/空格，不要改错字、不要拼接多段，优先含时刻、相对时间和事件动作；日期在前段时 quote 可只取当前时刻所在句，source 标明所属线索。每条 quote 尽量少于 400 字。
 输出纯 JSON：{"people":[{"name":"原文人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确动作","startsAt":"--06-16T22:27","precision":"minute","approximate":false,"people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
 其他约束：人物姓名须逐字出现；关系须原文明说，不因共同出现推断。每项必须有 source 和逐字 quote。只归纳明确事实，不判断证词真假、不分析动机/因果、不预测凶手/身份、不揭示答案、不补全未知经过。`
 
@@ -503,7 +505,7 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     const auditModelInput: OrganizationModelInput = { ...modelInput, task: 'timeline-audit', clockCount: clockCoverage.length, missingClocks: clockCoverage.filter(covered => !covered).length }
     stopIfRequested()
     try {
-      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}`, auditModelInput, context.shouldPause), clues)
+      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。另检查没有钟表数字的相对时间表达，例如“约两分钟后”“随后”“片刻后”：若它明确承接最近的钟表时刻事件，必须把后续动作和原文相对时间合并写进该锚点事件的标题与连续 quote，沿用锚点时间，不要遗漏、不要换算成新时刻、不要另建无时刻节点。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}`, auditModelInput, context.shouldPause), clues)
       first.snapshot.timeline = mergeTimeline(first.snapshot.timeline, second.snapshot.timeline)
       for (const [sourceNo, count] of second.rejected) first.rejected.set(sourceNo, Math.max(first.rejected.get(sourceNo) || 0, count))
       reviewed = true

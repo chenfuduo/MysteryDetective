@@ -376,6 +376,50 @@ async function sourceBase64(uri: string): Promise<string> {
   const response = await fetch(uri)
   return bytesToBase64(new Uint8Array(await response.arrayBuffer()))
 }
+function prepareBrowserOcrCanvas(image: HTMLImageElement): HTMLCanvasElement {
+  const sourceWidth = image.naturalWidth
+  const sourceHeight = image.naturalHeight
+  const scale = Math.min(2, 3200 / Math.max(sourceWidth, sourceHeight), Math.sqrt(7_000_000 / (sourceWidth * sourceHeight)))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(sourceWidth * scale))
+  canvas.height = Math.max(1, Math.round(sourceHeight * scale))
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) throw new Error('无法准备 OCR 图像')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height)
+  const histogram = new Uint32Array(256)
+  const total = canvas.width * canvas.height
+  for (let index = 0; index < pixels.data.length; index += 4) {
+    const gray = Math.round(pixels.data[index] * 0.299 + pixels.data[index + 1] * 0.587 + pixels.data[index + 2] * 0.114)
+    histogram[gray]++
+  }
+  const percentile = (fraction: number) => {
+    const target = Math.floor(total * fraction)
+    let count = 0
+    for (let value = 0; value < histogram.length; value++) {
+      count += histogram[value]
+      if (count >= target) return value
+    }
+    return 255
+  }
+  const black = percentile(0.015)
+  const white = Math.max(black + 32, percentile(0.985))
+  const range = white - black
+  for (let index = 0; index < pixels.data.length; index += 4) {
+    const gray = pixels.data[index] * 0.299 + pixels.data[index + 1] * 0.587 + pixels.data[index + 2] * 0.114
+    const normalized = Math.max(0, Math.min(1, (gray - black) / range))
+    const enhanced = Math.round(18 + normalized * 225)
+    pixels.data[index] = enhanced
+    pixels.data[index + 1] = enhanced
+    pixels.data[index + 2] = enhanced
+  }
+  context.putImageData(pixels, 0, 0)
+  return canvas
+}
+
 async function recognizeInBrowser(base64: string, mime: string): Promise<{ text: string; regions: OcrRegion[] }> {
   if (!browserOcrWorker) {
     browserOcrWorker = import('tesseract.js').then(({ createWorker }) => {
@@ -394,29 +438,65 @@ async function recognizeInBrowser(base64: string, mime: string): Promise<{ text:
   }
   const worker = await browserOcrWorker
   const imageUrl = `data:${mime};base64,${base64}`
-  const { data } = await worker.recognize(imageUrl, {}, { blocks: true })
-  let regions: OcrRegion[] = []
-  if (data.blocks?.length) {
-    try {
-      const image = new Image()
-      image.src = imageUrl
-      await image.decode()
-      const lines = data.blocks.flatMap(block => block.paragraphs.flatMap(paragraph => paragraph.lines))
-      regions = normalizedOcrRegions(lines.map(line => ({
+  const sourceImage = new Image()
+  sourceImage.src = imageUrl
+  try { await sourceImage.decode() } catch { /* Tesseract may still decode formats the page cannot preview. */ }
+
+  let preparedImage: HTMLCanvasElement | null = null
+  try {
+    if (sourceImage.naturalWidth && sourceImage.naturalHeight) preparedImage = prepareBrowserOcrCanvas(sourceImage)
+  } catch { /* Fall back to the original photo if canvas processing is unavailable. */ }
+
+  try {
+    const prepared = await worker.recognize(preparedImage || imageUrl, { tessedit_pageseg_mode: '3' }, { blocks: true })
+    const original = preparedImage
+      ? await worker.recognize(imageUrl, { tessedit_pageseg_mode: '3' }, { blocks: true })
+      : null
+    const width = sourceImage.naturalWidth || preparedImage?.width || 1
+    const height = sourceImage.naturalHeight || preparedImage?.height || 1
+    const collectRegions = (result: typeof prepared): OcrRegion[] => {
+      const lines = result.data.blocks?.flatMap(block => block.paragraphs.flatMap(paragraph => paragraph.lines)) || []
+      return normalizedOcrRegions(lines.map(line => ({
         text: line.text,
         confidence: Math.max(0, Math.min(1, line.confidence / 100)),
         boundingBox: {
-          x: line.bbox.x0 / image.naturalWidth,
-          y: line.bbox.y0 / image.naturalHeight,
-          width: (line.bbox.x1 - line.bbox.x0) / image.naturalWidth,
-          height: (line.bbox.y1 - line.bbox.y0) / image.naturalHeight,
+          x: line.bbox.x0 / width,
+          y: line.bbox.y0 / height,
+          width: (line.bbox.x1 - line.bbox.x0) / width,
+          height: (line.bbox.y1 - line.bbox.y0) / height,
         },
       })))
-    } catch {
-      // Text recognition remains useful even when the browser cannot expose image bounds.
+    }
+    const regions = [...collectRegions(prepared), ...(original ? collectRegions(original) : [])]
+    const lineScore = (region: OcrRegion) => {
+      const useful = (region.text.match(/[\u3400-\u9fffA-Za-z0-9]/g) || []).length
+      const symbols = Math.max(0, region.text.length - useful)
+      return (region.confidence || 0) * 100 + Math.min(24, useful * 0.5) - symbols * 0.25
+    }
+    const merged: OcrRegion[] = []
+    for (const candidate of regions.sort((a, b) => lineScore(b) - lineScore(a))) {
+      const duplicateIndex = merged.findIndex(existing => {
+        const left = Math.max(existing.x, candidate.x)
+        const top = Math.max(existing.y, candidate.y)
+        const right = Math.min(existing.x + existing.width, candidate.x + candidate.width)
+        const bottom = Math.min(existing.y + existing.height, candidate.y + candidate.height)
+        const intersection = Math.max(0, right - left) * Math.max(0, bottom - top)
+        const smallerArea = Math.min(existing.width * existing.height, candidate.width * candidate.height)
+        return smallerArea > 0 && intersection / smallerArea >= 0.35
+      })
+      if (duplicateIndex < 0) merged.push(candidate)
+      else if (lineScore(candidate) > lineScore(merged[duplicateIndex])) merged[duplicateIndex] = candidate
+    }
+    merged.sort((a, b) => a.y - b.y || a.x - b.x)
+    const text = merged.map(region => region.text.trim()).filter(Boolean).join('\n')
+      || (prepared.data.confidence >= (original?.data.confidence ?? 0) ? prepared.data.text : original?.data.text || '')
+    return { text, regions: merged }
+  } finally {
+    if (preparedImage) {
+      preparedImage.width = 0
+      preparedImage.height = 0
     }
   }
-  return { text: data.text, regions }
 }
 async function recognizeSavedClue(clue: ClueRecord, data?: string): Promise<ClueRecord> {
   let ocrText = ''

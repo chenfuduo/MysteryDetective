@@ -84,8 +84,8 @@ function centerOnSource() {
   ])
   const radians = props.rotation * Math.PI / 180
   const positions = points.map(([x, y]) => {
-    const dx = (x - 0.5) * dimensions.value.imageWidth
-    const dy = (y - 0.5) * dimensions.value.imageHeight
+    const dx = (x - 0.5) * size.imageWidth * displayScale.value
+    const dy = (y - 0.5) * size.imageHeight * displayScale.value
     return { x: dx * Math.cos(radians) - dy * Math.sin(radians), y: dx * Math.sin(radians) + dy * Math.cos(radians) }
   })
   const centerX = positions.length ? (Math.min(...positions.map(point => point.x)) + Math.max(...positions.map(point => point.x))) / 2 : 0

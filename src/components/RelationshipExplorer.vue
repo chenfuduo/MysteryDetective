@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PersonRecord, RelationshipRecord } from '../services/vault'
 import UiIcon from './UiIcon.vue'
+const RelationshipSpatialScene = defineAsyncComponent(() => import('./RelationshipSpatialScene.vue'))
 
 const props = defineProps<{
   people: PersonRecord[]
@@ -23,7 +24,7 @@ const emit = defineEmits<{
 
 type Point = { x: number; y: number }
 type Gesture = { kind: 'pan' | 'person' | 'connect'; start: Point; pan: Point; personId?: string; position?: Point; beforePositions?: Record<string, Point>; moved: boolean }
-type Pinch = { distance: number; zoom: number; anchor: Point }
+type Pinch = { distance: number; zoom: number; anchor: Point; start: Point; angle: number; rotation: Point }
 const stage = ref<HTMLElement | null>(null)
 const positions = ref<Record<string, Point>>({})
 const pan = ref<Point>({ x: 0, y: 0 })
@@ -32,6 +33,9 @@ const moveHistory = ref<Record<string, Point>[]>([])
 let activeScriptId = props.scriptId
 let viewReady = false
 const spatial = ref(true)
+const spatialSceneReady = ref(false)
+const projectedPositions = ref<Record<string, Point & { width?: number; height?: number }>>({})
+const cameraRotation = ref<Point>({ x: 0, y: 0 })
 const fullscreen = ref(false)
 defineExpose({ exitFullscreen: () => { fullscreen.value = false } })
 const selectedId = ref('')
@@ -64,11 +68,12 @@ const centerId = computed(() => {
 })
 const adjacent = computed(() => new Set(relationships.value.flatMap(relationship => relationship.fromId === selectedId.value ? [relationship.toId] : relationship.toId === selectedId.value ? [relationship.fromId] : [])))
 const selectedRelationships = computed(() => relationships.value.filter(relationship => relationship.fromId === selectedId.value || relationship.toId === selectedId.value))
+const isolateRelated = ref(false)
 const searchMatches = computed(() => {
   const value = search.value.trim().toLocaleLowerCase()
   return value ? people.value.filter(person => [person.name, ...person.aliases].some(name => name.toLocaleLowerCase().includes(value))) : []
 })
-const worldStyle = computed(() => ({ transform: `translate3d(${pan.value.x}px, ${pan.value.y}px, 0) scale(${zoom.value})` }))
+const worldStyle = computed(() => ({ transform: spatial.value && spatialSceneReady.value ? 'none' : `translate3d(${pan.value.x}px, ${pan.value.y}px, 0) scale(${zoom.value})` }))
 const edges = computed(() => {
   const placed: { x: number; y: number; width: number }[] = []
   return relationships.value.map(relationship => {
@@ -97,8 +102,9 @@ const edges = computed(() => {
 })
 
 const linkingLine = computed(() => {
-  const from = positions.value[linkSourceId.value]
-  const to = positions.value[linkTargetId.value] || linkEndpoint.value
+  const projected = spatial.value && spatialSceneReady.value ? projectedPositions.value : null
+  const from = projected?.[linkSourceId.value] || positions.value[linkSourceId.value]
+  const to = (linkTargetId.value && projected?.[linkTargetId.value]) || positions.value[linkTargetId.value] || linkEndpoint.value
   return from && to ? { from, to } : null
 })
 function clearLongPress() { if (longPressTimer) clearTimeout(longPressTimer); longPressTimer = undefined }
@@ -141,14 +147,19 @@ function openRelationshipPicker() { if (props.readOnly) return; cancelConnection
 
 function imageFor(person: PersonRecord): string { return props.imageUrls[person.photoPath] || props.imageUrls[person.id] || '' }
 function personStyle(person: PersonRecord, index: number) {
-  const point = positions.value[person.id] || { x: 0, y: 0 }
-  return { left: `${point.x}px`, top: `${point.y}px`, '--card-depth': `${index % 3 * 4}px` }
+  const projected = spatial.value && spatialSceneReady.value ? projectedPositions.value[person.id] : undefined
+  const point = projected || positions.value[person.id] || { x: 0, y: 0 }
+  const width = projected?.width || 180
+  const height = projected?.height || 90
+  const hidden = isolateRelated.value && selectedId.value && person.id !== selectedId.value && !adjacent.value.has(person.id)
+  return { left: `${point.x}px`, top: `${point.y}px`, width: `${width}px`, height: `${height}px`, marginLeft: `${-width / 2}px`, marginTop: `${-height / 2}px`, display: hidden ? 'none' : '', '--card-depth': `${index % 3 * 4}px` }
 }
 function layoutKey(): string { return `clue-vault:relationship-layout:${props.scriptId}:v1` }
 function viewKey() { return `clue-vault:relationship-view:${activeScriptId}:v1` }
+function spatialSceneState(ready: boolean) { spatialSceneReady.value = ready; if (!ready) projectedPositions.value = {}; if (ready) requestAnimationFrame(measure) }
 function persistView() {
   if (!viewReady) return
-  try { sessionStorage.setItem(viewKey(), JSON.stringify({ pan: pan.value, zoom: zoom.value, spatial: spatial.value, viewport: viewport.value })) } catch { /* The current view remains usable without storage. */ }
+  try { sessionStorage.setItem(viewKey(), JSON.stringify({ pan: pan.value, zoom: zoom.value, spatial: spatial.value, rotation: cameraRotation.value, viewport: viewport.value })) } catch { /* The current view remains usable without storage. */ }
 }
 function restoreView() {
   try {
@@ -156,6 +167,7 @@ function restoreView() {
     if (!saved || !Number.isFinite(saved.pan?.x) || !Number.isFinite(saved.pan?.y) || !Number.isFinite(saved.zoom) || saved.zoom <= 0) return false
     zoom.value = Math.max(.06, Math.min(3, saved.zoom))
     spatial.value = typeof saved.spatial === 'boolean' ? saved.spatial : true
+    if (Number.isFinite(saved.rotation?.x) && Number.isFinite(saved.rotation?.y)) cameraRotation.value = { x: saved.rotation.x, y: Math.max(-0.42, Math.min(0.48, saved.rotation.y)) }
     pan.value = { x: saved.pan.x + (viewport.value.width - (saved.viewport?.width || viewport.value.width)) / 2, y: saved.pan.y + (viewport.value.height - (saved.viewport?.height || viewport.value.height)) / 2 }
     return true
   } catch { return false }
@@ -253,7 +265,7 @@ function startPinch() {
   const [a, b] = [...pointers.values()]
   if (!a || !b) return
   const midpoint = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
-  pinch = { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), zoom: zoom.value, anchor: { x: (midpoint.x - pan.value.x) / zoom.value, y: (midpoint.y - pan.value.y) / zoom.value } }
+  pinch = { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), zoom: zoom.value, anchor: { x: (midpoint.x - pan.value.x) / zoom.value, y: (midpoint.y - pan.value.y) / zoom.value }, start: midpoint, angle: Math.atan2(b.y - a.y, b.x - a.x), rotation: { ...cameraRotation.value } }
   gesture = null
 }
 function pointerDown(event: PointerEvent) {
@@ -282,6 +294,9 @@ function pointerMove(event: PointerEvent) {
     const midpoint = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
     zoom.value = Math.min(3, Math.max(0.06, pinch.zoom * Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance))
     pan.value = { x: midpoint.x - pinch.anchor.x * zoom.value, y: midpoint.y - pinch.anchor.y * zoom.value }
+    const angle = Math.atan2(b.y - a.y, b.x - a.x)
+    const twist = Math.atan2(Math.sin(angle - pinch.angle), Math.cos(angle - pinch.angle))
+    cameraRotation.value = { x: pinch.rotation.x + twist, y: Math.max(-0.42, Math.min(0.48, pinch.rotation.y + (midpoint.y - pinch.start.y) * 0.002)) }
     return
   }
   if (!gesture) return
@@ -336,7 +351,8 @@ watch(() => props.scriptId, async () => {
   cancelConnection(); selectedId.value = ''; search.value = ''; syncPeople(true)
   await nextTick(); measure(); if (!restoreView()) fit(); viewReady = true; persistView()
 })
-watch([pan, zoom, spatial], persistView, { deep: true, flush: 'sync' })
+watch([pan, zoom, spatial, cameraRotation], persistView, { deep: true, flush: 'sync' })
+watch(spatial, () => { spatialSceneReady.value = false; projectedPositions.value = {} })
 watch(() => people.value.map(person => person.id).join('|'), async () => {
   if (linkSourceId.value && (!peopleById.value.has(linkSourceId.value) || (linkTargetId.value && !peopleById.value.has(linkTargetId.value)))) cancelConnection()
   syncPeople(); await nextTick(); measure(); if (!initialized) fit()
@@ -370,7 +386,7 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body" :disabled="!fullscreen">
-    <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-spatial': spatial, 'is-readonly': readOnly }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
+    <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-spatial': spatial && spatialSceneReady, 'is-webgl': spatial && spatialSceneReady, 'is-readonly': readOnly }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>{{ people.length }} 位人物</strong><span>{{ relationships.length }} 条手动关系</span></div>
         <div class="graph-actions">
@@ -382,6 +398,7 @@ onBeforeUnmount(() => {
       </header>
       <div class="graph-layout">
         <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging, 'is-linking': linkSourceId }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @lostpointercapture="pointerEnd" @contextmenu.prevent @wheel="wheel">
+          <RelationshipSpatialScene v-if="spatial" :people="people" :relationships="relationships" :positions="positions" :pan="pan" :zoom="zoom" :rotation="cameraRotation" :selected-id="selectedId" :link-source-id="linkSourceId" :link-target-id="linkTargetId" :image-urls="imageUrls" :clue-counts="clueCounts" :center-id="centerId" :hide-unrelated="isolateRelated" @ready="spatialSceneState" @projected="projectedPositions = $event" />
           <div class="graph-ground" aria-hidden="true"></div>
           <div class="graph-world" :style="worldStyle">
             <svg class="graph-edges" width="1" height="1" aria-hidden="true">
@@ -404,10 +421,10 @@ onBeforeUnmount(() => {
           <div v-if="linkSourceId" class="graph-connection-bar" role="status"><div><strong>连线模式 · {{ peopleById.get(linkSourceId)?.name }}</strong><span>{{ linkTargetId ? `连接到 ${peopleById.get(linkTargetId)?.name}` : '拖到目标人物，或松手后点选人物' }}</span></div><button type="button" @click="cancelConnection"><UiIcon name="close" :size="16" />取消连线</button></div>
           <div v-else class="graph-hud">
             <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
-            <button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '立体' : '平面' }}</button>
+            <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '立体' : '平面' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button></div>
           </div>
           <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
-          <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
+          <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : spatial ? '长按人物连线 · 拖动画布 · 双指缩放与旋转' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
         </div>
         <aside v-if="selected && !linkSourceId" class="graph-inspector">
           <header><span>人物详情</span><button type="button" class="graph-icon-button" aria-label="关闭人物详情" @click="selectedId = ''"><UiIcon name="close" :size="18" /></button></header>
@@ -458,13 +475,16 @@ onBeforeUnmount(() => {
 .graph-connection-bar span { color: #87977f; font-size: 11px; }
 .graph-connection-bar button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 40px; padding: 0 10px; border: 1px solid #dce6d8; border-radius: 9px; background: #f7faf4; color: #57764f; font: inherit; font-size: 12px; }
 .graph-ground { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(#dce3da 1px, transparent 1px); background-size: 24px 24px; opacity: .7; transition: transform .3s ease, opacity .3s ease; }
-.is-spatial .graph-ground { transform: perspective(800px) rotateX(14deg) scale(1.18); transform-origin: 50% 70%; opacity: .55; }
+.is-webgl .graph-stage { background: radial-gradient(ellipse at 50% 34%, #151e28 0%, #0b0f15 64%, #080a0f 100%); }
+.is-webgl .graph-ground { display: none; }
+.is-webgl .graph-world { z-index: 1; }
 .graph-world { position: absolute; top: 0; left: 0; width: 1px; height: 1px; transform-origin: 0 0; will-change: transform; }
 .graph-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
 .graph-edges g { transition: opacity .18s ease; }
 .graph-edges g.is-muted { opacity: .14; }
 .edge-shadow { stroke: #91a58f; stroke-width: 7; opacity: 0; }
-.is-spatial .edge-shadow { opacity: .08; }
+.is-webgl .graph-edges > g:not(.connection-preview) { display: none; }
+.is-webgl .edge-shadow { opacity: .08; }
 .edge-line { stroke: #91ab92; stroke-width: 2.5; }
 .graph-edges g.is-connected .edge-line { stroke: var(--graph-copper); stroke-width: 3; }
 .graph-edges rect { fill: #fff; stroke: #e4e9e2; }
@@ -475,10 +495,17 @@ onBeforeUnmount(() => {
 .person-node.is-muted { opacity: .32; }
 .person-node:focus-visible .graph-person-card { outline: 3px solid #b4cec0; outline-offset: 4px; }
 .graph-person-card { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr); grid-template-rows: 40px 15px; gap: 3px 9px; align-items: center; height: 100%; min-height: 0; padding: 13px 12px; border: 1px solid #dfe8df; border-radius: 16px; background: linear-gradient(150deg, #fff, #f5f8f3); box-shadow: 0 5px 16px #2f4a3220; transform-origin: center; transition: box-shadow .22s ease, transform .22s ease, border-color .22s ease; }
-.is-spatial .graph-person-card { transform: perspective(760px) rotateY(-5deg) rotateX(5deg) translateZ(var(--card-depth)); box-shadow: 1px 2px 0 #edf2e9, 2px 4px 0 #dce5d8, 3px 7px 0 #c8d3c4, 9px 17px 22px #315c4830; }
+.is-webgl .graph-person-card { opacity: 0; border-color: transparent; background: transparent; box-shadow: none; color: transparent; transform: none; pointer-events: none; }
 .person-node.is-neighbor .graph-person-card { border-color: #c3b39f; }
 .person-node.is-selected .graph-person-card, .person-node.is-central .graph-person-card { border-color: #a6b187; background: linear-gradient(135deg, #416d56, #254f3b); color: #fff; box-shadow: 0 0 0 2px #315c4814, 0 12px 26px #315c4826; }
-.is-spatial .person-node.is-selected .graph-person-card, .is-spatial .person-node.is-central .graph-person-card { transform: perspective(760px) rotateY(-3deg) rotateX(3deg) translateY(-5px); box-shadow: 1px 2px 0 #b8bd94, 2px 4px 0 #a6ac83, 3px 7px 0 #8c986f, 9px 17px 28px #315c4838; }
+.is-webgl .graph-hud .graph-search, .is-webgl .graph-mode, .is-webgl .graph-zoom { border-color: rgba(196,212,228,.2); background: rgba(13,18,24,.82); color: #bdc9d5; box-shadow: 0 8px 24px rgba(0,0,0,.18); backdrop-filter: blur(14px); }
+.is-webgl .graph-search input { color: #e7edf3; }
+.is-webgl .graph-mode.active { color: #d9e6f2; background: rgba(159,184,216,.17); }
+.is-webgl .graph-search input::placeholder, .is-webgl .graph-zoom > span { color: #8795a4; }
+.is-webgl .graph-zoom button { color: #c8d7e6; }
+.is-webgl .graph-help > span { background: rgba(13,18,24,.76); color: #9ba8b6; backdrop-filter: blur(12px); }
+.is-webgl .graph-empty { color: #edf2f6; }
+.is-webgl .graph-empty p { color: #9ca9b7; }
 .graph-person-avatar { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; overflow: hidden; border: 1px solid #e3e8df; border-radius: 13px; background: linear-gradient(145deg, #e4ede4, #f4f6ef); color: var(--graph-green); font-size: 20px; font-weight: 650; }
 .graph-person-avatar img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 .graph-person-card-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
@@ -500,6 +527,8 @@ onBeforeUnmount(() => {
 .graph-search-results p { padding: 8px; color: #8d978a; font-size: 12px; }
 .graph-mode { display: flex; align-items: center; gap: 6px; min-height: 42px; padding: 0 12px; border: 1px solid #e0e7dc; border-radius: 12px; background: #ffffffed; color: #7e8c7b; font: inherit; font-size: 12px; cursor: pointer; }
 .graph-mode.active { color: var(--graph-green); background: #f1f6ef; }
+.graph-view-buttons { display: flex; gap: 7px; }
+.graph-mode:disabled { opacity: .45; cursor: default; }
 .graph-help { position: absolute; z-index: 4; right: 16px; left: 16px; bottom: 14px; display: flex; align-items: center; justify-content: space-between; gap: 8px; pointer-events: none; }
 .graph-help > span { padding: 7px 9px; border-radius: 8px; background: #f7f9f3d9; color: #939e8d; font-size: 10px; }
 .graph-zoom { display: flex; align-items: center; flex: 0 0 auto; min-height: 42px; padding: 0 5px; border: 1px solid #e0e7da; border-radius: 12px; background: #fffffff2; box-shadow: 0 3px 12px #315c4807; pointer-events: auto; }

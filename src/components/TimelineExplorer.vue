@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Timeline } from 'vis-timeline/standalone'
 import UiIcon from './UiIcon.vue'
+const TimelineSpatialScene = defineAsyncComponent(() => import('./TimelineSpatialScene.vue'))
 import type { ClueRecord, PersonRecord, TimelineRecord } from '../services/vault'
 
 type Side = 'upper' | 'lower'
@@ -29,6 +30,7 @@ const elements: Record<Side, HTMLElement | null> = { upper: null, lower: null }
 const instances: Record<Side, Timeline | null> = { upper: null, lower: null }
 const fullscreen = ref(false)
 const dimensional = ref(true)
+const spatialSceneReady = ref(false)
 const layoutMode = ref<LayoutMode>(savedLayoutMode(props.scriptId))
 const densityEnabled = ref(true)
 const clusterPanel = ref<HTMLElement | null>(null)
@@ -321,6 +323,7 @@ async function syncCharts() {
   scheduleRedraw()
 }
 function fitAll() { applyWindow(fullWindow()) }
+function timelineSpatialState(ready: boolean) { spatialSceneReady.value = ready }
 const axisTicks = computed(() => {
   const range = timeWindow.value
   if (!range) return []
@@ -474,7 +477,7 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body" :disabled="!fullscreen">
-    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
+    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional, 'is-webgl': dimensional && spatialSceneReady }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
       <header class="explorer-toolbar">
         <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>{{ fullscreen ? '时间线' : `${visibleEvents.length} 个事件` }}</strong><span>{{ fullscreen ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `共 ${allEvents.length} 个已确认事件` }}</span></div></div>
         <label class="person-filter"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
@@ -492,6 +495,7 @@ onUnmounted(() => {
           <div class="lane-heading"><strong>事件时间线</strong><span class="timeline-legend"><i class="dated-swatch"></i>有年份 {{ datedCount }}<i class="yearless-swatch"></i>无年份 {{ yearlessCount }}</span><small>{{ visibleEvents.length }} 个事件</small></div>
           <p class="timeline-reference"><template v-if="layoutMode === 'sequence'">按时间先后紧凑排列，间距不代表时长；人物筛选保留原位置。</template><template v-else-if="yearlessCount">{{ datedCount ? `无年份事件按月日对齐至 ${referenceYear} 年的位置，仅用于显示，未补全年份。` : '按月日与时刻排列，卡片保留无年份标记。' }}</template><template v-else>按实际时间差排列；人物筛选保留原位置。</template></p>
           <div ref="plotElement" class="unified-chart">
+            <TimelineSpatialScene v-if="dimensional" :container="plotElement" :events="allEvents" :axis-events="axisEvents" :selected-id="selectedId" @ready="timelineSpatialState" />
             <div v-for="side in sides" :key="side" class="timeline-half" :class="`half-${side}`"><div class="lane-chart" @pointerdown.capture="beginChartPointer" @pointermove.capture="moveChartPointer" @click.capture="selectChartEvent"><div :ref="element => setChartElement(side, element)" class="explorer-vis-host"></div></div></div>
             <div class="shared-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="tick in axisTicks" :key="tick.id" class="shared-axis-tick" :style="{ left: tick.left }"><span>{{ tick.label }}</span><small v-if="tick.context">{{ tick.context }}</small></i><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ left: `${item.position}%` }"></i></div>
             <div v-if="!visibleEvents.length" class="lane-empty"><UiIcon name="filter" :size="24" /><span>没有该人物的时间事件</span><button @click="emit('update:personId', '')">查看全部人物</button></div>
@@ -573,7 +577,7 @@ onUnmounted(() => {
 .timeline-legend .yearless-swatch { background: #faefdf; border-color: #c5a182; box-shadow: 0 2px 0 #e3c9ab; }
 .timeline-reference { flex-shrink: 0; margin: 0; padding: 0 16px 8px; color: #94a08c; font-size: 10px; line-height: 1.6; }
 .unified-chart { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); flex: 1; min-width: 0; min-height: 0; margin: 0 14px; overflow: hidden; isolation: isolate; }
-.timeline-half { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.timeline-half { position: relative; z-index: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .lane-chart { position: relative; display: flex; flex: 1; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .explorer-vis-host { flex: 1; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .shared-time-axis { position: absolute; z-index: 3; top: 50%; left: 0; right: 0; height: 0; pointer-events: none; }
@@ -635,20 +639,33 @@ onUnmounted(() => {
 .explorer-vis-host :deep(.vis-item.vis-line) { width: 0; border: 0; border-left: 1px solid #a3ba99 !important; border-radius: 0 !important; background: transparent !important; }
 .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-line) { border-left-color: #c9a586 !important; }
 .explorer-vis-host :deep(.vis-item.vis-dot) { display: none; }
-.is-dimensional .unified-lane { border-color: #dbe4d4; background: linear-gradient(160deg, #ffffff, #f7faf3); box-shadow: inset 0 1px 0 #fff, 0 3px 8px #2f472907; }
-.is-dimensional .half-upper .lane-chart { background: radial-gradient(ellipse at 50% 100%, #dce8d858, transparent 75%); }
-.is-dimensional .half-lower .lane-chart { background: radial-gradient(ellipse at 50% 0%, #e2ebda58, transparent 75%); }
-.is-dimensional .shared-axis-line { top: -3px; height: 6px; background: linear-gradient(180deg, #edf3e7 0%, #bdcdb2 35%, #879e78 80%, #a4b69a 100%); box-shadow: inset 0 1px 0 #ffffffdb, 0 2px 0 #c4d1b9, 0 7px 12px #344c2b22; }
-.is-dimensional .shared-axis-dot { width: 10px; height: 10px; top: -5px; background: #f9fcf5; box-shadow: inset 0 1px 0 #fff, 0 2px 0 #aac09d, 0 4px 6px #35532922; }
-.is-dimensional .shared-axis-dot.is-yearless, .is-dimensional .shared-axis-dot.timeline-node-yearless { background: #fff9ef; box-shadow: inset 0 1px 0 #fff, 0 2px 0 #d5b79a, 0 4px 6px #6a4f2c22; }
-.is-dimensional .shared-axis-dot.is-selected { border-color: #315c48; box-shadow: 0 0 0 4px #527a4530, 0 3px 6px #35532922; }
-.is-dimensional .shared-axis-dot.is-yearless.is-selected, .is-dimensional .shared-axis-dot.timeline-node-yearless.is-selected { border-color: #ac7753; box-shadow: 0 0 0 4px #b7835a2b, 0 3px 6px #6a4f2c22; }
-.is-dimensional .explorer-vis-host :deep(.vis-item.vis-box) { border-color: #a2b99a !important; background: linear-gradient(145deg, #ffffff 0%, #f6faef 52%, #eaf3e2 100%) !important; box-shadow: inset 0 1px 0 #fffffffa, inset 0 -1px 0 #d7e4ce80, 0 3px 0 #c7d6bc, 0 5px 0 #e0e9d8, 0 10px 16px #324a281b; }
-.is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box) { border-color: #cfad8e !important; background: linear-gradient(145deg, #fffdf9 0%, #fcf5e9 52%, #f7ead8 100%) !important; box-shadow: inset 0 1px 0 #fffffffa, inset 0 -1px 0 #ead5bb80, 0 3px 0 #dfc5a7, 0 5px 0 #eddecb, 0 10px 16px #6b46201b; }
-.is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-box) { border-color: #abb9c0 !important; background: linear-gradient(145deg, #fff, #eef2f6) !important; box-shadow: inset 0 1px 0 #fff, 0 3px 0 #c8d2d9, 0 5px 0 #e1e6eb, 0 10px 16px #324a451b; }
-.is-dimensional .explorer-vis-host :deep(.vis-item.vis-line) { border-left-width: 2px !important; filter: drop-shadow(2px 1px 0 #809c6e1f); }
-.is-dimensional .explorer-vis-host :deep(.vis-item.vis-selected.vis-box) { border-color: #557d47 !important; background: linear-gradient(145deg, #f9fff3, #e4f0da) !important; box-shadow: inset 0 1px 0 #fff, 0 0 0 2px #668c5530, 0 3px 0 #adc399, 0 5px 0 #c4d5b7, 0 12px 22px #365e2a24; }
-.is-dimensional .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-selected.vis-box) { border-color: #b28460 !important; background: linear-gradient(145deg, #fffaf2, #f8e5ce) !important; box-shadow: inset 0 1px 0 #fff, 0 0 0 2px #bd947430, 0 3px 0 #d6b698, 0 5px 0 #e6cdb5, 0 12px 22px #795b3024; }
+.is-webgl .unified-lane { border-color: rgba(181,197,213,.15); background: linear-gradient(160deg, #111821, #0b1016); box-shadow: inset 0 1px 0 rgba(255,255,255,.03), 0 14px 34px rgba(0,0,0,.12); color: #f2f5f8; }
+.is-webgl .lane-heading { color: #e6edf4; }
+.is-webgl .lane-heading > span, .is-webgl .timeline-reference { color: #99a8b7; }
+.is-webgl .timeline-legend { color: #9daab7; }
+.is-webgl .timeline-legend .dated-swatch { background: #9fb8d8; }
+.is-webgl .timeline-legend .yearless-swatch { background: #c99a73; }
+.is-webgl .timeline-spatial-canvas { z-index: 0; }
+.is-webgl .unified-chart { background: radial-gradient(ellipse at 50% 48%, #18212b 0%, #0e141c 58%, #0b1016 100%); }
+.is-webgl .timeline-half, .is-webgl .lane-chart { z-index: 1; background: transparent; }
+.is-webgl .shared-time-axis { z-index: 3; }
+.is-webgl .shared-axis-line, .is-webgl .shared-axis-dot { visibility: hidden; }
+.is-webgl .shared-axis-tick > span { color: #bac5d0; }
+.is-webgl .shared-axis-tick > small { color: #78899a; }
+.is-webgl .explorer-vis-host :deep(.vis-timeline), .is-webgl .explorer-vis-host :deep(.vis-panel), .is-webgl .explorer-vis-host :deep(.vis-time-axis) { border-color: transparent !important; background: transparent !important; }
+.is-webgl .explorer-vis-host :deep(.vis-item.vis-box) { border-color: transparent !important; background: transparent !important; box-shadow: none !important; color: #f0f4f8 !important; }
+.is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box) { color: #f0d4bb !important; }
+.is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-box) { color: #d6e0e8 !important; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-time) { color: #aab9c8; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-yearless .timeline-node-time) { color: #d3a982; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-precision) { color: #8796a5; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-title) { color: #f2f5f8; }
+.is-webgl .explorer-vis-host :deep(.timeline-cluster-content) { color: #f2f5f8; }
+.is-webgl .explorer-vis-host :deep(.timeline-node-mixed .timeline-node-time), .is-webgl .explorer-vis-host :deep(.timeline-node-mixed .timeline-node-precision) { color: #aeb9c4; }
+.is-webgl .lane-overview { border-color: rgba(180,197,213,.18); background: #161e27; }
+.is-webgl .lane-overview .overview-window { border-color: #9fb8d8; background: rgba(159,184,216,.16); }
+.is-webgl .lane-overview i { background: #a7bacd; }
+.is-webgl .lane-overview i.is-yearless { background: #c99a73; }
 @keyframes detail-appear { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 950px) { .explorer-toolbar { gap: 7px; padding: 11px 12px 8px; } .explorer-heading { gap: 6px; } .explorer-heading-icon { width: 32px; height: 32px; border-radius: 9px; } .explorer-heading strong { font-size: 13px; } .person-filter { min-width: 112px; } .explorer-button { padding: 0 9px; font-size: 11px; } .explorer-view-toggle button { padding: 0 8px; font-size: 11px; } .explorer-scale-row { padding: 0 12px 8px; } .explorer-hint { font-size: 10px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 12px; } .timeline-reference { padding-inline: 12px; } .unified-chart { margin-inline: 10px; } .lane-overview { margin-inline: 10px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
 @media (max-width: 650px) { .event-cluster-panel { top: 190px; right: 10px; bottom: 12px; max-height: calc(100% - 202px); width: calc(100% - 20px); } .density-controls { padding: 6px 12px; } .explorer-heading { width: calc(100% - 125px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-layout-toggle { max-width:100%; } .explorer-layout-toggle button { padding-inline:12px; } .explorer-hint { display: none; } .lane-heading { gap: 6px 10px; } .timeline-legend { font-size: 9px; } .timeline-reference { font-size: 9px; } .shared-axis-tick > span { font-size: 9px; } .shared-axis-tick > small { font-size: 8px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail { gap: 10px; flex-wrap: wrap; padding: 12px 38px 12px 14px; } .detail-evidence { order: 3; flex-basis: 100%; max-width: none; } .detail-actions { max-width: 115px; } .detail-main h3 { font-size: 13px; } }

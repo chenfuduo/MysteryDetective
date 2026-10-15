@@ -25,16 +25,18 @@ const displayScale = computed(() => props.zoom
   ? Math.max(fitScale.value, Math.min(fitScale.value * 64, baseZoomScale.value * zoomMultiplier.value))
   : fitScale.value)
 const dimensions = computed(() => ({
-  width: Math.max(size.width, rotatedSize.value.width * displayScale.value + 50),
-  height: Math.max(size.height, rotatedSize.value.height * displayScale.value + 50),
-  imageWidth: size.imageWidth * displayScale.value,
-  imageHeight: size.imageHeight * displayScale.value,
+  width: size.width,
+  height: size.height,
+  imageWidth: size.imageWidth * fitScale.value,
+  imageHeight: size.imageHeight * fitScale.value,
 }))
+const pan = reactive({ x: 0, y: 0 })
 let observer: ResizeObserver | null = null
 let drag: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | null = null
 type Pointer = { x: number; y: number }
 let pointers = new Map<number, Pointer>()
 let pinch: { distance: number; scale: number } | null = null
+let pinchFrame = 0
 let ignoreClick = false
 let ignoreClickTimer: ReturnType<typeof setTimeout> | undefined
 const dragging = ref(false)
@@ -50,6 +52,7 @@ watch(viewport, element => {
 watch(() => [props.src, props.rotation, size.width, size.height, size.imageWidth, size.imageHeight], async () => {
   drag = null
   pinch = null
+  if (pinchFrame) { cancelAnimationFrame(pinchFrame); pinchFrame = 0 }
   pointers.clear()
   dragging.value = false
   await nextTick()
@@ -58,8 +61,11 @@ watch(() => [props.src, props.rotation, size.width, size.height, size.imageWidth
 watch(() => props.zoom, value => {
   if (!value) {
     zoomMultiplier.value = 1
+    pan.x = 0
+    pan.y = 0
     drag = null
     pinch = null
+    if (pinchFrame) { cancelAnimationFrame(pinchFrame); pinchFrame = 0 }
     dragging.value = false
   }
 })
@@ -84,8 +90,8 @@ function centerOnSource() {
   })
   const centerX = positions.length ? (Math.min(...positions.map(point => point.x)) + Math.max(...positions.map(point => point.x))) / 2 : 0
   const centerY = positions.length ? (Math.min(...positions.map(point => point.y)) + Math.max(...positions.map(point => point.y))) / 2 : 0
-  element.scrollLeft = dimensions.value.width / 2 + centerX - element.clientWidth / 2
-  element.scrollTop = dimensions.value.height / 2 + centerY - element.clientHeight / 2
+  pan.x = -centerX
+  pan.y = -centerY
 }
 watch(() => props.src, () => { size.imageWidth = 0; size.imageHeight = 0 })
 function loaded(event: Event) {
@@ -95,27 +101,32 @@ function loaded(event: Event) {
 }
 function startDrag(event: PointerEvent) {
   if (!props.zoom || !viewport.value || drag || (event.pointerType === 'mouse' && event.button !== 0)) return
-  drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.value.scrollLeft, top: viewport.value.scrollTop, moved: false }
+  drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: pan.x, top: pan.y, moved: false }
+  event.preventDefault()
+}
+function moveDrag(event: PointerEvent) {
+  if (!drag || drag.id !== event.pointerId) return
+  const deltaX = event.clientX - drag.x
+  const deltaY = event.clientY - drag.y
+  if (Math.abs(deltaX) + Math.abs(deltaY) > 2) drag.moved = true
+  pan.x = drag.left + deltaX
+  pan.y = drag.top + deltaY
   event.preventDefault()
 }
 function setScaleAt(nextScale: number, point: Pointer) {
   const element = viewport.value
   if (!element) return
   const oldScale = displayScale.value
-  const oldDimensions = dimensions.value
   const rect = element.getBoundingClientRect()
-  const localX = point.x - rect.left
-  const localY = point.y - rect.top
-  const anchorX = (element.scrollLeft + localX - oldDimensions.width / 2) / oldScale
-  const anchorY = (element.scrollTop + localY - oldDimensions.height / 2) / oldScale
+  const localX = point.x - rect.left - element.clientWidth / 2
+  const localY = point.y - rect.top - element.clientHeight / 2
+  const anchorX = (localX - pan.x) / oldScale
+  const anchorY = (localY - pan.y) / oldScale
   const scale = Math.max(fitScale.value, Math.min(fitScale.value * 64, nextScale))
   zoomMultiplier.value = scale / baseZoomScale.value
+  pan.x = localX - anchorX * scale
+  pan.y = localY - anchorY * scale
   if (!props.zoom) emit('update:zoom', true)
-  nextTick(() => {
-    if (!viewport.value) return
-    viewport.value.scrollLeft = dimensions.value.width / 2 + anchorX * displayScale.value - localX
-    viewport.value.scrollTop = dimensions.value.height / 2 + anchorY * displayScale.value - localY
-  })
 }
 function startPointer(event: PointerEvent) {
   if ((event.pointerType === 'mouse' && event.button !== 0) || !viewport.value) return
@@ -136,14 +147,18 @@ function startPointer(event: PointerEvent) {
   }
   startDrag(event)
 }
+function applyPinch() {
+  if (!pinch || pointers.size < 2) return
+  const [a, b] = [...pointers.values()]
+  const point = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+  const distanceRatio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance
+  setScaleAt(pinch.scale * distanceRatio, point)
+}
 function movePointer(event: PointerEvent) {
   if (!pointers.has(event.pointerId)) return
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   if (pinch && pointers.size >= 2) {
-    const [a, b] = [...pointers.values()]
-    const point = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
-    const distanceRatio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance
-    setScaleAt(pinch.scale * Math.pow(distanceRatio, 1.7), point)
+    if (!pinchFrame) pinchFrame = requestAnimationFrame(() => { pinchFrame = 0; applyPinch() })
     return
   }
   moveDrag(event)
@@ -151,6 +166,7 @@ function movePointer(event: PointerEvent) {
 function endDrag(event: PointerEvent) {
   if (!pointers.has(event.pointerId)) return
   const wasPinching = Boolean(pinch)
+  if (wasPinching && pinchFrame) { cancelAnimationFrame(pinchFrame); pinchFrame = 0; applyPinch() }
   pointers.delete(event.pointerId)
   if (wasPinching) {
     pinch = null
@@ -160,7 +176,7 @@ function endDrag(event: PointerEvent) {
     ignoreClickTimer = setTimeout(() => { ignoreClick = false }, 500)
     if (pointers.size === 1 && props.zoom && viewport.value) {
       const [id, point] = [...pointers.entries()][0]
-      drag = { id, x: point.x, y: point.y, left: viewport.value.scrollLeft, top: viewport.value.scrollTop, moved: true }
+      drag = { id, x: point.x, y: point.y, left: pan.x, top: pan.y, moved: true }
       dragging.value = true
     } else dragging.value = false
   } else if (drag?.id === event.pointerId) {
@@ -193,6 +209,7 @@ function handleKeydown(event: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', handleKeydown, true))
 onUnmounted(() => {
   observer?.disconnect()
+  if (pinchFrame) cancelAnimationFrame(pinchFrame)
   if (ignoreClickTimer) clearTimeout(ignoreClickTimer)
   window.removeEventListener('keydown', handleKeydown, true)
 })
@@ -203,7 +220,7 @@ onUnmounted(() => {
     <div class="photo-viewer-shell" :class="{ fullscreen }" :role="fullscreen ? 'dialog' : undefined" :aria-modal="fullscreen ? 'true' : undefined" :aria-label="fullscreen ? '原始照片全屏查看' : undefined">
       <div ref="viewport" class="clue-photo-viewer" :class="{ zoomed: zoom, dragging }" aria-label="原始照片，可双指自由缩放，放大后可拖动" @pointerdown="startPointer" @pointermove="movePointer" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @click="toggleZoom" @contextmenu.prevent>
         <div class="photo-scroll-content" :style="{ width: `${dimensions.width}px`, height: `${dimensions.height}px` }">
-          <div class="photo-image-plane" :style="{ width: `${dimensions.imageWidth}px`, height: `${dimensions.imageHeight}px`, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }">
+          <div class="photo-image-plane" :style="{ width: `${dimensions.imageWidth}px`, height: `${dimensions.imageHeight}px`, transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) rotate(${rotation}deg) scale(${displayScale / Math.max(fitScale, 0.0001)})` }">
             <img :key="src" :src="src" :alt="alt" draggable="false" @load="loaded" />
             <div class="photo-source-regions" aria-hidden="true">
               <span v-for="(region, index) in highlightedRegions" :key="index" class="photo-source-region" :style="{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }" />
@@ -217,7 +234,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.clue-photo-viewer { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 0; cursor: zoom-in; touch-action: none; overscroll-behavior: contain; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.clue-photo-viewer { flex: 1; min-width: 0; min-height: 0; overflow: hidden; padding: 0; cursor: zoom-in; touch-action: none; overscroll-behavior: contain; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .clue-photo-viewer.zoomed { cursor: grab; touch-action: none; }
 .clue-photo-viewer.dragging { cursor: grabbing; }
 .photo-scroll-content { position: relative; }

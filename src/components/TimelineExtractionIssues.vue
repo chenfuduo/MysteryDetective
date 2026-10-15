@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { TimelineExtractionIssue } from '../services/organizer'
 import UiIcon from './UiIcon.vue'
-const props = defineProps<{ issues: TimelineExtractionIssue[]; busy: boolean }>()
+const props = defineProps<{ issues: TimelineExtractionIssue[]; busy: boolean; scriptId: string }>()
 const emit = defineEmits<{
   retry: [sourceNo: number]
   add: [issue: TimelineExtractionIssue]
@@ -10,7 +10,16 @@ const emit = defineEmits<{
   openClue: [sourceNo: number, quote?: string]
 }>()
 const expanded = ref(false)
-const drawerOpen = ref(true)
+function drawerKey() { return `clue-vault:time-issues-drawer:${props.scriptId}` }
+function savedDrawerState() {
+  try { return localStorage.getItem(drawerKey()) !== 'collapsed' } catch { return true }
+}
+const drawerOpen = ref(savedDrawerState())
+function setDrawerOpen(open: boolean) {
+  drawerOpen.value = open
+  try { localStorage.setItem(drawerKey(), open ? 'open' : 'collapsed') } catch { /* The drawer remains usable without storage. */ }
+}
+watch(() => props.scriptId, () => { drawerOpen.value = savedDrawerState() })
 const expandedSources = ref<number[]>([])
 const groups = computed(() => {
   const sources = new Map<number, TimelineExtractionIssue[]>()
@@ -22,7 +31,7 @@ const shownGroups = computed(() => expanded.value ? groups.value : groups.value.
 
 <template>
   <template v-if="issues.length">
-    <div v-if="drawerOpen" class="time-issues-backdrop" @click="drawerOpen = false"></div>
+    <div v-if="drawerOpen" class="time-issues-backdrop" @click="setDrawerOpen(false)"></div>
     <section class="time-issues" :class="{ 'is-open': drawerOpen }" aria-label="时间提取待处理事项" :aria-hidden="!drawerOpen" :inert="!drawerOpen">
       <header class="time-issues-heading"><div><h3><UiIcon name="clock" :size="19" />可能遗漏的时间 <span>{{ issues.length }}</span></h3><p>如果原文有时间却没出现在建议里，点对应线索的“重新查找时间”。系统会重新分析这条线索已识别的文字，不发送照片。分析后，到“整理建议”里点“直接录入”，时间才会加入时间线。</p></div><div class="time-issues-heading-actions"><button class="time-ignore-all" :disabled="busy" @click="emit('ignore', issues.map(issue => issue.id))">忽略全部提示</button><button class="time-drawer-close" aria-label="收起时间提示" @click="drawerOpen = false">收起 <span aria-hidden="true">×</span></button></div></header>
       <div class="time-issues-body">
@@ -30,7 +39,7 @@ const shownGroups = computed(() => expanded.value ? groups.value : groups.value.
         <button v-if="groups.length > 3" class="time-more" @click="expanded = !expanded">{{ expanded ? '收起其他线索' : `还有 ${groups.length - 3} 条线索，展开处理` }}</button>
       </div>
     </section>
-    <button v-if="!drawerOpen" class="time-drawer-reopen" @click="drawerOpen = true"><UiIcon name="clock" :size="16" />可能遗漏的时间 <span>{{ issues.length }}</span><span aria-hidden="true">↑</span></button>
+    <button v-if="!drawerOpen" class="time-drawer-reopen" @click="setDrawerOpen(true)"><UiIcon name="clock" :size="16" />可能遗漏的时间 <span>{{ issues.length }}</span><span aria-hidden="true">↑</span></button>
   </template>
 </template>
 

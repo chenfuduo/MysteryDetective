@@ -9,22 +9,34 @@ const viewport = ref<HTMLElement | null>(null)
 const fullscreenButton = ref<HTMLButtonElement | null>(null)
 const fullscreen = ref(false)
 const size = reactive({ width: 0, height: 0, imageWidth: 0, imageHeight: 0 })
-const dimensions = computed(() => {
+const rotatedSize = computed(() => {
   const radians = props.rotation * Math.PI / 180
-  const width = Math.abs(Math.cos(radians)) * size.imageWidth + Math.abs(Math.sin(radians)) * size.imageHeight
-  const height = Math.abs(Math.sin(radians)) * size.imageWidth + Math.abs(Math.cos(radians)) * size.imageHeight
-  const fit = width && height ? Math.min(Math.max(1, size.width - 50) / width, Math.max(1, size.height - 50) / height, 1) : 1
-  const scale = props.zoom ? Math.max(1, fit * 2) : fit
   return {
-    width: Math.max(size.width, width * scale + 50),
-    height: Math.max(size.height, height * scale + 50),
-    imageWidth: size.imageWidth * scale,
-    imageHeight: size.imageHeight * scale,
+    width: Math.abs(Math.cos(radians)) * size.imageWidth + Math.abs(Math.sin(radians)) * size.imageHeight,
+    height: Math.abs(Math.sin(radians)) * size.imageWidth + Math.abs(Math.cos(radians)) * size.imageHeight,
   }
 })
+const fitScale = computed(() => rotatedSize.value.width && rotatedSize.value.height
+  ? Math.min(Math.max(1, size.width - 50) / rotatedSize.value.width, Math.max(1, size.height - 50) / rotatedSize.value.height, 1)
+  : 1)
+const baseZoomScale = computed(() => Math.max(1, fitScale.value * 2))
+const zoomMultiplier = ref(1)
+const displayScale = computed(() => props.zoom
+  ? Math.max(fitScale.value, Math.min(baseZoomScale.value * 8, baseZoomScale.value * zoomMultiplier.value))
+  : fitScale.value)
+const dimensions = computed(() => ({
+  width: Math.max(size.width, rotatedSize.value.width * displayScale.value + 50),
+  height: Math.max(size.height, rotatedSize.value.height * displayScale.value + 50),
+  imageWidth: size.imageWidth * displayScale.value,
+  imageHeight: size.imageHeight * displayScale.value,
+}))
 let observer: ResizeObserver | null = null
 let drag: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | null = null
+type Pointer = { x: number; y: number }
+let pointers = new Map<number, Pointer>()
+let pinch: { distance: number; scale: number } | null = null
 let ignoreClick = false
+let ignoreClickTimer: ReturnType<typeof setTimeout> | undefined
 const dragging = ref(false)
 
 watch(viewport, element => {
@@ -35,11 +47,21 @@ watch(viewport, element => {
   observer = new ResizeObserver(measure)
   observer.observe(element)
 })
-watch(() => [props.src, props.zoom, props.rotation, size.width, size.height, size.imageWidth, size.imageHeight], async () => {
+watch(() => [props.src, props.rotation, size.width, size.height, size.imageWidth, size.imageHeight], async () => {
   drag = null
+  pinch = null
+  pointers.clear()
   dragging.value = false
   await nextTick()
   centerOnSource()
+})
+watch(() => props.zoom, value => {
+  if (!value) {
+    zoomMultiplier.value = 1
+    drag = null
+    pinch = null
+    dragging.value = false
+  }
 })
 watch(highlightedRegions, async matches => {
   emit('location', matches.length)
@@ -73,31 +95,88 @@ function loaded(event: Event) {
 }
 function startDrag(event: PointerEvent) {
   if (!props.zoom || !viewport.value || drag || (event.pointerType === 'mouse' && event.button !== 0)) return
-  ignoreClick = false
   drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.value.scrollLeft, top: viewport.value.scrollTop, moved: false }
-  viewport.value.setPointerCapture(event.pointerId)
   event.preventDefault()
 }
-function moveDrag(event: PointerEvent) {
-  if (!drag || drag.id !== event.pointerId || !viewport.value) return
-  const dx = event.clientX - drag.x
-  const dy = event.clientY - drag.y
-  if (Math.hypot(dx, dy) > 5) { drag.moved = true; dragging.value = true }
-  if (drag.moved) {
-    viewport.value.scrollLeft = drag.left - dx
-    viewport.value.scrollTop = drag.top - dy
+function setScaleAt(nextScale: number, point: Pointer) {
+  const element = viewport.value
+  if (!element) return
+  const oldScale = displayScale.value
+  const oldDimensions = dimensions.value
+  const rect = element.getBoundingClientRect()
+  const localX = point.x - rect.left
+  const localY = point.y - rect.top
+  const anchorX = (element.scrollLeft + localX - oldDimensions.width / 2) / oldScale
+  const anchorY = (element.scrollTop + localY - oldDimensions.height / 2) / oldScale
+  const scale = Math.max(fitScale.value, Math.min(baseZoomScale.value * 8, nextScale))
+  zoomMultiplier.value = scale / baseZoomScale.value
+  if (!props.zoom) emit('update:zoom', true)
+  nextTick(() => {
+    if (!viewport.value) return
+    viewport.value.scrollLeft = dimensions.value.width / 2 + anchorX * displayScale.value - localX
+    viewport.value.scrollTop = dimensions.value.height / 2 + anchorY * displayScale.value - localY
+  })
+}
+function startPointer(event: PointerEvent) {
+  if ((event.pointerType === 'mouse' && event.button !== 0) || !viewport.value) return
+  if (!pointers.size) { ignoreClick = false; if (ignoreClickTimer) clearTimeout(ignoreClickTimer) }
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  viewport.value.setPointerCapture(event.pointerId)
+  if (pointers.size >= 2) {
+    const [a, b] = [...pointers.values()]
+    pinch = { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), scale: displayScale.value }
+    drag = null
+    dragging.value = false
+    ignoreClick = true
+    if (!props.zoom) {
+      zoomMultiplier.value = displayScale.value / baseZoomScale.value
+      emit('update:zoom', true)
+    }
+    return
   }
+  startDrag(event)
+}
+function movePointer(event: PointerEvent) {
+  if (!pointers.has(event.pointerId)) return
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  if (pinch && pointers.size >= 2) {
+    const [a, b] = [...pointers.values()]
+    const point = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    setScaleAt(pinch.scale * Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance, point)
+    return
+  }
+  moveDrag(event)
 }
 function endDrag(event: PointerEvent) {
-  if (!drag || drag.id !== event.pointerId) return
-  ignoreClick = drag.moved || event.type === 'pointercancel'
-  drag = null
-  dragging.value = false
+  if (!pointers.has(event.pointerId)) return
+  const wasPinching = Boolean(pinch)
+  pointers.delete(event.pointerId)
+  if (wasPinching) {
+    pinch = null
+    drag = null
+    ignoreClick = true
+    if (ignoreClickTimer) clearTimeout(ignoreClickTimer)
+    ignoreClickTimer = setTimeout(() => { ignoreClick = false }, 500)
+    if (pointers.size === 1 && props.zoom && viewport.value) {
+      const [id, point] = [...pointers.entries()][0]
+      drag = { id, x: point.x, y: point.y, left: viewport.value.scrollLeft, top: viewport.value.scrollTop, moved: true }
+      dragging.value = true
+    } else dragging.value = false
+  } else if (drag?.id === event.pointerId) {
+    ignoreClick = drag.moved || event.type === 'pointercancel'
+    if (ignoreClick) {
+      if (ignoreClickTimer) clearTimeout(ignoreClickTimer)
+      ignoreClickTimer = setTimeout(() => { ignoreClick = false }, 500)
+    }
+    drag = null
+    dragging.value = false
+  }
   if (viewport.value?.hasPointerCapture(event.pointerId)) viewport.value.releasePointerCapture(event.pointerId)
 }
 function toggleZoom() {
-  if (ignoreClick) { ignoreClick = false; return }
-  emit('update:zoom', !props.zoom)
+  if (ignoreClick) { ignoreClick = false; if (ignoreClickTimer) clearTimeout(ignoreClickTimer); return }
+  if (props.zoom) emit('update:zoom', false)
+  else { zoomMultiplier.value = 1; emit('update:zoom', true) }
 }
 function toggleFullscreen() {
   fullscreen.value = !fullscreen.value
@@ -113,6 +192,7 @@ function handleKeydown(event: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', handleKeydown, true))
 onUnmounted(() => {
   observer?.disconnect()
+  if (ignoreClickTimer) clearTimeout(ignoreClickTimer)
   window.removeEventListener('keydown', handleKeydown, true)
 })
 </script>
@@ -120,7 +200,7 @@ onUnmounted(() => {
 <template>
   <Teleport to="body" :disabled="!fullscreen">
     <div class="photo-viewer-shell" :class="{ fullscreen }" :role="fullscreen ? 'dialog' : undefined" :aria-modal="fullscreen ? 'true' : undefined" :aria-label="fullscreen ? '原始照片全屏查看' : undefined">
-      <div ref="viewport" class="clue-photo-viewer" :class="{ zoomed: zoom, dragging }" aria-label="原始照片，放大后可上下左右拖动" @pointerdown="startDrag" @pointermove="moveDrag" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @click="toggleZoom" @contextmenu.prevent>
+      <div ref="viewport" class="clue-photo-viewer" :class="{ zoomed: zoom, dragging }" aria-label="原始照片，可双指自由缩放，放大后可拖动" @pointerdown="startPointer" @pointermove="movePointer" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @click="toggleZoom" @contextmenu.prevent>
         <div class="photo-scroll-content" :style="{ width: `${dimensions.width}px`, height: `${dimensions.height}px` }">
           <div class="photo-image-plane" :style="{ width: `${dimensions.imageWidth}px`, height: `${dimensions.imageHeight}px`, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }">
             <img :key="src" :src="src" :alt="alt" draggable="false" @load="loaded" />
@@ -136,7 +216,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.clue-photo-viewer { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 0; cursor: zoom-in; overscroll-behavior: contain; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.clue-photo-viewer { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 0; cursor: zoom-in; touch-action: none; overscroll-behavior: contain; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .clue-photo-viewer.zoomed { cursor: grab; touch-action: none; }
 .clue-photo-viewer.dragging { cursor: grabbing; }
 .photo-scroll-content { position: relative; }

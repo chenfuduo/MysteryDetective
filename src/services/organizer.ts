@@ -1,7 +1,7 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { reactive } from 'vue'
 import { SecureStorage } from '@aparajita/capacitor-secure-storage'
-import type { ClueRecord, OrganizationSnapshot } from './vault'
+import type { ClueRecord, OrganizationSnapshot, TimelineRecord } from './vault'
 import { resolveAiProvider, providerLabel, type AiProvider } from './aiProvider'
 import { chooseOrganizationModel, type OrganizationModelInput } from './openaiModelRouting'
 
@@ -251,6 +251,102 @@ function auditTimeline(clues: ClueRecord[], timeline: OrganizationSnapshot['time
     return { sourceNo: clue.number, clocks: clocks.length, covered, status: messages.length ? 'review' as const : 'complete' as const, message: messages.join('；') || (clocks.length ? `已核对 ${covered} 处原文时刻` : '已核对原文，未发现具体钟表时刻') }
   })
 }
+export type TimelineExtractionIssue = {
+  id: string
+  sourceNo: number
+  kind: 'missing-time' | 'invalid-result' | 'incomplete'
+  title: string
+  detail: string
+  quote: string
+  startsAt?: string
+  precision?: 'date' | 'hour' | 'minute'
+  approximate?: boolean
+}
+
+/** Explain review audits without creating events or treating accepted suggestions as missing. */
+export function timelineExtractionIssues(clues: ClueRecord[], snapshot: OrganizationSnapshot | null, confirmedEvents: TimelineRecord[] = []): TimelineExtractionIssue[] {
+  if (!snapshot) return []
+  const issues: TimelineExtractionIssue[] = []
+  const nearbyQuote = (source: string, index: number, end: number): string => {
+    const before = source.slice(Math.max(0, index - 180), index)
+    const separators = [...before.matchAll(/[。！？；;!?]/g)]
+    const last = separators.at(-1)
+    let start = last ? Math.max(0, index - 180) + last.index! + 1 : Math.max(0, index - 96)
+    const tail = source.slice(end, Math.min(source.length, end + 220))
+    const boundary = tail.search(/[。！？；;!?]/)
+    let finish = boundary >= 0 ? end + boundary + 1 : Math.min(source.length, end + 96)
+    let quote = source.slice(start, finish).trim()
+    while (quote && quoteOffsets(source, quote).length > 1 && finish - start < 560 && (start > 0 || finish < source.length)) {
+      start = Math.max(0, start - 24)
+      finish = Math.min(source.length, finish + 24)
+      quote = source.slice(start, finish).trim()
+    }
+    return quote
+  }
+  for (const audit of snapshot.timelineAudit || []) {
+    if (audit.status !== 'review') continue
+    const clue = clues.find(clue => clue.number === audit.sourceNo && (!snapshot.scriptId || clue.scriptId === snapshot.scriptId))
+    if (!clue) continue
+    const dates = scanDates(clue.ocrText)
+    const clocks = scanClocks(clue.ocrText)
+    const suggestions = snapshot.timeline.filter(item => item.sourceNo === clue.number || item.evidence?.some(source => source.clueId === clue.id && source.sourceNo === clue.number))
+    const sourcesFor = (item: OrganizationSnapshot['timeline'][number]): string[] => {
+      const quotes = item.evidence?.length
+        ? item.evidence.filter(source => source.clueId === clue.id && source.sourceNo === clue.number).map(source => source.quote)
+        : item.sourceNo === clue.number ? [item.quote] : []
+      return quotes.filter(quote => quote.trim() && quoteOffsets(clue.ocrText, quote).length)
+    }
+    const idFor = (kind: TimelineExtractionIssue['kind'], anchor: string): string => JSON.stringify([clue.number, kind, anchor])
+    for (const clock of clocks) {
+      const date = dateForClock(dates, clock)
+      const startsAt = date ? `${date.value}${clock.value}` : undefined
+      const containsClock = (quote: string): boolean => quoteOffsets(clue.ocrText, quote).some(offset => clock.index >= offset && clock.end <= offset + quote.length)
+      const suggestionCovered = startsAt && suggestions.some(item => item.startsAt === startsAt && sourcesFor(item).some(containsClock))
+      const eventCovered = startsAt && confirmedEvents.some(event => {
+        if (!event.confirmed || event.scriptId !== clue.scriptId || event.startsAt !== startsAt) return false
+        const evidence = (event.evidence || []).filter(source => source.clueId === clue.id && source.sourceNo === clue.number)
+        const quotes = evidence.map(source => source.quote).filter(quote => quote.trim())
+        if (quotes.length) return quotes.some(containsClock)
+        return event.clueId === clue.id || evidence.length > 0
+      })
+      const covered = suggestionCovered || eventCovered
+      if (covered) continue
+      const clockLabel = clock.value.slice(1)
+      const timeLabel = date ? `${date.year ? `${date.year}年` : ''}${date.month}月${date.day}日 ${clockLabel}` : clockLabel
+      const dateOnly = date && suggestions.some(item => item.startsAt === date.value && sourcesFor(item).some(quote => quoteOffsets(clue.ocrText, quote).some(offset => clock.index >= offset && clock.end <= offset + quote.length)))
+      issues.push({
+        id: idFor('missing-time', `${clock.index}:${startsAt || clock.value}`), sourceNo: clue.number, kind: 'missing-time',
+        title: `${timeLabel} 时间尚无对应事件`,
+        detail: !date ? '原文有这个时刻，但无法定位所属日期。请核对原文后手动填写日期，或重试本条线索；不会代填日期。' : dateOnly ? '原文含具体时刻，当前建议只记录了日期。可按这段原文补充事件，或重试本条线索。' : '原文中这个时刻尚未对应到具有有效出处的时间建议。可查看原文、手动补充事件，或重试本条线索。',
+        quote: nearbyQuote(clue.ocrText, clock.index, clock.end), ...(startsAt ? { startsAt } : {}), precision: clock.minute === null ? 'hour' : 'minute', approximate: clock.approximate,
+      })
+    }
+    const invalid = suggestions.find(item => !sourcesFor(item).length || !sourcesFor(item).some(quote => {
+      const checked = validDate(item.startsAt, quote, clue.ocrText)
+      return checked && checked.startsAt === item.startsAt
+    }))
+    const dateOnlyInvalid = invalid && !invalid.startsAt.includes('T') && sourcesFor(invalid).some(quote => scanClocks(quote).length > 0)
+    if (invalid || /未通过校验|无法对应原线索|日期或原文出处|只有日期|仅有日期/.test(audit.message)) {
+      const quote = invalid ? sourcesFor(invalid)[0] || '' : ''
+      issues.push({
+        id: idFor('invalid-result', invalid?.startsAt || 'validation'), sourceNo: clue.number, kind: 'invalid-result',
+        title: dateOnlyInvalid ? '有时间结果只保留了日期，漏掉原文时刻' : invalid && !sourcesFor(invalid).length ? '有时间结果无法核对原文出处' : '有时间结果的日期或出处未通过核对',
+        detail: dateOnlyInvalid ? '原文摘录包含具体钟表时刻，当前结果却只有日期。请查看原文补充事件时刻，或重试本条线索。' : '这条线索的部分时间结果未能同时对应有效日期和原文。请查看线索核对，或重试本条；未通过的结果不会自动录入。',
+        quote: quote || (clocks[0] ? nearbyQuote(clue.ocrText, clocks[0].index, clocks[0].end) : clue.ocrText.slice(0, 280).trim()),
+      })
+    }
+    if (/尚未完成 API|核对未完成|未完成.*核对|API.*(?:失败|超时)|请求.*失败|网络不可用|额度不足|余额不足|暂停/.test(audit.message)) {
+      issues.push({
+        id: idFor('incomplete', 'audit'), sourceNo: clue.number, kind: 'incomplete',
+        title: /网络不可用|额度不足|余额不足/.test(audit.message) ? '当前只有本地扫描结果，尚需核对事件内容' : /暂停/.test(audit.message) ? '这条线索的时间核对已暂停' : '这条线索的 API 时间核对尚未完成',
+        detail: /网络不可用|额度不足|余额不足/.test(audit.message) ? '已保留本地扫描的时间。可直接查看原文并补充事件，或在网络、API 额度恢复后重试本条。' : '已有整理结果仍然保留，可继续核对原文或重试本条线索，完成后再决定是否录入。',
+        quote: clocks[0] ? nearbyQuote(clue.ocrText, clocks[0].index, clocks[0].end) : clue.ocrText.slice(0, 280).trim(),
+      })
+    }
+  }
+  return issues
+}
+
 function localTimelineFallback(clues: ClueRecord[], reason: 'offline' | 'quota', previous?: OrganizationSnapshot): OrganizationSnapshot {
   const timeline: OrganizationSnapshot['timeline'] = []
   for (const clue of clues) {

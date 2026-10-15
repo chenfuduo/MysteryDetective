@@ -32,6 +32,7 @@ export type IncrementalOrganizationInput = {
   relationships: RelationshipRecord[]
   events: TimelineRecord[]
   previous: OrganizationSnapshot | null
+  retryClueIds?: string[]
   onProgress?: (progress: OrganizationProgress) => void
   shouldPause?: () => boolean
 }
@@ -89,14 +90,17 @@ export async function organizeIncrementally(
   const fingerprints = new Map<string, string>()
   for (const clue of clues) fingerprints.set(clue.id, await fingerprint(clue))
   let snapshot = snapshotFor(scriptId, input.previous)
+  const requestedRetries = new Set(input.retryClueIds || [])
   const checkpoints = new Map<string, OrganizationCheckpoint>()
   for (const clue of clues) {
     const key = `organization-task:${clue.id}`
+    if (requestedRetries.has(clue.id)) { await removeLocalState(scriptId, key); continue }
     const saved = await getLocalState<OrganizationCheckpoint>(scriptId, key)
     if (saved?.version === 1 && saved.fingerprint === fingerprints.get(clue.id) && saved.clueIds.length === 1 && saved.clueIds[0] === clue.id) checkpoints.set(clue.id, saved)
     else if (saved) await removeLocalState(scriptId, key)
   }
   const pending = clues.filter(clue => {
+    if (requestedRetries.size) return requestedRetries.has(clue.id)
     const saved = checkpoints.get(clue.id)
     if (saved) return true
     if (snapshot.processedClues?.[clue.id] !== fingerprints.get(clue.id)) return true

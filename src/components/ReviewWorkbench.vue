@@ -11,11 +11,10 @@ type Suggestion =
   | { kind: 'timeline'; item: OrganizationTimelineSuggestion }
   | { kind: 'cluePoints'; item: OrganizationCluePointSuggestion }
 const props = defineProps<{ scriptId: string; clues: ClueRecord[]; organization: OrganizationSnapshot | null; busy: boolean; imageUrls: Record<string, string> }>()
-const emit = defineEmits<{ close: []; 'open-clue': [id: string, quote?: string]; accept: [selection: ReviewSelection]; ignore: [selection: ReviewSelection]; 'locate-clue': [id: string]; 'request-image': [path: string] }>()
+const emit = defineEmits<{ close: []; 'open-clue': [id: string, quote?: string]; accept: [selection: ReviewSelection]; ignore: [selection: ReviewSelection]; 'locate-clue': [id: string]; 'request-image': [path: string]; reanalyze: [sourceNo: number] }>()
 const currentKey = ref('')
 const sourceIndex = ref(0)
 const zoom = ref(false)
-const reviewed = ref<string[]>([])
 const actionKey = ref('')
 const completedCount = ref(0)
 const workbench = ref<HTMLElement | null>(null)
@@ -38,7 +37,7 @@ const suggestions = computed<Suggestion[]>(() => {
 const currentIndex = computed(() => suggestions.value.findIndex(item => keyOf(item) === currentKey.value))
 const suggestion = computed(() => suggestions.value[currentIndex.value] || null)
 const groups = computed(() => [...new Set(suggestions.value.map(entry => entry.item.sourceNo))].map(number => ({ number, count: suggestions.value.filter(entry => entry.item.sourceNo === number).length, title: clues.value.find(clue => clue.number === number)?.title || '原线索已不存在' })))
-const classification = computed(() => suggestion.value ? classifyReview(suggestion.value, clues.value, props.organization?.timelineAudit, reviewed.value.includes(currentKey.value)) : null)
+const classification = computed(() => suggestion.value ? classifyReview(suggestion.value, clues.value) : null)
 const sources = computed(() => {
   const entry = suggestion.value
   if (!entry) return []
@@ -86,7 +85,7 @@ const details = computed(() => {
   ]
   return [{ label: '分类', value: entry.item.category || '未分类' }, ...(entry.item.tags.length ? [{ label: '标签', value: entry.item.tags.join('、') }] : [])]
 })
-const acceptLabel = computed(() => classification.value?.group === 'needs-content' ? '补充并录入' : '录入，下一条')
+const acceptLabel = computed(() => classification.value?.group === 'needs-review' ? '重新整理' : classification.value?.group === 'needs-content' ? '补充并录入' : '录入，下一条')
 function navigate(offset: number) {
   if (disabled.value) return
   const target = suggestions.value[currentIndex.value + offset]
@@ -98,13 +97,10 @@ function chooseSource(event: Event) {
   const target = suggestions.value.find(entry => entry.item.sourceNo === number)
   if (target) currentKey.value = keyOf(target)
 }
-function setReviewed(event: Event) {
-  if (disabled.value || !classification.value?.canConfirm || !ocrParts.value.match) return
-  if ((event.target as HTMLInputElement).checked) reviewed.value = [...new Set([...reviewed.value, currentKey.value])]
-}
 async function apply(action: 'accept' | 'ignore') {
   const entry = suggestion.value
-  if (!entry || disabled.value || (action === 'accept' && classification.value?.group === 'needs-review')) return
+  if (!entry || disabled.value) return
+  if (action === 'accept' && classification.value?.group === 'needs-review') { emit('reanalyze', entry.item.sourceNo); return }
   if (classification.value?.group !== 'needs-content' || action === 'ignore') actionKey.value = keyOf(entry)
   if (action === 'accept') emit('accept', { kind: entry.kind, id: entry.item.id })
   else emit('ignore', { kind: entry.kind, id: entry.item.id })
@@ -119,9 +115,8 @@ watch(() => suggestions.value.map(keyOf), (keys, previous = []) => {
     currentKey.value = keys[Math.min(Math.max(previousIndex, 0), keys.length - 1)] || ''
   }
   if (actionKey.value && !keys.includes(actionKey.value)) actionKey.value = ''
-  reviewed.value = reviewed.value.filter(key => keys.includes(key))
 }, { immediate: true })
-watch(() => props.scriptId, () => { reviewed.value = []; completedCount.value = 0; sourceIndex.value = 0; actionKey.value = '' })
+watch(() => props.scriptId, () => { completedCount.value = 0; sourceIndex.value = 0; actionKey.value = '' })
 watch(() => props.busy, value => { if (!value) actionKey.value = '' })
 watch(currentKey, () => { sourceIndex.value = 0; zoom.value = false })
 watch(() => source.value?.quote, async () => { locatedCount.value = 0; await nextTick(); ocr.value?.querySelector('mark')?.scrollIntoView({ block: 'center', behavior: 'smooth' }) })
@@ -143,11 +138,11 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
   <Teleport to="body">
     <section ref="workbench" class="review-workbench" role="dialog" aria-modal="true" aria-labelledby="workbench-title" :aria-busy="busy" @contextmenu.prevent>
       <header class="workbench-header">
-        <div><span class="workbench-eyebrow">当前剧本 · 逐条核对</span><h1 id="workbench-title">原文与整理结果</h1></div>
+        <div><span class="workbench-eyebrow">当前剧本 · 逐条录入</span><h1 id="workbench-title">原文与整理结果</h1></div>
         <div class="workbench-progress" role="status" aria-live="polite"><strong>{{ suggestions.length }}</strong> 项待处理<span v-if="completedCount"> · 本次已处理 {{ completedCount }} 项</span></div>
-        <button ref="closeButton" class="workbench-close" :disabled="disabled" aria-label="关闭逐条核对" @click="emit('close')">完成 <span aria-hidden="true">×</span></button>
+        <button ref="closeButton" class="workbench-close" :disabled="disabled" aria-label="关闭逐条录入" @click="emit('close')">完成 <span aria-hidden="true">×</span></button>
       </header>
-      <nav v-if="suggestion" class="workbench-navigation" aria-label="选择核对建议">
+      <nav v-if="suggestion" class="workbench-navigation" aria-label="选择整理建议">
         <label>按原线索<select :value="suggestion.item.sourceNo" :disabled="disabled" @change="chooseSource"><option v-for="group in groups" :key="group.number" :value="group.number">#{{ String(group.number).padStart(3, '0') }} {{ group.title }} · {{ group.count }} 项</option></select></label>
         <div class="workbench-paging"><button :disabled="disabled || currentIndex <= 0" @click="navigate(-1)">‹ 上一条</button><span>{{ currentIndex + 1 }} / {{ suggestions.length }}</span><button :disabled="disabled || currentIndex >= suggestions.length - 1" @click="navigate(1)">下一条 ›</button></div>
       </nav>
@@ -162,10 +157,10 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
           <div v-else-if="source" class="workbench-photo-hint">{{ locatedCount ? `已定位 ${locatedCount} 处文字，放大后可上下左右拖动。` : '未找到匹配文字框，请对照右侧摘录查看原图。' }}</div>
         </section>
         <section class="workbench-review-pane" aria-label="整理建议与 OCR 原文">
-          <div class="workbench-proposal"><div class="workbench-proposal-kind"><span>{{ kindLabel(suggestion.kind) }}</span><span :class="classification?.group">{{ classification?.group === 'ready' ? '可以录入' : classification?.group === 'needs-content' ? '需要补充' : '需要核对' }}</span></div><h2>{{ heading }}</h2><dl v-if="details.length"><div v-for="detail in details" :key="detail.label"><dt>{{ detail.label }}</dt><dd>{{ detail.value }}</dd></div></dl><blockquote>{{ suggestion.item.quote }}</blockquote><p class="workbench-review-reason" :class="classification?.group">{{ classification?.reason }}</p><label v-if="classification?.canConfirm" class="workbench-reviewed"><input type="checkbox" :disabled="disabled || !ocrParts.match" @change="setReviewed" /><span>我已核对原图及高亮原文，允许录入</span></label></div>
+          <div class="workbench-proposal"><div class="workbench-proposal-kind"><span>{{ kindLabel(suggestion.kind) }}</span><span :class="classification?.group">{{ classification?.group === 'ready' ? '可以录入' : classification?.group === 'needs-content' ? '需要补充' : '需要修正' }}</span></div><h2>{{ heading }}</h2><dl v-if="details.length"><div v-for="detail in details" :key="detail.label"><dt>{{ detail.label }}</dt><dd>{{ detail.value }}</dd></div></dl><blockquote>{{ suggestion.item.quote }}</blockquote><p class="workbench-review-reason" :class="classification?.group">{{ classification?.reason }}</p></div>
           <div class="workbench-ocr-heading"><strong>OCR 全文</strong><span>{{ ocrParts.match ? '当前摘录已高亮' : '未找到完全一致的摘录' }}</span></div>
-          <div ref="ocr" class="workbench-ocr" tabindex="0" aria-label="OCR 全文，当前摘录高亮"><template v-if="source"><span>{{ ocrParts.before }}</span><mark v-if="ocrParts.match">{{ ocrParts.match }}</mark><span>{{ ocrParts.after }}</span><p v-if="!source.clue.ocrText" class="workbench-muted">暂无 OCR 文字，请在原线索中重试识别或补充文字。</p></template><p v-else class="workbench-muted">无法查看原文，请返回整理总览重新整理以更新出处。</p></div>
-          <footer class="workbench-actions"><button class="workbench-ignore" :disabled="disabled" @click="apply('ignore')">忽略，下一条</button><button class="workbench-accept" :disabled="disabled || classification?.group === 'needs-review'" @click="apply('accept')">{{ busy ? '正在保存…' : acceptLabel }} <span aria-hidden="true">→</span></button><small>仅在保存成功后切换；需要补充的内容会打开编辑窗口。</small></footer>
+          <div ref="ocr" class="workbench-ocr" tabindex="0" aria-label="OCR 全文，当前摘录高亮"><template v-if="source"><span>{{ ocrParts.before }}</span><mark v-if="ocrParts.match">{{ ocrParts.match }}</mark><span>{{ ocrParts.after }}</span><p v-if="!source.clue.ocrText" class="workbench-muted">暂无 OCR 文字，请在原线索中重试识别或补充文字。</p></template><p v-else class="workbench-muted">原线索不存在，可重新整理以更新出处，或忽略这项建议。</p></div>
+          <footer class="workbench-actions"><button class="workbench-ignore" :disabled="disabled" @click="apply('ignore')">忽略，下一条</button><button class="workbench-accept" :disabled="disabled" @click="apply('accept')">{{ busy ? '正在保存…' : acceptLabel }} <span aria-hidden="true">→</span></button><small>可直接录入，原文供按需查看；保存成功后进入下一条。</small></footer>
         </section>
       </div>
     </section>
@@ -217,8 +212,6 @@ onUnmounted(() => { window.removeEventListener('keydown', keydown); previousFocu
 .workbench-proposal blockquote { margin: 0; padding: 11px 13px; border-left: 3px solid #cfdbc8; border-radius: 0 8px 8px 0; color: #697761; background: #f5f7f0; font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
 .workbench-review-reason { margin: 12px 0 0; font-size: 11px; color: #7f9079; line-height: 1.7; }
 .workbench-review-reason.needs-review { color: #b07550; }
-.workbench-reviewed { display: flex; align-items: center; gap: 9px; margin-top: 12px; font-size: 12px; line-height: 1.6; color: #536a4c; }
-.workbench-reviewed input { width: 18px; height: 18px; accent-color: #375f45; }
 .workbench-ocr-heading { display: flex; flex-shrink: 0; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 22px; border-top: 1px solid #edf0e8; border-bottom: 1px solid #edf0e8; font-size: 12px; }
 .workbench-ocr-heading span { font-size: 10px; color: #98a18f; }
 .workbench-ocr { flex: 1; min-height: 80px; overflow-y: auto; padding: 16px 22px; font-size: 13px; line-height: 1.95; white-space: pre-wrap; overflow-wrap: anywhere; color: #65705e; overscroll-behavior: contain; }

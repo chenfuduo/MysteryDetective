@@ -37,6 +37,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   analyze: []
+  retrySource: [sourceNo: number]
   capture: []
   'retry-ocr': []
   resume: []
@@ -55,8 +56,6 @@ const emit = defineEmits<{
 }>()
 const activeFilter = ref('all')
 const activeGroup = ref<ReviewGroup | 'all' | null>(null)
-const reviewedKeys = ref<string[]>([])
-const openedSourceKeys = ref<string[]>([])
 const batchMessage = ref('')
 const expandedIds = ref<string[]>([])
 const reviewElement = ref<HTMLElement | null>(null)
@@ -85,7 +84,7 @@ const nextAction = computed<{ id: NextActionId; label: string; detail: string }>
   if (!props.clues.length) return { id: 'capture', label: '拍照录入', detail: '拍下第一张线索，OCR 文字会自动识别并保存在本机。' }
   if (props.pendingOcrCount) return { id: 'ocr', label: '处理待识别照片', detail: `还有 ${props.pendingOcrCount} 张照片需要识别，先补齐文字再整理。` }
   if (props.unfinishedTaskCount) return { id: 'resume', label: '继续整理', detail: `还有 ${props.unfinishedTaskCount} 条线索待继续，已完成阶段会保留。` }
-  if (pendingCount.value) return { id: 'review', label: '逐条核对', detail: `有 ${pendingCount.value} 条建议待确认，查看原文后加入档案。` }
+  if (pendingCount.value) return { id: 'review', label: '逐条录入', detail: `有 ${pendingCount.value} 条建议待确认，可以直接录入，也可按需查看原文。` }
   if (!hasOcrText.value) return { id: 'ocr', label: '处理待识别照片', detail: '已有照片尚无识别文字，先完成 OCR。' }
   if (!props.organization) return props.apiConfigured
     ? { id: 'analyze', label: '整理线索', detail: '已识别的文字可以整理为人物、关系、时间和线索点。' }
@@ -94,7 +93,7 @@ const nextAction = computed<{ id: NextActionId; label: string; detail: string }>
 })
 const canAnalyze = computed(() => props.apiConfigured && hasOcrText.value && !props.busy)
 const showAnalyzeSecondary = computed(() => ['review', 'discuss', 'resume', 'ocr'].includes(nextAction.value.id) && hasOcrText.value)
-const emptyHeading = computed(() => ({ capture: '先收集第一条线索', ocr: '先补齐识别文字', resume: '已有进度，接着整理', analyze: '文字已就绪', configure: '开始整理已识别的文字', discuss: '待确认建议已处理', processing: '正在整理线索', review: '核对原文，再加入档案' })[nextAction.value.id] || '开始整理线索')
+const emptyHeading = computed(() => ({ capture: '先收集第一条线索', ocr: '先补齐识别文字', resume: '已有进度，接着整理', analyze: '文字已就绪', configure: '开始整理已识别的文字', discuss: '待确认建议已处理', processing: '正在整理线索', review: '选择要加入档案的内容' })[nextAction.value.id] || '开始整理线索')
 function runNextAction() {
   if (props.busy) return
   if (nextAction.value.id === 'capture') emit('capture')
@@ -106,14 +105,14 @@ function runNextAction() {
   else if (nextAction.value.id === 'discuss') emit('discuss')
 }
 const cluePointCount = computed(() => new Set((props.organization?.cluePoints || []).map(item => item.sourceNo)).size)
-const reviewInfo = computed(() => new Map(allSuggestions.value.map(suggestion => [selectionKey(suggestion), classifyReview(suggestion, props.clues, props.organization?.timelineAudit, reviewedKeys.value.includes(selectionKey(suggestion)))])))
+const reviewInfo = computed(() => new Map(allSuggestions.value.map(suggestion => [selectionKey(suggestion), classifyReview(suggestion, props.clues)])))
 const classification = (suggestion: Suggestion) => reviewInfo.value.get(selectionKey(suggestion))!
-const groupLabel = (group: ReviewGroup) => ({ ready: '可直接录入', 'needs-content': '需要补充', 'needs-review': '需要核对' })[group]
+const groupLabel = (group: ReviewGroup) => ({ ready: '可直接录入', 'needs-content': '需要补充', 'needs-review': '需要修正' })[group]
 const effectiveGroup = computed(() => activeGroup.value || (allSuggestions.value.some(suggestion => classification(suggestion).group === 'needs-review') ? 'needs-review' : allSuggestions.value.some(suggestion => classification(suggestion).group === 'needs-content') ? 'needs-content' : 'ready'))
 const groupSuggestions = computed(() => effectiveGroup.value === 'all' ? allSuggestions.value : allSuggestions.value.filter(suggestion => classification(suggestion).group === effectiveGroup.value))
 const kindSuggestions = computed(() => activeFilter.value === 'all' ? allSuggestions.value : allSuggestions.value.filter(suggestion => suggestion.kind === activeFilter.value))
 const groups = computed(() => [
-  { id: 'needs-review' as const, label: '需要核对', count: kindSuggestions.value.filter(suggestion => classification(suggestion).group === 'needs-review').length },
+  { id: 'needs-review' as const, label: '需要修正', count: kindSuggestions.value.filter(suggestion => classification(suggestion).group === 'needs-review').length },
   { id: 'needs-content' as const, label: '需要补充', count: kindSuggestions.value.filter(suggestion => classification(suggestion).group === 'needs-content').length },
   { id: 'ready' as const, label: '可直接录入', count: kindSuggestions.value.filter(suggestion => classification(suggestion).group === 'ready').length },
   { id: 'all' as const, label: '全部', count: kindSuggestions.value.length },
@@ -135,25 +134,15 @@ const allVisibleSelected = computed(() => visibleSuggestions.value.length > 0 &&
 watch(allSuggestions, items => {
   const available = new Set(items.map(selectionKey))
   selectedKeys.value = selectedKeys.value.filter(key => available.has(key))
-  reviewedKeys.value = reviewedKeys.value.filter(key => available.has(key))
-  openedSourceKeys.value = openedSourceKeys.value.filter(key => available.has(key))
 })
 watch(() => props.organization?.scriptId, () => {
   activeGroup.value = null
-  reviewedKeys.value = []
-  openedSourceKeys.value = []
   selectedKeys.value = []
   batchMessage.value = ''
 })
 function viewSource(suggestion: Suggestion) {
   if (!classification(suggestion).sourceExists) return
-  const key = selectionKey(suggestion)
-  if (!openedSourceKeys.value.includes(key)) openedSourceKeys.value.push(key)
   emit('openClue', suggestion.item.sourceNo, suggestion.item.quote)
-}
-function confirmReviewed(suggestion: Suggestion) {
-  if (props.busy || !classification(suggestion).canConfirm || !openedSourceKeys.value.includes(selectionKey(suggestion))) return
-  reviewedKeys.value = [...new Set([...reviewedKeys.value, selectionKey(suggestion)])]
 }
 function selectSuggestion(suggestion: Suggestion) {
   if (props.busy) return
@@ -168,20 +157,18 @@ function selectVisible() {
 function bulk(action: 'accept' | 'ignore') {
   if (props.busy || !selectedCount.value) return
   const items = action === 'accept' ? selectedAcceptable.value : selectedSuggestions.value
-  batchMessage.value = action === 'accept' && blockedSelectedCount.value ? `已跳过 ${blockedSelectedCount.value} 项需要补充或核对的建议，仍保留在列表中。` : ''
+  batchMessage.value = action === 'accept' && blockedSelectedCount.value ? `已跳过 ${blockedSelectedCount.value} 项需要补充或修正的建议，仍保留在列表中。` : ''
   const selection = items.map(item => ({ kind: item.kind, id: item.item.id }))
   if (!selection.length) return
   if (action === 'accept') emit('bulkAccept', selection)
   else emit('bulkIgnore', selection)
 }
-const auditTotals = computed(() => (props.organization?.timelineAudit || []).reduce((total, audit) => ({ clocks: total.clocks + audit.clocks, covered: total.covered + audit.covered, review: total.review + (audit.status === 'review' ? 1 : 0) }), { clocks: 0, covered: 0, review: 0 }))
 const analysisLabel = computed(() => {
   const analysis = props.organization?.analysis
   if (!analysis) return ''
   const provider = analysis.provider === 'local' ? `本地整理${analysis.localReason === 'offline' ? '（网络不可用）' : analysis.localReason === 'quota' ? '（API 余额不足）' : ''}` : analysis.provider === 'openai' ? 'GPT' : 'DeepSeek'
-  return `${provider} · ${analysis.reviewed ? '已复核时间覆盖' : '时间覆盖待核对'}`
+  return provider
 })
-const auditOriginal = (sourceNo: number) => props.clues.find(clue => clue.number === sourceNo)?.ocrText || '当前线索暂无 OCR 原文。'
 const precisionLabel = (item: OrganizationTimelineSuggestion) => ({ date: '仅日期', hour: '精确到时', minute: '精确到分' })[item.precision || (/T\d{2}:\d{2}$/.test(item.startsAt) ? 'minute' : /T\d{2}$/.test(item.startsAt) ? 'hour' : 'date')]
 const dateLabel = (value: string) => {
   const partial = value.match(/^--(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/)
@@ -198,7 +185,7 @@ const title = (suggestion: Suggestion) => {
   if (suggestion.kind === 'timeline') return `${dateLabel(suggestion.item.startsAt)} · ${suggestion.item.title}`
   return `${suggestion.item.title}${suggestion.item.category ? ` · ${suggestion.item.category}` : ''}`
 }
-const actionLabel = (suggestion: Suggestion) => ({ ready: '直接录入', 'needs-content': '补充事件', 'needs-review': '查看原文' })[classification(suggestion).group]
+const actionLabel = (suggestion: Suggestion) => ({ ready: '直接录入', 'needs-content': '补充事件', 'needs-review': '重新整理' })[classification(suggestion).group]
 
 
 const isLongQuote = (item: Suggestion['item']) => item.quote.length > 115
@@ -207,7 +194,7 @@ function toggleQuote(id: string) {
 }
 function accept(suggestion: Suggestion) {
   if (props.busy) return
-  if (classification(suggestion).group === 'needs-review') { viewSource(suggestion); return }
+  if (classification(suggestion).group === 'needs-review') { emit('retrySource', suggestion.item.sourceNo); return }
   if (suggestion.kind === 'people') emit('acceptPerson', suggestion.item.id)
   else if (suggestion.kind === 'relationships') emit('acceptRelationship', suggestion.item.id)
   else if (suggestion.kind === 'timeline') emit('acceptTimeline', suggestion.item.id)
@@ -269,17 +256,6 @@ function accept(suggestion: Suggestion) {
       </div>
     </nav>
 
-    <details v-if="organization?.timelineAudit?.length" class="timeline-audit">
-      <summary><span class="audit-summary-title">时间提取核对</span><span class="audit-total">{{ auditTotals.covered }} / {{ auditTotals.clocks }} 处时间已覆盖</span><span class="audit-state" :class="{ 'needs-review': auditTotals.review }">{{ auditTotals.review ? `${auditTotals.review} 条线索需核对` : '覆盖完整' }}</span><span class="audit-expand">展开 ›</span></summary>
-      <div class="audit-items">
-        <article v-for="audit in organization.timelineAudit" :key="audit.sourceNo" class="audit-row">
-          <div class="audit-row-heading"><button class="source-link" @click="emit('openClue', audit.sourceNo, auditOriginal(audit.sourceNo))">原线索 #{{ String(audit.sourceNo).padStart(3, '0') }} ›</button><span class="audit-state" :class="{ 'needs-review': audit.status === 'review' }">{{ audit.status === 'review' ? '需核对' : '覆盖完整' }}</span><span>{{ audit.covered }} / {{ audit.clocks }} 处</span><button v-if="audit.status === 'review'" class="audit-retry" :disabled="busy" @click="emit('analyze')">重试核对</button></div>
-          <p>{{ audit.message }}</p>
-          <details class="audit-source"><summary>展开 OCR 原文</summary><p>{{ auditOriginal(audit.sourceNo) }}</p></details>
-        </article>
-      </div>
-    </details>
-
     <section v-if="!pendingCount" class="review-section next-step-section">
       <div class="review-empty next-step-empty" role="status">
         <span class="next-step-label">{{ nextAction.id === 'discuss' ? '查阅已确认记录' : '下一步' }}</span>
@@ -290,7 +266,7 @@ function accept(suggestion: Suggestion) {
     </section>
 
     <section v-else ref="reviewElement" class="review-section">
-      <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>核对出处后再加入档案。</p></div><div class="review-heading-actions"><button v-if="nextAction.id !== 'review'" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条核对 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
+      <header class="review-heading"><div><h2>待确认建议 <span>{{ pendingCount }}</span></h2><p>可直接录入，原文链接供随时查阅。</p></div><div class="review-heading-actions"><button v-if="nextAction.id !== 'review'" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条录入 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
       <nav class="review-groups" aria-label="按处理步骤筛选">
         <button v-for="group in groups" :key="group.id" :class="{ active: effectiveGroup === group.id }" :aria-pressed="effectiveGroup === group.id" @click="activeGroup = group.id">{{ group.label }} <span>{{ group.count }}</span></button>
       </nav>
@@ -301,7 +277,7 @@ function accept(suggestion: Suggestion) {
         <label v-if="visibleSuggestions.length" class="batch-select"><input type="checkbox" :checked="allVisibleSelected" :disabled="busy" @change="selectVisible" /><span>全选当前 {{ visibleSuggestions.length }} 项</span></label>
         <span class="batch-count" role="status">共选 {{ selectedCount }} 项<span v-if="hiddenSelectedCount">（其中 {{ hiddenSelectedCount }} 项在其他筛选中）</span></span>
         <div class="batch-actions"><button :disabled="busy || !selectedAcceptable.length" class="batch-accept" @click="bulk('accept')">录入可用项{{ selectedAcceptable.length ? ` ${selectedAcceptable.length}` : '' }}</button><button :disabled="busy || !selectedCount" @click="bulk('ignore')">忽略所选{{ selectedCount ? ` ${selectedCount}` : '' }}</button><button :disabled="busy || !canUndo" @click="emit('undo')">撤销上一步</button></div>
-        <p v-if="blockedSelectedCount" class="batch-incomplete">所选 {{ blockedSelectedCount }} 项需要补充或核对，将跳过录入；“忽略所选”仍适用于全部所选项。</p><p v-if="batchMessage" class="batch-incomplete" role="status">{{ batchMessage }}</p>
+        <p v-if="blockedSelectedCount" class="batch-incomplete">所选 {{ blockedSelectedCount }} 项需要补充或修正，将跳过录入；“忽略所选”仍适用于全部所选项。</p><p v-if="batchMessage" class="batch-incomplete" role="status">{{ batchMessage }}</p>
       </div>
       <div v-if="!visibleSuggestions.length" class="review-empty"><strong>当前筛选下没有建议</strong><p>切换处理分组或人物、关系等分类查看其他建议。</p><button class="text-button" @click="focusSuggestions">显示待处理建议</button></div>
       <div v-else class="suggestion-list">
@@ -312,12 +288,11 @@ function accept(suggestion: Suggestion) {
             <p :class="['evidence-quote', { expanded: expandedIds.includes(suggestion.item.id) }]">{{ quote(suggestion.item) }}</p>
             <div class="suggestion-meta"><button class="source-link" :disabled="!classification(suggestion).sourceExists" @click="viewSource(suggestion)">原线索 #{{ String(sourceNo(suggestion.item)).padStart(3, '0') }} <span>›</span></button><template v-if="suggestion.kind === 'timeline'"><button v-for="source in suggestion.item.evidence?.filter(item => item.sourceNo !== suggestion.item.sourceNo || item.quote !== suggestion.item.quote) || []" :key="`${source.clueId}:${source.quote}`" class="source-link" @click="emit('openClue', source.sourceNo, source.quote)">另见 #{{ String(source.sourceNo).padStart(3, '0') }} <span>›</span></button></template><button v-if="isLongQuote(suggestion.item)" class="quote-toggle" :aria-expanded="expandedIds.includes(suggestion.item.id)" @click="toggleQuote(suggestion.item.id)">{{ expandedIds.includes(suggestion.item.id) ? '收起摘录' : '展开摘录' }}</button></div>
             <p class="review-next-step" :class="classification(suggestion).group">{{ classification(suggestion).reason }}</p>
-            <label v-if="classification(suggestion).canConfirm" class="review-confirm"><input type="checkbox" :disabled="busy || !openedSourceKeys.includes(selectionKey(suggestion))" @change="confirmReviewed(suggestion)" /><span>{{ openedSourceKeys.includes(selectionKey(suggestion)) ? '已核对，允许录入' : '先查看原文，再确认允许录入' }}</span></label>
           </div>
-          <div class="suggestion-actions"><button class="suggestion-action" :disabled="busy || (classification(suggestion).group === 'needs-review' && !classification(suggestion).sourceExists)" @click="accept(suggestion)">{{ actionLabel(suggestion) }}</button><button v-if="classification(suggestion).retry" class="retry-suggestion" :disabled="busy" @click="emit('analyze')">{{ classification(suggestion).canConfirm ? '重试核对' : '重新整理' }}</button></div>
+          <div class="suggestion-actions"><button class="suggestion-action" :disabled="busy" @click="accept(suggestion)">{{ actionLabel(suggestion) }}</button></div>
         </article>
       </div>
-      <footer class="review-footnote">AI 结果可能有误；关系和时间需人工确认，不推断动机、因果或答案。</footer>
+      <footer class="review-footnote">AI 结果可能有误；请按需查看原文。录入后仍可修改或撤销，不推断动机、因果或答案。</footer>
     </section>
   </section>
 </template>
@@ -383,11 +358,7 @@ function accept(suggestion: Suggestion) {
 .review-next-step { margin: 6px 0 0; color: #8b9a8b; font-size: 11px; line-height: 1.6; }
 .review-next-step.needs-review { color: #a2774f; }
 .review-next-step.needs-content { color: #738b9a; }
-.review-confirm { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; margin-top: 4px; color: #657d69; font-size: 12px; }
-.review-confirm input { width: 18px; height: 18px; margin: 0; accent-color: #3f7052; }
 .suggestion-actions { display: flex; flex-direction: column; align-items: stretch; gap: 5px; flex: 0 0 auto; }
-.retry-suggestion, .audit-retry { min-height: 34px; padding: 0 8px; border-radius: 7px; background: transparent; color: #8c7959; font-size: 12px; }
-.audit-retry { margin-left: auto; }
 .review-filters { display: flex; align-items: center; gap: 4px; padding: 0 18px 12px; border-bottom: 1px solid #edf0eb; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .review-filters::-webkit-scrollbar { display: none; }
 .review-filters button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: 36px; padding: 0 13px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #7c8b80; font-size: 13px; white-space: nowrap; transition: background .18s ease, color .18s ease; }
@@ -415,22 +386,6 @@ function accept(suggestion: Suggestion) {
 .source-link span { color: #8ea695; font-size: 18px; }
 .quote-toggle { color: #a0aaa3; }
 .suggestion-action { flex: 0 0 auto; min-height: 42px; padding: 0 15px; border: 1px solid #d4e2d7; border-radius: 10px; background: #edf4ee; color: #315c48; font-size: 13px; font-weight: 620; white-space: nowrap; transition: background .18s ease, transform .18s ease; }
-.timeline-audit { border: 1px solid #e2e9df; border-radius: 13px; background: #fbfcf9; color: #53695a; font-size: 12px; }
-.timeline-audit > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; min-height: 48px; padding: 10px 16px; cursor: pointer; list-style: none; }
-.timeline-audit > summary::-webkit-details-marker { display: none; }
-.audit-summary-title { color: #38543f; font-weight: 650; }
-.audit-total { color: #758277; font-variant-numeric: tabular-nums; }
-.audit-expand { margin-left: auto; color: #7f9082; }
-.timeline-audit[open] .audit-expand { transform: rotate(90deg); }
-.audit-state { display: inline-flex; padding: 3px 7px; border-radius: 6px; background: #edf4ed; color: #52755a; font-size: 11px; white-space: nowrap; }
-.audit-state.needs-review { background: #fbf0e5; color: #ad7548; }
-.audit-items { padding: 0 16px; border-top: 1px solid #e7ede3; }
-.audit-row { padding: 10px 0 12px; border-bottom: 1px solid #e8ede4; }
-.audit-row:last-child { border-bottom: none; }
-.audit-row-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-variant-numeric: tabular-nums; }
-.audit-row > p { margin: 3px 0 8px; color: #7b877e; line-height: 1.6; }
-.audit-source > summary { color: #64836a; cursor: pointer; min-height: 32px; line-height: 32px; }
-.audit-source > p { max-height: 260px; margin: 8px 0 0; padding: 12px; overflow: auto; border-radius: 9px; background: #f2f6ef; color: #657569; white-space: pre-wrap; line-height: 1.8; }
 .review-batch { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 21px; border-bottom: 1px solid #e7eee5; background: #f8fbf6; }
 .batch-select { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; color: #536f58; font-size: 12px; cursor: pointer; }
 .batch-select input, .suggestion-select input { width: 19px; height: 19px; margin: 0; accent-color: #3f7052; cursor: pointer; }

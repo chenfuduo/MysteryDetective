@@ -26,7 +26,7 @@ const emit = defineEmits<{ ready: [value: boolean]; projected: [value: Record<st
 const canvas = ref<HTMLCanvasElement | null>(null)
 const CARD_WIDTH = 180
 const CARD_HEIGHT = 90
-const CARD_DEPTH = 16
+const CARD_DEPTH = 5
 const boxGeometry = new RoundedBoxGeometry(CARD_WIDTH, CARD_HEIGHT, CARD_DEPTH, 5, 8)
 const faceGeometry = new THREE.PlaneGeometry(CARD_WIDTH - 8, CARD_HEIGHT - 8)
 const labelGeometry = new RoundedBoxGeometry(1, 30, 9, 4, 4)
@@ -65,12 +65,12 @@ function makePersonTexture(person: PersonRecord) {
   const context = surface.getContext('2d')
   if (!context) return null
   const gradient = context.createLinearGradient(0, 0, 720, 360)
-  gradient.addColorStop(0, '#344555')
-  gradient.addColorStop(0.52, '#263541')
-  gradient.addColorStop(1, '#1b2732')
+  gradient.addColorStop(0, '#ffffff')
+  gradient.addColorStop(0.52, '#fafcfd')
+  gradient.addColorStop(1, '#f5f8fa')
   context.fillStyle = gradient
   context.fillRect(0, 0, 720, 360)
-  context.strokeStyle = 'rgba(202,218,233,.44)'
+  context.strokeStyle = 'rgba(150,174,188,.22)'
   context.lineWidth = 2
   context.strokeRect(14, 14, 692, 332)
   const sheen = context.createLinearGradient(0, 0, 0, 112)
@@ -82,14 +82,14 @@ function makePersonTexture(person: PersonRecord) {
   const avatarX = 112
   const avatarY = 180
   const avatarRadius = 76
-  context.fillStyle = '#263644'
+  context.fillStyle = '#edf2f5'
   context.beginPath()
   context.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2)
   context.fill()
-  context.strokeStyle = 'rgba(159,184,216,.66)'
+  context.strokeStyle = 'rgba(139,168,181,.5)'
   context.lineWidth = 4
   context.stroke()
-  context.fillStyle = '#dce7f1'
+  context.fillStyle = '#466879'
   context.textAlign = 'center'
   context.textBaseline = 'middle'
   context.font = '600 112px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
@@ -97,18 +97,18 @@ function makePersonTexture(person: PersonRecord) {
 
   context.textAlign = 'left'
   context.textBaseline = 'alphabetic'
-  context.fillStyle = '#8b9bab'
+  context.fillStyle = '#788491'
   context.font = '600 18px -apple-system, BlinkMacSystemFont, sans-serif'
-  context.fillText('PERSON FILE', 224, 96)
-  context.fillStyle = '#f5f7fa'
+  context.fillText('人物档案', 224, 96)
+  context.fillStyle = '#24313d'
   context.font = '600 42px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
   const name = person.name || '未命名人物'
   context.fillText(name.length > 8 ? `${name.slice(0, 8)}…` : name, 224, 158)
-  context.fillStyle = '#a5b0bb'
+  context.fillStyle = '#788491'
   context.font = '400 21px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
   const alias = person.aliases.slice(0, 2).join(' · ') || '人物档案'
   context.fillText(alias.length > 16 ? `${alias.slice(0, 16)}…` : alias, 224, 204)
-  context.fillStyle = '#9fb8d8'
+  context.fillStyle = '#8ba8b5'
   context.font = '500 20px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
   context.fillText(`${props.clueCounts[person.id] || 0} 条线索`, 224, 278)
 
@@ -148,14 +148,14 @@ function makeLabelTexture(label: string) {
   const context = surface.getContext('2d')
   if (!context) return null
   context.clearRect(0, 0, surface.width, surface.height)
-  context.fillStyle = '#121920'
+  context.fillStyle = '#ffffff'
   context.beginPath()
   context.roundRect(2, 2, 476, 92, 42)
   context.fill()
-  context.strokeStyle = 'rgba(159,184,216,.66)'
+  context.strokeStyle = 'rgba(139,168,181,.5)'
   context.lineWidth = 3
   context.stroke()
-  context.fillStyle = '#d7e2ed'
+  context.fillStyle = '#466879'
   context.textAlign = 'center'
   context.textBaseline = 'middle'
   context.font = '500 34px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
@@ -186,10 +186,10 @@ function init() {
 
   scene = new THREE.Scene()
   scene.background = null
-  scene.fog = new THREE.Fog('#15202a', 1500, 3200)
+  scene.fog = new THREE.Fog('#f6f8fa', 1500, 3200)
   renderer.setClearColor(0x000000, 0)
   camera = new THREE.PerspectiveCamera(42, width / height, 1, 5000)
-  scene.add(new THREE.HemisphereLight('#dce7f3', '#10151b', 1.55))
+  scene.add(new THREE.HemisphereLight('#dce7f3', '#cdd8df', 1.55))
   scene.add(new THREE.AmbientLight('#9ba9b8', 0.38))
   const key = new THREE.DirectionalLight('#e2ebf5', 2.6)
   key.position.set(-220, 430, 620)
@@ -205,7 +205,7 @@ function init() {
   const rim = new THREE.DirectionalLight('#849bb5', 1.25)
   rim.position.set(420, 90, -250)
   scene.add(rim)
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshStandardMaterial({ color: '#1c2934', roughness: 0.78, metalness: 0.14 }))
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshStandardMaterial({ color: '#f1f5f7', roughness: 0.78, metalness: 0.14 }))
   floor.rotation.x = -Math.PI / 2
   floor.position.y = -330
   floor.receiveShadow = renderer.shadowMap.enabled
@@ -213,7 +213,7 @@ function init() {
   stageGrid = new THREE.GridHelper(3600, 48, 0x70869b, 0x43576a)
   stageGrid.position.y = -328
   const gridMaterials = Array.isArray(stageGrid.material) ? stageGrid.material : [stageGrid.material]
-  gridMaterials.forEach(material => { material.transparent = true; material.opacity = 0.17; material.depthWrite = false })
+  gridMaterials.forEach(material => { material.transparent = true; material.opacity = 0.06; material.depthWrite = false })
   scene.add(stageGrid)
   observer = new ResizeObserver(resize)
   observer.observe(canvas.value)
@@ -261,7 +261,7 @@ function rebuild() {
   for (const person of props.people) {
     const group = new THREE.Group()
     group.userData.personId = person.id
-    const material = new THREE.MeshPhysicalMaterial({ color: '#52697c', metalness: 0.24, roughness: 0.34, clearcoat: 0.66, clearcoatRoughness: 0.22 })
+    const material = new THREE.MeshPhysicalMaterial({ color: '#c6d6df', metalness: 0.08, roughness: 0.72, clearcoat: 0.15, clearcoatRoughness: 0.55 })
     cardMaterials.set(person.id, material)
     const body = new THREE.Mesh(boxGeometry, material)
     body.castShadow = props.people.length <= 28
@@ -277,9 +277,9 @@ function rebuild() {
     cardGroups.set(person.id, group)
   }
 
-  edgeGeometry = new THREE.CylinderGeometry(2.2, 2.2, 1, 8, 1, true)
+  edgeGeometry = new THREE.CylinderGeometry(1.1, 1.1, 1, 8, 1, true)
   for (const relationship of props.relationships) {
-    const material = new THREE.MeshStandardMaterial({ color: '#9fb8d8', roughness: 0.4, metalness: 0.56, emissive: '#182534', emissiveIntensity: 0.18 })
+    const material = new THREE.MeshStandardMaterial({ color: '#8ba8b5', roughness: 0.4, metalness: 0.56, emissive: '#000000', emissiveIntensity: 0.18 })
     const line = new THREE.Mesh(edgeGeometry, material)
     line.userData.relationshipId = relationship.id
     scene.add(line)
@@ -300,10 +300,10 @@ function rebuild() {
 }
 
 function depthFor(person: PersonRecord, index: number) {
-  if (person.id === props.selectedId) return 78
-  if (person.id === props.centerId) return 44
-  if (person.id === props.linkSourceId || person.id === props.linkTargetId) return 68
-  return 8 + ((index * 37) % 5) * 7
+  if (person.id === props.selectedId) return 14
+  if (person.id === props.centerId) return 3
+  if (person.id === props.linkSourceId || person.id === props.linkTargetId) return 10
+  return 2 + index % 3
 }
 
 function updateCamera() {
@@ -341,7 +341,7 @@ function updateCards() {
     const z = depthFor(person, index)
     group.visible = !props.hideUnrelated || !props.selectedId || person.id === props.selectedId || props.relationships.some(relationship => relationship.fromId === props.selectedId && relationship.toId === person.id || relationship.toId === props.selectedId && relationship.fromId === person.id)
     group.position.set(point.x - 400, 240 - point.y, z)
-    group.rotation.set(0.035 * Math.sin(index * 1.4), Math.max(-0.14, Math.min(0.14, (point.x - 400) / 4000 + (index % 2 === 0 ? 0.055 : -0.055))), 0)
+    group.rotation.set(0, 0, 0)
     group.userData.depth = z
     group.userData.cardPosition = group.position.clone()
     const dimmed = Boolean(props.linkSourceId && person.id !== props.linkSourceId && person.id !== props.linkTargetId)
@@ -351,7 +351,7 @@ function updateCards() {
     if (material) {
       material.transparent = opacity < 1
       material.opacity = opacity
-      material.emissive.set(person.id === props.linkTargetId ? '#263b4f' : person.id === props.selectedId ? '#1a3040' : '#000000')
+      material.emissive.set(person.id === props.linkTargetId ? '#c5d9e5' : person.id === props.selectedId ? '#dbe8ef' : '#000000')
       material.emissiveIntensity = person.id === props.selectedId || person.id === props.linkTargetId ? 0.56 : 0.05
     }
     const face = group.children[1] as THREE.Mesh | undefined
@@ -394,7 +394,7 @@ function updateEdges() {
     line.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize())
     const connected = !props.linkSourceId && Boolean(props.selectedId) && (relationship.fromId === props.selectedId || relationship.toId === props.selectedId)
     const material = line.material as THREE.MeshStandardMaterial
-    material.color.set(connected ? '#c28a67' : '#9fb8d8')
+    material.color.set(connected ? '#638596' : '#8ba8b5')
     material.transparent = Boolean(props.selectedId || props.linkSourceId)
     material.opacity = material.transparent && !connected && !props.linkSourceId ? 0.2 : 0.88
     if (props.linkSourceId) material.opacity = relationship.fromId === props.linkSourceId || relationship.toId === props.linkSourceId ? 0.92 : 0.12

@@ -9,7 +9,7 @@ type Props = { container: HTMLElement | null; events: TimelineRecord[]; axisEven
 const props = defineProps<Props>()
 const emit = defineEmits<{ ready: [value: boolean] }>()
 const canvasElement = ref<HTMLCanvasElement | null>(null)
-const unitBox = new RoundedBoxGeometry(2, 1, 0.14, 5, 0.035)
+const unitBox = new RoundedBoxGeometry(2, 1, 0.14, 4, 0.025)
 const sphereGeometry = new THREE.SphereGeometry(1, 16, 10)
 const cards = new Map<string, THREE.Mesh>()
 const markers = new Map<string, THREE.Mesh>()
@@ -29,20 +29,20 @@ let axisGeometry: THREE.CylinderGeometry | null = null
 let stemGeometry: THREE.CylinderGeometry | null = null
 const stems = new Map<string, THREE.Mesh>()
 const stemMaterials = {
-  dated: new THREE.MeshPhysicalMaterial({ color: '#72879b', metalness: 0.4, roughness: 0.3, clearcoat: 0.42 }),
-  yearless: new THREE.MeshPhysicalMaterial({ color: '#a87956', metalness: 0.3, roughness: 0.31, clearcoat: 0.48 }),
+  dated: new THREE.MeshPhysicalMaterial({ color: '#bccdd9', metalness: 0.05, roughness: 0.74, clearcoat: 0.08 }),
+  yearless: new THREE.MeshPhysicalMaterial({ color: '#d5c7b5', metalness: 0.04, roughness: 0.76, clearcoat: 0.06 }),
 }
 const typeMaterials: Record<string, THREE.MeshPhysicalMaterial> = {
-  dated: new THREE.MeshPhysicalMaterial({ color: '#62788d', metalness: 0.28, roughness: 0.33, clearcoat: 0.52, clearcoatRoughness: 0.24 }),
-  yearless: new THREE.MeshPhysicalMaterial({ color: '#8d654b', metalness: 0.22, roughness: 0.34, clearcoat: 0.58, clearcoatRoughness: 0.23 }),
-  mixed: new THREE.MeshPhysicalMaterial({ color: '#65727e', metalness: 0.25, roughness: 0.38, clearcoat: 0.42, clearcoatRoughness: 0.3 }),
-  selected: new THREE.MeshPhysicalMaterial({ color: '#4d687e', metalness: 0.16, roughness: 0.37, clearcoat: 0.38, clearcoatRoughness: 0.3 }),
-  yearlessSelected: new THREE.MeshPhysicalMaterial({ color: '#75533b', metalness: 0.12, roughness: 0.4, clearcoat: 0.38, clearcoatRoughness: 0.32 }),
-  mixedSelected: new THREE.MeshPhysicalMaterial({ color: '#536978', metalness: 0.15, roughness: 0.38, clearcoat: 0.38, clearcoatRoughness: 0.3 }),
+  dated: new THREE.MeshPhysicalMaterial({ color: '#edf3f8', metalness: 0.03, roughness: 0.7, clearcoat: 0.08 }),
+  yearless: new THREE.MeshPhysicalMaterial({ color: '#f4efe7', metalness: 0.02, roughness: 0.74, clearcoat: 0.06 }),
+  mixed: new THREE.MeshPhysicalMaterial({ color: '#edf1f5', metalness: 0.03, roughness: 0.72, clearcoat: 0.06 }),
+  selected: new THREE.MeshPhysicalMaterial({ color: '#dce8f0', metalness: 0.03, roughness: 0.72, clearcoat: 0.06 }),
+  yearlessSelected: new THREE.MeshPhysicalMaterial({ color: '#dce8f0', metalness: 0.03, roughness: 0.72, clearcoat: 0.06 }),
+  mixedSelected: new THREE.MeshPhysicalMaterial({ color: '#dce8f0', metalness: 0.03, roughness: 0.72, clearcoat: 0.06 }),
 }
 const dotMaterials = {
-  dated: new THREE.MeshPhysicalMaterial({ color: '#afc5d9', metalness: 0.42, roughness: 0.24, clearcoat: 0.58 }),
-  yearless: new THREE.MeshPhysicalMaterial({ color: '#c99870', metalness: 0.34, roughness: 0.28, clearcoat: 0.52 }),
+  dated: new THREE.MeshPhysicalMaterial({ color: '#7f9eb6', metalness: 0.1, roughness: 0.6 }),
+  yearless: new THREE.MeshPhysicalMaterial({ color: '#bba68c', metalness: 0.08, roughness: 0.64 }),
 }
 
 function init() {
@@ -58,16 +58,16 @@ function init() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.4))
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.02
-  renderer.shadowMap.enabled = props.events.length <= 36
+  renderer.toneMappingExposure = 0.95
+  renderer.shadowMap.enabled = false
   renderer.shadowMap.type = THREE.PCFShadowMap
   renderer.setClearColor(0x000000, 0)
 
   scene = new THREE.Scene()
   camera = new THREE.PerspectiveCamera(43, 1, 0.1, 5000)
-  scene.add(new THREE.HemisphereLight('#d9e4ef', '#10151b', 1.42))
-  scene.add(new THREE.AmbientLight('#9eacbb', 0.38))
-  const key = new THREE.DirectionalLight('#edf4fa', 2.5)
+  scene.add(new THREE.HemisphereLight('#ffffff', '#d6e1ea', 1.45))
+  scene.add(new THREE.AmbientLight('#ffffff', 0.55))
+  const key = new THREE.DirectionalLight('#ffffff', 1.4)
   key.position.set(-120, 190, 620)
   key.castShadow = renderer.shadowMap.enabled
   key.shadow.mapSize.set(1024, 1024)
@@ -78,18 +78,18 @@ function init() {
   key.shadow.bias = -0.0003
   key.shadow.radius = 4
   scene.add(key)
-  const fill = new THREE.DirectionalLight('#91a9c0', 1.05)
+  const fill = new THREE.DirectionalLight('#dce8f2', 0.6)
   fill.position.set(420, 30, 250)
   scene.add(fill)
 
-  axisGeometry = new THREE.CylinderGeometry(2.8, 2.8, 1, 14, 1, false)
+  axisGeometry = new THREE.CylinderGeometry(0.8, 0.8, 1, 10, 1, false)
   stemGeometry = new THREE.CylinderGeometry(1, 1, 1, 10, 1, false)
-  axisRail = new THREE.Mesh(axisGeometry, new THREE.MeshPhysicalMaterial({ color: '#8498ac', metalness: 0.52, roughness: 0.3, clearcoat: 0.5 }))
+  axisRail = new THREE.Mesh(axisGeometry, new THREE.MeshPhysicalMaterial({ color: '#bdcbd7', metalness: 0.08, roughness: 0.72 }))
   axisRail.rotation.z = Math.PI / 2
   axisRail.castShadow = true
   scene.add(axisRail)
 
-  floor = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ color: '#111a23', roughness: 0.82, metalness: 0.16 }))
+  floor = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ color: '#f6f8fa', roughness: 0.96, metalness: 0 }))
   floor.position.z = -28
   floor.receiveShadow = renderer.shadowMap.enabled
   scene.add(floor)
@@ -171,12 +171,12 @@ function syncObjects() {
     card.material = selected ? typeMaterials[type === 'yearless' ? 'yearlessSelected' : type === 'mixed' ? 'mixedSelected' : 'selected']! : typeMaterials[type]!
     const centerX = rect.left - containerRect.left + rect.width / 2
     const centerY = rect.top - containerRect.top + rect.height / 2
-    const depth = selected ? 20 : id.startsWith('timeline-cluster:') ? 18 : 12
+    const depth = selected ? 2.5 : 1
     card.position.x = centerX
     card.position.y = height - centerY
     card.userData.targetDepth = depth
-    card.rotation.set((element.classList.contains('half-upper') ? 1 : -1) * 0.035, 0.035, 0)
-    card.scale.set(Math.max(44, rect.width - 4) / 2, Math.max(30, rect.height - 5), 12 / 0.14)
+    card.rotation.set(0, 0, 0)
+    card.scale.set(Math.max(44, rect.width - 4) / 2, Math.max(30, rect.height - 5), 2 / 0.14)
     card.visible = true
 
     let stem = stems.get(id)
@@ -191,8 +191,8 @@ function syncObjects() {
     stem.material = stemMaterials[type === 'mixed' ? 'dated' : type as 'dated' | 'yearless']
     const stemLength = Math.max(0, Math.abs(axisY - card.position.y) - 10)
     stem.position.set(centerX, (axisY + card.position.y) / 2, 12)
-    stem.scale.set(1.8, stemLength, 1.8)
-    stem.userData.targetDepth = selected ? 18 : 12
+    stem.scale.set(0.55, stemLength, 0.55)
+    stem.userData.targetDepth = 0
     stem.visible = stemLength > 4
   }
   for (const [id, card] of cards) if (!seen.has(id)) { scene.remove(card); card.geometry !== unitBox && card.geometry.dispose(); cards.delete(id) }
@@ -221,8 +221,8 @@ function syncObjects() {
     marker.material = item.event.startsAt.startsWith('--') ? dotMaterials.yearless : dotMaterials.dated
     marker.position.x = (item.position / 100) * width
     marker.position.y = height / 2
-    marker.userData.targetDepth = id === props.selectedId ? 20 : 14
-    marker.scale.setScalar(id === props.selectedId ? 6.5 : 5.6)
+    marker.userData.targetDepth = id === props.selectedId ? 3 : 2
+    marker.scale.setScalar(id === props.selectedId ? 4.5 : 3.4)
     marker.visible = true
   }
   for (const [id, marker] of markers) if (!dotIds.has(id)) { scene.remove(marker); markers.delete(id) }

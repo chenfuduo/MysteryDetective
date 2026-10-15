@@ -32,7 +32,7 @@ const zoom = ref(1)
 const moveHistory = ref<Record<string, Point>[]>([])
 let activeScriptId = props.scriptId
 let viewReady = false
-const spatial = ref(true)
+const spatial = ref(false)
 const spatialSceneReady = ref(false)
 const projectedPositions = ref<Record<string, Point & { width?: number; height?: number }>>({})
 const cameraRotation = ref<Point>({ x: 0, y: 0 })
@@ -155,7 +155,7 @@ function personStyle(person: PersonRecord, index: number) {
   return { left: `${point.x}px`, top: `${point.y}px`, width: `${width}px`, height: `${height}px`, marginLeft: `${-width / 2}px`, marginTop: `${-height / 2}px`, display: hidden ? 'none' : '', '--card-depth': `${index % 3 * 4}px` }
 }
 function layoutKey(): string { return `clue-vault:relationship-layout:${props.scriptId}:v1` }
-function viewKey() { return `clue-vault:relationship-view:${activeScriptId}:v1` }
+function viewKey() { return `clue-vault:relationship-view:${activeScriptId}:v2` }
 function spatialSceneState(ready: boolean) { spatialSceneReady.value = ready; if (!ready) projectedPositions.value = {}; if (ready) requestAnimationFrame(measure) }
 function persistView() {
   if (!viewReady) return
@@ -166,7 +166,7 @@ function restoreView() {
     const saved = JSON.parse(sessionStorage.getItem(viewKey()) || 'null')
     if (!saved || !Number.isFinite(saved.pan?.x) || !Number.isFinite(saved.pan?.y) || !Number.isFinite(saved.zoom) || saved.zoom <= 0) return false
     zoom.value = Math.max(.06, Math.min(3, saved.zoom))
-    spatial.value = typeof saved.spatial === 'boolean' ? saved.spatial : true
+    spatial.value = saved.spatial === true
     if (Number.isFinite(saved.rotation?.x) && Number.isFinite(saved.rotation?.y)) cameraRotation.value = { x: saved.rotation.x, y: Math.max(-0.42, Math.min(0.48, saved.rotation.y)) }
     pan.value = { x: saved.pan.x + (viewport.value.width - (saved.viewport?.width || viewport.value.width)) / 2, y: saved.pan.y + (viewport.value.height - (saved.viewport?.height || viewport.value.height)) / 2 }
     return true
@@ -349,7 +349,7 @@ function onKey(event: KeyboardEvent) {
 }
 watch(() => props.scriptId, async () => {
   persistView(); viewReady = false; activeScriptId = props.scriptId; moveHistory.value = []
-  cancelConnection(); selectedId.value = ''; search.value = ''; syncPeople(true)
+  cancelConnection(); selectedId.value = ''; search.value = ''; spatial.value = false; cameraRotation.value = { x: 0, y: 0 }; syncPeople(true)
   await nextTick(); measure(); if (!restoreView()) fit(); viewReady = true; persistView()
 })
 watch([pan, zoom, spatial, cameraRotation], persistView, { deep: true, flush: 'sync' })
@@ -397,6 +397,10 @@ onBeforeUnmount(() => {
           <button v-if="fullscreen" type="button" class="graph-icon-button" aria-label="关闭全屏" @click="fullscreen = false"><UiIcon name="close" /></button>
         </div>
       </header>
+          <div class="graph-hud">
+            <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
+            <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '空间视图' : '空间预览' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button></div>
+          </div>
       <div class="graph-layout">
         <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging, 'is-linking': linkSourceId }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @lostpointercapture="pointerEnd" @contextmenu.prevent @wheel="wheel">
           <RelationshipSpatialScene v-if="spatial" :people="people" :relationships="relationships" :positions="positions" :pan="pan" :zoom="zoom" :rotation="cameraRotation" :selected-id="selectedId" :link-source-id="linkSourceId" :link-target-id="linkTargetId" :image-urls="imageUrls" :clue-counts="clueCounts" :center-id="centerId" :hide-unrelated="isolateRelated" @ready="spatialSceneState" @projected="projectedPositions = $event" />
@@ -420,10 +424,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-if="linkSourceId" class="graph-connection-bar" role="status"><div><strong>连线模式 · {{ peopleById.get(linkSourceId)?.name }}</strong><span>{{ linkTargetId ? `连接到 ${peopleById.get(linkTargetId)?.name}` : '拖到目标人物，或松手后点选人物' }}</span></div><button type="button" @click="cancelConnection"><UiIcon name="close" :size="16" />取消连线</button></div>
-          <div v-else class="graph-hud">
-            <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
-            <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '立体' : '平面' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button></div>
-          </div>
           <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
           <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : spatial ? '长按人物连线 · 拖动画布 · 双指缩放与旋转' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
         </div>
@@ -446,130 +446,113 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .relationship-explorer, .relationship-explorer * { box-sizing: border-box; }
-.relationship-explorer { --graph-green: #315c48; --graph-copper: #b66b4d; display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; width: 100%; height: 100%; overflow: hidden; color: #273e33; border: 1px solid #e3e8e2; border-radius: 18px; background: #fff; }
-.relationship-explorer.is-fullscreen { position: fixed; z-index: 1100; inset: 0; width: auto; height: auto; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); border: 0; border-radius: 0; background: #fcfdfb; }
-.graph-toolbar { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; padding: 8px 16px; border-bottom: 1px solid #e9ece7; }
-.graph-heading { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.graph-heading-icon { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: #eef4ef; color: var(--graph-green); }
-.graph-heading > div { display: flex; flex-direction: column; gap: 3px; }
-.graph-heading strong { font-size: 13px; font-weight: 650; }
-.graph-heading > span { color: #8a958c; font-size: 12px; }
+.relationship-explorer { --graph-green: #466879; --graph-copper: #92765c; display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; width: 100%; height: 100%; overflow: hidden; color: #24313d; border: 1px solid #e1e7ec; border-radius: 18px; background: #fff; }
+.relationship-explorer.is-fullscreen { position: fixed; z-index: 1100; inset: 0; width: auto; height: auto; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); border: 0; border-radius: 0; background: #fff; }
+.graph-toolbar { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; min-height: 66px; padding: 10px 20px; }
+.graph-heading { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.graph-heading strong { font-size: 15px; font-weight: 650; }
+.graph-heading > span { color: #788491; font-size: 12px; }
 .graph-actions { display: flex; align-items: center; gap: 8px; }
-.graph-text-button, .graph-icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 40px; min-height: 40px; padding: 0 12px; border: 1px solid #e1e7df; border-radius: 11px; background: #fff; color: var(--graph-green); font: inherit; font-size: 13px; cursor: pointer; }
-.graph-text-button { border-color: var(--graph-green); background: var(--graph-green); color: #fff; font-weight: 600; }
+.graph-text-button, .graph-icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 44px; min-height: 44px; padding: 0 14px; border: 1px solid #dfe6eb; border-radius: 10px; background: #fff; color: #466879; font: inherit; font-size: 13px; cursor: pointer; }
+.graph-text-button { border-color: #466879; background: #466879; color: #fff; font-weight: 600; }
 .graph-icon-button { padding: 0; }
 .graph-icon-button:disabled { opacity: .35; cursor: default; }
+.graph-hud { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; padding: 0 20px 14px; border-bottom: 1px solid #e8edf0; }
+.graph-search { position: relative; display: flex; align-items: center; gap: 8px; width: min(280px, 50%); min-height: 44px; padding: 0 12px; border: 1px solid #e1e7ec; border-radius: 10px; background: #f6f8fa; color: #788491; }
+.graph-search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: none; background: transparent; color: #24313d; font: inherit; font-size: 13px; }
+.graph-search input::placeholder { color: #788491; }
+.graph-search > button { display: grid; place-items: center; min-width: 28px; height: 42px; border: 0; padding: 0; background: transparent; color: #788491; }
+.graph-search-results { position: absolute; z-index: 7; top: calc(100% + 7px); left: 0; right: 0; overflow-y: auto; max-height: 240px; padding: 5px; border: 1px solid #e1e7ec; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px #24313d0d; }
+.graph-search-results button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: #24313d; text-align: left; font: inherit; font-size: 14px; }
+.graph-search-results button:hover { background: #eef4f7; }
+.graph-search-results p { padding: 8px; color: #788491; font-size: 12px; }
+.graph-view-buttons { display: flex; gap: 8px; }
+.graph-mode { display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border: 1px solid #e1e7ec; border-radius: 10px; background: #fff; color: #657786; font: inherit; font-size: 12px; cursor: pointer; }
+.graph-mode.active { color: #466879; border-color: #b8cbd5; background: #eef4f7; }
+.graph-mode:disabled { opacity: .4; cursor: default; }
 .graph-layout { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
-.graph-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 30%, #fff 0%, #f6f8f4 75%); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
+.graph-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: #f6f8fa; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
 .graph-stage.is-dragging { cursor: grabbing; }
 .graph-stage.is-linking, .is-linking .person-node { cursor: crosshair; }
 .graph-stage, .person-node, .person-node * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
-.is-linking .person-node.is-muted { opacity: .22; }
-.person-node.is-link-target { z-index: 3; }
-.person-node.is-link-target .graph-person-card { border-color: #6d9b7e; background: linear-gradient(145deg, #fff, #e9f4e9); box-shadow: 0 0 0 4px #87b89442, 0 12px 26px #315c4826; }
-.connection-preview line { stroke: #b87850; stroke-width: 3; stroke-dasharray: 9 6; stroke-linecap: round; }
-.connection-preview line.has-target { stroke: #457858; stroke-dasharray: none; }
-.connection-preview line.connection-preview-shadow { stroke: #315c48; stroke-width: 7; stroke-dasharray: none; opacity: .1; }
-.graph-connection-bar { position: absolute; z-index: 5; top: 16px; right: 16px; left: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #d3e3d0; border-radius: 12px; background: #fffffff5; box-shadow: 0 6px 20px #315c4812; }
-.graph-connection-bar > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.graph-connection-bar strong { color: #315c48; font-size: 13px; }
-.graph-connection-bar span { color: #87977f; font-size: 11px; }
-.graph-connection-bar button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 40px; padding: 0 10px; border: 1px solid #dce6d8; border-radius: 9px; background: #f7faf4; color: #57764f; font: inherit; font-size: 12px; }
-.graph-ground { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(#dce3da 1px, transparent 1px); background-size: 24px 24px; opacity: .7; transition: transform .3s ease, opacity .3s ease; }
-.is-webgl .graph-stage { background-color: #202c36; background-image: radial-gradient(ellipse 64% 66% at 50% 48%, rgba(151,177,199,.46) 0%, rgba(89,116,138,.26) 46%, transparent 100%), radial-gradient(ellipse at 14% 8%, rgba(159,184,216,.18), transparent 36%), radial-gradient(rgba(205,220,234,.075) .8px, transparent .8px), linear-gradient(155deg, #303e4b 0%, #202c36 52%, #151e27 100%); background-size: auto, auto, 48px 48px, auto; }
+.graph-ground { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(#cbd5dd .7px, transparent .7px); background-size: 28px 28px; opacity: .45; }
 .is-webgl .graph-ground { display: none; }
 .is-webgl .graph-world { z-index: 1; }
 .graph-world { position: absolute; top: 0; left: 0; width: 1px; height: 1px; transform-origin: 0 0; will-change: transform; }
 .graph-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
 .graph-edges g { transition: opacity .18s ease; }
-.graph-edges g.is-muted { opacity: .14; }
-.edge-shadow { stroke: #91a58f; stroke-width: 7; opacity: 0; }
+.graph-edges g.is-muted { opacity: .18; }
+.edge-shadow { display: none; }
 .is-webgl .graph-edges > g:not(.connection-preview) { display: none; }
-.is-webgl .edge-shadow { opacity: .08; }
-.edge-line { stroke: #91ab92; stroke-width: 2.5; }
-.graph-edges g.is-connected .edge-line { stroke: var(--graph-copper); stroke-width: 3; }
-.graph-edges rect { fill: #fff; stroke: #e4e9e2; }
-.graph-edges text { fill: #758477; font-size: 12px; }
-.graph-edges g.is-connected text { fill: #93563e; }
+.edge-line { stroke: #aabdc8; stroke-width: 1.8; }
+.graph-edges g.is-connected .edge-line { stroke: #638596; stroke-width: 2.5; }
+.graph-edges rect { fill: #fff; stroke: #dce5eb; }
+.graph-edges text { fill: #566d7c; font-size: 12px; font-weight: 500; }
+.graph-edges g.is-connected rect { fill: #eef4f7; stroke: #b0c6d1; }
+.graph-edges g.is-connected text { fill: #36586a; }
 .person-node { position: absolute; width: 180px; height: 90px; margin-left: -90px; margin-top: -45px; outline: none; cursor: grab; transition: opacity .18s ease; }
-.person-node.is-selected { z-index: 3; }
-.person-node.is-muted { opacity: .32; }
-.person-node:focus-visible .graph-person-card { outline: 3px solid #b4cec0; outline-offset: 4px; }
-.graph-person-card { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr); grid-template-rows: 40px 15px; gap: 3px 9px; align-items: center; height: 100%; min-height: 0; padding: 13px 12px; border: 1px solid #dfe8df; border-radius: 16px; background: linear-gradient(150deg, #fff, #f5f8f3); box-shadow: 0 5px 16px #2f4a3220; transform-origin: center; transition: box-shadow .22s ease, transform .22s ease, border-color .22s ease; }
-.is-webgl .graph-person-card { opacity: 0; border-color: transparent; background: transparent; box-shadow: none; color: transparent; transform: none; pointer-events: none; }
-.person-node.is-neighbor .graph-person-card { border-color: #c3b39f; }
-.person-node.is-selected .graph-person-card, .person-node.is-central .graph-person-card { border-color: #a6b187; background: linear-gradient(135deg, #416d56, #254f3b); color: #fff; box-shadow: 0 0 0 2px #315c4814, 0 12px 26px #315c4826; }
-.is-webgl .graph-hud .graph-search, .is-webgl .graph-mode, .is-webgl .graph-zoom { border-color: rgba(196,212,228,.2); background: rgba(13,18,24,.82); color: #bdc9d5; box-shadow: 0 8px 24px rgba(0,0,0,.18); backdrop-filter: blur(14px); }
-.is-webgl .graph-search input { color: #e7edf3; }
-.is-webgl .graph-mode.active { color: #d9e6f2; background: rgba(159,184,216,.17); }
-.is-webgl .graph-search input::placeholder, .is-webgl .graph-zoom > span { color: #8795a4; }
-.is-webgl .graph-zoom button { color: #c8d7e6; }
-.is-webgl .graph-help > span { background: rgba(13,18,24,.76); color: #9ba8b6; backdrop-filter: blur(12px); }
-.is-webgl .graph-empty { color: #edf2f6; }
-.is-webgl .graph-empty p { color: #9ca9b7; }
-.graph-person-avatar { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; overflow: hidden; border: 1px solid #e3e8df; border-radius: 13px; background: linear-gradient(145deg, #e4ede4, #f4f6ef); color: var(--graph-green); font-size: 20px; font-weight: 650; }
+.person-node.is-selected, .person-node.is-link-target { z-index: 3; }
+.person-node.is-muted { opacity: .3; }
+.is-linking .person-node.is-muted { opacity: .22; }
+.person-node:focus-visible .graph-person-card { outline: 3px solid #b7ceda; outline-offset: 4px; }
+.graph-person-card { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr); grid-template-rows: 40px 15px; gap: 3px 9px; align-items: center; height: 100%; min-height: 0; padding: 13px 12px; border: 1px solid #d8e2e9; border-radius: 13px; background: #fff; box-shadow: 0 2px 6px #24313d05; transition: border-color .18s ease, background .18s ease; }
+.person-node.is-neighbor .graph-person-card { border-color: #a9c0cd; }
+.person-node.is-selected .graph-person-card, .person-node.is-link-target .graph-person-card { border-color: #8ba8b5; background: #eef4f7; box-shadow: 0 0 0 2px #8ba8b526; color: #24313d; }
+.is-webgl .graph-person-card { opacity: 0; border-color: transparent; background: transparent; box-shadow: none; color: transparent; pointer-events: none; }
+.graph-person-avatar { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; overflow: hidden; border: 1px solid #e1e8ed; border-radius: 12px; background: #edf2f5; color: #466879; font-size: 20px; font-weight: 600; }
 .graph-person-avatar img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 .graph-person-card-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.graph-person-card-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; }
-.graph-person-card-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #909b91; font-size: 11px; }
-.person-clue-count { grid-column: 2; align-self: start; color: #839184; font-size: 11px; }
-.graph-person-card-dot { position: absolute; right: 12px; bottom: 13px; width: 6px; height: 6px; border-radius: 50%; background: #b2c3b0; }
-.is-selected .graph-person-card-dot, .is-central .graph-person-card-dot { background: #dfc29c; }
-.is-selected .graph-person-card-copy > span, .is-central .graph-person-card-copy > span, .is-selected .person-clue-count, .is-central .person-clue-count { color: #d0dfcb; }
-.graph-hud { position: absolute; top: 16px; left: 16px; right: 16px; z-index: 4; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; pointer-events: none; }
-.graph-hud > * { pointer-events: auto; }
-.graph-search { position: relative; display: flex; align-items: center; gap: 8px; width: min(250px, 68%); min-height: 42px; padding: 0 12px; border: 1px solid #e2e8df; border-radius: 12px; background: #ffffffed; color: #879585; box-shadow: 0 3px 12px #315c4807; }
-.graph-search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: none; background: transparent; color: #334d3d; font: inherit; font-size: 12px; }
-.graph-search input::placeholder { color: #97a091; }
-.graph-search > button { display: grid; place-items: center; min-width: 24px; height: 40px; border: 0; padding: 0; background: transparent; color: #839281; }
-.graph-search-results { position: absolute; top: calc(100% + 7px); left: 0; right: 0; overflow-y: auto; max-height: 240px; padding: 5px; border: 1px solid #e1e7df; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px #315c4815; }
-.graph-search-results button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: #37523e; text-align: left; font: inherit; font-size: 13px; }
-.graph-search-results button:hover { background: #f0f5ee; }
-.graph-search-results p { padding: 8px; color: #8d978a; font-size: 12px; }
-.graph-mode { display: flex; align-items: center; gap: 6px; min-height: 42px; padding: 0 12px; border: 1px solid #e0e7dc; border-radius: 12px; background: #ffffffed; color: #7e8c7b; font: inherit; font-size: 12px; cursor: pointer; }
-.graph-mode.active { color: var(--graph-green); background: #f1f6ef; }
-.graph-view-buttons { display: flex; gap: 7px; }
-.graph-mode:disabled { opacity: .45; cursor: default; }
-.graph-help { position: absolute; z-index: 4; right: 16px; left: 16px; bottom: 14px; display: flex; align-items: center; justify-content: space-between; gap: 8px; pointer-events: none; }
-.graph-help > span { padding: 7px 9px; border-radius: 8px; background: #f7f9f3d9; color: #939e8d; font-size: 10px; }
-.graph-zoom { display: flex; align-items: center; flex: 0 0 auto; min-height: 42px; padding: 0 5px; border: 1px solid #e0e7da; border-radius: 12px; background: #fffffff2; box-shadow: 0 3px 12px #315c4807; pointer-events: auto; }
-.graph-zoom button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 40px; min-height: 40px; padding: 0; border: 0; background: transparent; color: var(--graph-green); cursor: pointer; }
-.graph-zoom > span { min-width: 38px; color: #80917c; font-size: 10px; text-align: center; }
-.graph-zoom > i { width: 1px; height: 18px; margin: 0 6px; background: #e6ebdf; }
-.graph-zoom button.graph-fit { padding: 0 8px; font: inherit; font-size: 11px; }
-.graph-empty { position: absolute; inset: 72px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 11px; text-align: center; cursor: auto; }
-.graph-empty > span { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 22px; background: #eaf1e6; color: #7a9674; }
-.graph-empty strong { font-size: 17px; }
-.graph-empty p { margin: 0 0 9px; color: #8d9b87; font-size: 12px; }
-.graph-inspector { display: flex; flex: 0 0 270px; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid #e4e9e1; background: #fff; }
-.graph-inspector > header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; min-height: 52px; padding: 6px 12px 6px 18px; border-bottom: 1px solid #edf0e8; }
-.graph-inspector > header > span { color: #7e8e76; font-size: 11px; font-weight: 600; }
+.graph-person-card-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #24313d; font-size: 17px; font-weight: 600; }
+.graph-person-card-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #788491; font-size: 11px; }
+.person-clue-count { grid-column: 2; align-self: start; color: #788491; font-size: 11px; }
+.graph-person-card-dot { position: absolute; right: 12px; bottom: 13px; width: 5px; height: 5px; border-radius: 50%; background: #c3d0d9; }
+.is-selected .graph-person-card-dot { background: #638596; }
+.connection-preview line { stroke: #8ba8b5; stroke-width: 2.5; stroke-dasharray: 7 5; stroke-linecap: round; }
+.connection-preview line.has-target { stroke: #466879; stroke-dasharray: none; }
+.connection-preview line.connection-preview-shadow { display: none; }
+.graph-connection-bar { position: absolute; z-index: 5; top: 14px; right: 16px; left: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #c8d9e3; border-radius: 12px; background: #fff; box-shadow: 0 3px 12px #24313d07; }
+.graph-connection-bar > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.graph-connection-bar strong { color: #36586a; font-size: 14px; }
+.graph-connection-bar span { color: #788491; font-size: 12px; }
+.graph-connection-bar button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 44px; padding: 0 12px; border: 1px solid #dfe6eb; border-radius: 9px; background: #fff; color: #466879; font: inherit; font-size: 12px; }
+.graph-help { position: absolute; z-index: 4; right: 16px; left: 16px; bottom: 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; pointer-events: none; }
+.graph-help > span { padding: 8px 10px; border-radius: 8px; background: #f6f8faf2; color: #788491; font-size: 11px; }
+.graph-zoom { display: flex; align-items: center; flex: 0 0 auto; min-height: 44px; padding: 0 4px; border: 1px solid #dfe6eb; border-radius: 10px; background: #fff; pointer-events: auto; }
+.graph-zoom button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 44px; min-height: 44px; padding: 0; border: 0; background: transparent; color: #466879; font: inherit; cursor: pointer; }
+.graph-zoom > span { min-width: 42px; color: #788491; font-size: 11px; text-align: center; }
+.graph-zoom > i { width: 1px; height: 18px; margin: 0 6px; background: #e1e7ec; }
+.graph-zoom button.graph-fit { padding: 0 10px; font-size: 12px; }
+.graph-empty { position: absolute; inset: 72px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; cursor: auto; }
+.graph-empty > span { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 18px; background: #eaf0f4; color: #638596; }
+.graph-empty strong { font-size: 18px; }
+.graph-empty p { margin: 0 0 8px; color: #788491; font-size: 13px; }
+.graph-inspector { display: flex; flex: 0 0 280px; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid #e1e7ec; background: #fff; }
+.graph-inspector > header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; min-height: 58px; padding: 6px 12px 6px 20px; border-bottom: 1px solid #edf0f3; }
+.graph-inspector > header > span { color: #788491; font-size: 12px; font-weight: 600; }
 .graph-inspector > header .graph-icon-button { border: 0; }
-.inspector-content { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px; }
-.inspector-person { display: flex; align-items: center; gap: 11px; }
-.inspector-person h3 { margin: 0 0 5px; font-size: 18px; }
-.inspector-person p { margin: 0; color: #96a18e; font-size: 11px; overflow-wrap: anywhere; }
-.inspector-actions { display: flex; gap: 7px; margin: 18px 0; }
-.inspector-actions button { display: inline-flex; align-items: center; justify-content: center; flex: 1; gap: 5px; min-height: 40px; padding: 5px; border: 1px solid #e2e9dc; border-radius: 9px; background: #f8faf5; color: var(--graph-green); font: inherit; font-size: 11px; }
-.inspector-workspace { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; margin: -6px 0 18px; padding: 9px 11px; border: 1px solid #d8e5d7; border-radius: 10px; background: #edf4ec; color: var(--graph-green); font: inherit; font-size: 12px; text-align: left; }
+.inspector-content { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px; }
+.inspector-person { display: flex; align-items: center; gap: 12px; }
+.inspector-person h3 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+.inspector-person p { margin: 0; color: #788491; font-size: 12px; overflow-wrap: anywhere; }
+.inspector-actions { display: flex; gap: 8px; margin: 20px 0; }
+.inspector-actions button { display: inline-flex; align-items: center; justify-content: center; flex: 1; gap: 5px; min-height: 44px; padding: 5px; border: 1px solid #e1e7ec; border-radius: 9px; background: #fff; color: #466879; font: inherit; font-size: 12px; }
+.inspector-workspace { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; margin: -6px 0 20px; padding: 9px 11px; border: 1px solid #d2e0e8; border-radius: 10px; background: #eef4f7; color: #466879; font: inherit; font-size: 12px; text-align: left; }
 .inspector-workspace span { flex: 1; }
-.inspector-notes { margin: 0 0 20px; padding: 11px; border-radius: 10px; background: #f5f7f1; color: #7e8d76; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
-.inspector-section-title { display: flex; align-items: center; justify-content: space-between; margin: 18px 0 8px; }
-.inspector-section-title strong { font-size: 12px; }
-.inspector-section-title > span { display: grid; place-items: center; min-width: 21px; height: 21px; border-radius: 7px; background: #eff4e9; color: #809572; font-size: 10px; }
-.inspector-relation { display: flex; align-items: center; gap: 5px; border-bottom: 1px solid #edf1e6; }
-.relation-person { position: relative; display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; min-height: 60px; padding: 9px 20px 9px 0; border: 0; background: transparent; color: #375338; text-align: left; font: inherit; }
-.relation-person > span { color: #a17a5d; font-size: 10px; overflow-wrap: anywhere; }
-.relation-person strong { font-size: 13px; }
-.relation-person > svg { position: absolute; top: 22px; right: 0; color: #9aa68f; }
-.relation-delete { min-width: 40px; border: 0; color: #a6ad9e; }
-.inspector-no-relations { color: #9aa38f; font-size: 12px; line-height: 1.7; }
-button:focus-visible { outline: 3px solid #bdd3b7; outline-offset: 2px; }
-@media (max-width: 900px) { .graph-inspector { flex-basis: 230px; } .graph-help > span { display: none; } .graph-help { justify-content: flex-end; } }
-@media (max-width: 700px) { .graph-toolbar { gap: 8px; padding: 10px 12px; } .graph-heading-icon { display: none; } .graph-actions { gap: 5px; } .graph-text-button { padding: 0 9px; font-size: 11px; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 40%; max-height: 260px; border-left: 0; border-top: 1px solid #e4e9e1; } .graph-inspector > header { min-height: 42px; padding: 0 12px; } .inspector-content { padding: 12px; } .inspector-actions { margin: 10px 0; } .graph-heading > div > span { font-size: 10px; } .graph-hud { top: 12px; right: 12px; left: 12px; } .graph-search { width: min(250px, 70%); } }
-@media (prefers-reduced-motion: reduce) { .graph-ground, .graph-edges g, .person-node, .graph-person-card { transition: none; } }
-</style>
-
-<style scoped>
-.is-readonly .graph-help{display:none}.is-readonly .person-node{cursor:pointer}
+.inspector-notes { margin: 0 0 20px; padding: 12px; border-radius: 10px; background: #f6f8fa; color: #5e6e7b; font-size: 13px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.inspector-section-title { display: flex; align-items: center; justify-content: space-between; margin: 20px 0 8px; }
+.inspector-section-title strong { font-size: 13px; font-weight: 600; }
+.inspector-section-title > span { display: grid; place-items: center; min-width: 22px; height: 22px; border-radius: 7px; background: #eef4f7; color: #638596; font-size: 11px; }
+.inspector-relation { display: flex; align-items: center; gap: 5px; border-bottom: 1px solid #edf0f3; }
+.relation-person { position: relative; display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; min-height: 68px; padding: 12px 20px 12px 0; border: 0; background: transparent; color: #24313d; text-align: left; font: inherit; }
+.relation-person > span { color: #788491; font-size: 12px; overflow-wrap: anywhere; }
+.relation-person strong { font-size: 14px; font-weight: 600; }
+.relation-person > svg { position: absolute; top: 26px; right: 0; color: #8ba0ae; }
+.relation-delete { min-width: 44px; border: 0; color: #96a2ad; }
+.inspector-no-relations { color: #788491; font-size: 13px; line-height: 1.75; }
+button:focus-visible { outline: 3px solid #b8cfdc; outline-offset: 2px; }
+.is-readonly .graph-help { display: none; }
+.is-readonly .person-node { cursor: pointer; }
+@media (max-width: 900px) { .graph-inspector { flex-basis: 240px; } .graph-help > span { display: none; } .graph-help { justify-content: flex-end; } }
+@media (max-width: 700px) { .graph-toolbar { padding: 10px 14px; gap: 8px; } .graph-heading { flex-direction: column; gap: 4px; } .graph-heading strong { font-size: 14px; } .graph-heading > span { font-size: 11px; } .graph-actions { gap: 5px; } .graph-text-button { padding: 0 10px; font-size: 12px; } .graph-hud { padding: 0 14px 12px; gap: 8px; } .graph-mode { padding: 0 10px; font-size: 11px; } .graph-search { width: auto; flex: 1; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 34%; max-height: 260px; border-left: 0; border-top: 1px solid #e1e7ec; } .graph-inspector > header { min-height: 48px; padding: 0 12px; } .inspector-content { padding: 14px; } .inspector-actions { margin: 12px 0; } }
+@media (prefers-reduced-motion: reduce) { .graph-edges g, .person-node, .graph-person-card { transition: none; } }
 </style>

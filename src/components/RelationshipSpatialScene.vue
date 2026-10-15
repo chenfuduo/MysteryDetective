@@ -175,7 +175,7 @@ function init() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.05
   renderer.shadowMap.enabled = props.people.length <= 28
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  renderer.shadowMap.type = THREE.PCFShadowMap
 
   scene = new THREE.Scene()
   scene.background = new THREE.Color('#080a0f')

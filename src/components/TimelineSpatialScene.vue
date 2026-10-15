@@ -54,7 +54,7 @@ function init() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.02
   renderer.shadowMap.enabled = props.events.length <= 36
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  renderer.shadowMap.type = THREE.PCFShadowMap
   renderer.setClearColor(0x000000, 0)
 
   scene = new THREE.Scene()

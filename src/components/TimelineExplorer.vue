@@ -272,7 +272,14 @@ function scheduleRedraw() {
   if (redrawFrame) cancelAnimationFrame(redrawFrame)
   redrawFrame = requestAnimationFrame(() => {
     if (plotElement.value) plotWidth.value = plotElement.value.clientWidth
-    for (const side of sides) instances[side]?.redraw()
+    const range = timeWindow.value
+    for (const side of sides) {
+      const instance = instances[side]
+      if (!instance) continue
+      // Reapply the viewport once the flex panel has its final dimensions.
+      if (range) instance.setWindow(range.start, range.end, { animation: false })
+      instance.redraw()
+    }
     redrawFrame = 0
   })
 }
@@ -479,9 +486,9 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body" :disabled="!fullscreen">
-    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional, 'is-webgl': dimensional && spatialSceneReady }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
+    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional, 'is-webgl': dimensional && spatialSceneReady, 'has-detail': Boolean(selectedEvent || selectedCluster) }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
       <header class="explorer-toolbar">
-        <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>{{ fullscreen ? '时间线' : `${visibleEvents.length} 个事件` }}</strong><span>{{ fullscreen ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `共 ${allEvents.length} 个已确认事件` }}</span></div></div>
+        <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>时间线</strong><span>{{ personId ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `${allEvents.length} 个事件` }}</span></div></div>
         <label class="person-filter"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
         <div class="explorer-view-toggle" aria-label="时间线显示方式"><button :class="{ active: !dimensional }" :aria-pressed="!dimensional" @click="dimensional = false"><UiIcon name="list" :size="17" />阅读</button><button :class="{ active: dimensional }" :aria-pressed="dimensional" @click="dimensional = true"><UiIcon name="cube" :size="17" />空间</button></div>
         <button class="explorer-button fit-button" @click="fitAll"><UiIcon name="restore" :size="17" />显示全部</button>
@@ -489,13 +496,12 @@ onUnmounted(() => {
       </header>
       <div class="explorer-scale-row">
         <div class="explorer-layout-toggle" role="group" aria-label="时间线排列方式"><button :class="{ active: layoutMode === 'proportional' }" :aria-pressed="layoutMode === 'proportional'" @click="layoutMode = 'proportional'">按时间比例</button><button :class="{ active: layoutMode === 'sequence' }" :aria-pressed="layoutMode === 'sequence'" @click="layoutMode = 'sequence'">按事件顺序</button></div>
-        <span class="explorer-hint"><UiIcon name="move" :size="15" />拖动平移 · 双指缩放 · 点事件看详情</span>
+        <label v-if="allEvents.length && layoutMode === 'proportional'" class="density-toggle" :title="densitySummary"><input v-model="densityEnabled" type="checkbox" />收拢密集事件</label>
+        <span class="explorer-hint"><UiIcon name="move" :size="15" />拖动平移 · 双指缩放</span>
       </div>
-      <div v-if="allEvents.length && layoutMode === 'proportional'" class="density-controls"><label class="density-toggle"><input v-model="densityEnabled" type="checkbox" />收拢密集事件</label><span aria-live="polite">{{ densitySummary }}</span></div>
       <div v-if="allEvents.length" class="explorer-stage">
         <article class="timeline-lane unified-lane">
-          <div class="lane-heading"><strong>事件时间线</strong><span class="timeline-legend"><i class="dated-swatch"></i>有年份 {{ datedCount }}<i class="yearless-swatch"></i>无年份 {{ yearlessCount }}</span><small>{{ visibleEvents.length }} 个事件</small></div>
-          <p class="timeline-reference"><template v-if="layoutMode === 'sequence'">按时间先后紧凑排列，间距不代表时长；人物筛选保留原位置。</template><template v-else-if="yearlessCount">{{ datedCount ? `无年份事件按月日对齐至 ${referenceYear} 年的位置，仅用于显示，未补全年份。` : '按月日与时刻排列，卡片保留无年份标记。' }}</template><template v-else>按实际时间差排列；人物筛选保留原位置。</template></p>
+          <div class="lane-heading"><strong>{{ layoutMode === 'sequence' ? '按事件顺序' : '按实际时间' }}</strong><span class="timeline-legend"><template v-if="datedCount"><i class="dated-swatch"></i>有年份</template><template v-if="yearlessCount"><i class="yearless-swatch"></i>无年份</template></span></div>
           <div ref="plotElement" class="unified-chart">
             <TimelineSpatialScene v-if="dimensional" :container="plotElement" :events="allEvents" :axis-events="axisEvents" :selected-id="selectedId" @ready="timelineSpatialState" />
             <div v-for="side in sides" :key="side" class="timeline-half" :class="`half-${side}`"><div class="lane-chart" @pointerdown.capture="beginChartPointer" @pointermove.capture="moveChartPointer" @click.capture="selectChartEvent"><div :ref="element => setChartElement(side, element)" class="explorer-vis-host"></div></div></div>
@@ -540,28 +546,24 @@ onUnmounted(() => {
 .explorer-button:active, .explorer-view-toggle button:active { background: #eaf0f5; }
 .fullscreen-button { color: #fff; background: #344e64; border-color: #344e64; }
 .fullscreen-button:active { background: #263e52; }
-.explorer-scale-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 0 20px 12px; flex-shrink: 0; background: #fff; border-bottom: 1px solid #e5eaef; }
+.explorer-scale-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; padding: 0 20px 12px; flex-shrink: 0; background: #fff; border-bottom: 1px solid #e5eaef; }
 .explorer-layout-toggle { display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid #e5eaef; border-radius: 12px; background: #f4f6f8; flex-shrink: 0; }
 .explorer-layout-toggle button { border: 0; border-radius: 9px; background: transparent; color: #7b8894; padding: 0 14px; min-height: 44px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; transition: background .15s, color .15s; }
 .explorer-layout-toggle button.active { background: #fff; color: #324e66; font-weight: 600; box-shadow: 0 1px 3px #24313d0c; }
 .explorer-layout-toggle button:focus-visible, .explorer-button:focus-visible, .explorer-view-toggle button:focus-visible { outline: 2px solid #7f9db4; outline-offset: 2px; }
-.explorer-hint { display: flex; align-items: center; gap: 6px; color: #8a96a2; font-size: 12px; }
-.density-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 14px; flex-shrink: 0; padding: 4px 20px; border-bottom: 1px solid #e5eaef; background: #fff; }
+.explorer-hint { display: flex; align-items: center; gap: 6px; margin-left: auto; color: #8a96a2; font-size: 12px; }
 .density-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; margin: 0; color: #526879; font-size: 12px; cursor: pointer; }
 .density-toggle input { width: 17px; height: 17px; margin: 0; accent-color: var(--explorer-accent); }
-.density-controls > span { color: #8a96a2; font-size: 11px; }
-.explorer-stage { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; padding: 14px; overflow: hidden; }
-.timeline-lane { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid #e1e7ed; border-radius: 15px; background: #fff; }
-.lane-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; flex-shrink: 0; padding: 15px 18px 6px; color: #354a5c; }
-.lane-heading strong { font-size: 13px; font-weight: 650; }
-.lane-heading small { margin-left: auto; color: #8a96a2; font-size: 11px; }
-.timeline-legend { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px; color: #7a8996; font-size: 11px; }
+.explorer-stage { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 14px 12px; overflow: hidden; }
+.timeline-lane { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; }
+.lane-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; flex-shrink: 0; padding: 2px 2px 10px; color: #738392; }
+.lane-heading strong { font-size: 11px; font-weight: 500; }
+.timeline-legend { display: inline-flex; margin-left: auto; align-items: center; flex-wrap: wrap; gap: 7px; color: #7a8996; font-size: 11px; }
 .timeline-legend i { display: inline-block; width: 8px; height: 8px; margin-left: 5px; border: 1px solid; border-radius: 3px; }
 .timeline-legend i:first-child { margin-left: 0; }
 .timeline-legend .dated-swatch { background: #edf3f7; border-color: #afc2d2; }
 .timeline-legend .yearless-swatch { background: #f7f3ec; border-color: #d4c6b1; }
-.timeline-reference { flex-shrink: 0; margin: 0; padding: 0 18px 12px; color: #8b97a2; font-size: 11px; line-height: 1.65; }
-.unified-chart { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); flex: 1; min-width: 0; min-height: 0; margin: 0 16px; overflow: hidden; isolation: isolate; background: #fbfcfd; border-radius: 8px; }
+.unified-chart { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); flex: 1; min-width: 0; min-height: 0; margin: 0; overflow: hidden; isolation: isolate; background: #fbfcfd; border: 0; border-radius: 8px; }
 .timeline-half { position: relative; z-index: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .lane-chart { position: relative; display: flex; flex: 1; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .explorer-vis-host { flex: 1; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
@@ -577,7 +579,7 @@ onUnmounted(() => {
 .shared-axis-dot.is-selected { z-index: 3; border-color: #486b86; background: #486b86; box-shadow: 0 0 0 4px #486b8616; }
 .lane-empty { position: absolute; z-index: 4; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #7e8d9a; font-size: 13px; background: #fbfcfdf2; }
 .lane-empty button { min-height: 44px; padding: 0 14px; background: #eef3f7; border: 0; border-radius: 10px; color: #486b86; font: inherit; font-size: 13px; }
-.lane-overview { position: relative; height: 26px; flex-shrink: 0; margin: 12px 16px; border: 1px solid #e2e8ee; border-radius: 7px; background: #f3f6f9; overflow: hidden; cursor: pointer; touch-action: none; }
+.lane-overview { position: relative; height: 26px; flex-shrink: 0; margin: 10px 0 0; border: 1px solid #e2e8ee; border-radius: 7px; background: #f3f6f9; overflow: hidden; cursor: pointer; touch-action: none; }
 .lane-overview i { position: absolute; top: 6px; width: 3px; height: 12px; border-radius: 2px; background: #89a1b5; transform: translateX(-50%); pointer-events: none; }
 .lane-overview i.is-yearless { background: #b7a38a; }
 .lane-overview i.is-hidden { opacity: .16; }
@@ -620,6 +622,7 @@ onUnmounted(() => {
 .cluster-members em { color: #6989a2; font-size: 11px; font-style: normal; }
 .event-cluster-panel footer { flex-shrink: 0; padding: 8px 18px; border-top: 1px solid #e8edf2; }
 .event-cluster-panel footer button { width: 100%; }
+.explorer-vis-host :deep(.vis-shadow) { display: none !important; }
 .explorer-vis-host :deep(.vis-timeline) { border: 0; font-family: inherit; background: transparent; }
 .explorer-vis-host :deep(.vis-panel.vis-center), .explorer-vis-host :deep(.vis-panel.vis-bottom), .explorer-vis-host :deep(.vis-panel.vis-top) { border: 0; }
 .explorer-vis-host :deep(.vis-time-axis .vis-grid.vis-minor) { border-color: #e5ecf144; }
@@ -646,8 +649,20 @@ onUnmounted(() => {
 .is-webgl .explorer-vis-host :deep(.vis-item.vis-box), .is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box), .is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-box), .is-webgl .explorer-vis-host :deep(.vis-item.vis-selected.vis-box) { border-color: transparent !important; background: transparent !important; box-shadow: none !important; }
 .is-webgl .explorer-vis-host :deep(.vis-item.vis-selected.vis-box) { border-color: #86a3ba !important; }
 @keyframes detail-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-@media (max-width: 950px) { .explorer-toolbar { gap: 8px; padding: 12px 14px 10px; } .explorer-heading strong { font-size: 15px; } .person-filter { min-width: 120px; } .explorer-button { padding: 0 11px; font-size: 12px; } .explorer-view-toggle button { padding: 0 9px; font-size: 12px; } .explorer-scale-row { padding: 0 14px 10px; } .explorer-hint { font-size: 11px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 14px; } .timeline-reference { padding-inline: 14px; } .unified-chart { margin-inline: 12px; } .lane-overview { margin-inline: 12px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
+@media (max-width: 950px) { .explorer-toolbar { gap: 8px; padding: 12px 14px 10px; } .explorer-heading strong { font-size: 15px; } .person-filter { min-width: 120px; } .explorer-button { padding: 0 11px; font-size: 12px; } .explorer-view-toggle button { padding: 0 9px; font-size: 12px; } .explorer-scale-row { padding: 0 14px 10px; } .explorer-hint { font-size: 11px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 2px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
+@media (orientation: landscape) and (min-width: 760px) {
+  .timeline-explorer.has-detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 300px); grid-template-rows: auto auto minmax(0, 1fr); }
+  .has-detail .explorer-toolbar, .has-detail .explorer-scale-row { grid-column: 1 / -1; }
+  .has-detail .explorer-stage { grid-column: 1; grid-row: 3; }
+  .has-detail .event-detail, .has-detail .event-cluster-panel { grid-column: 2; grid-row: 3; width: auto; height: auto; min-width: 0; min-height: 0; max-height: none; margin: 10px 14px 12px 0; }
+  .has-detail .event-detail { flex-direction: column; align-items: stretch; gap: 18px; padding: 20px; }
+  .has-detail .detail-main { flex: 0 0 auto; min-width: 0; }
+  .has-detail .detail-time { padding-right: 22px; }
+  .has-detail .detail-evidence { flex: 0 0 auto; min-width: 0; max-width: none; }
+  .has-detail .detail-actions { align-self: stretch; max-width: none; margin-top: auto; }
+  .has-detail .detail-actions button { width: 100%; }
+}
 @media (orientation: portrait) { .event-detail { max-height: 35%; flex-wrap: wrap; gap: 12px; padding: 16px 52px 16px 18px; } .detail-main { flex-basis: 100%; } .detail-evidence { flex-basis: 100%; max-width: none; } .detail-actions { max-width: none; } .detail-main h3 { font-size: 15px; } .event-cluster-panel { flex-basis: 35%; max-height: 35%; } }
-@media (max-width: 650px) { .explorer-heading { width: calc(100% - 140px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .explorer-hint { display: none; } .density-controls { padding: 4px 14px; } .density-controls > span { display: none; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .timeline-reference { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
+@media (max-width: 650px) { .explorer-heading { width: calc(100% - 140px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .explorer-hint { display: none; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button, .explorer-layout-toggle button { transition: none; } }
 </style>

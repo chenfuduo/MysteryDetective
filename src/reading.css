@@ -192,3 +192,39 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .library-current { font-size: 9px; }
 }
 @media (prefers-reduced-motion: reduce) { .clue-card, .script-library-item, .primary-button, .secondary-button { transition: none; } }
+
+/* The portrait timeline uses the same reading hierarchy as the graph. */
+.timeline-controls { background: #fff; border-color: #e0e7ed; border-radius: 12px; padding: 14px 16px; margin-bottom: 18px; }
+.timeline-controls label>span { color: #8b99a5; font-weight: 500; font-size: 11px; }
+.timeline-controls select { min-height: 44px; color: #526e81; background: #f8fafc; border-color: #dce5ed; border-radius: 9px; font-size: 13px; }
+.timeline-visible-count { color: #98a5af; font-size: 11px; }
+.timeline-list { margin: 0; padding: 8px 20px; border: 1px solid #e1e7ed; border-radius: 14px; background: #fff; }
+.timeline-list::before { left: 27px; top: 31px; bottom: 35px; width: 1px; background: #dde6ed; }
+.timeline-event { grid-template-columns: 16px 136px minmax(0,1fr) auto; gap: 12px; padding: 22px 0; border-color: #eef2f5; }
+.timeline-event:last-child { border-bottom: 0; }
+.timeline-event-marker { width: 14px; height: 14px; margin-top: 5px; border-width: 3px; border-color: #a3b9c8; }
+.timeline-event-date { color: #637f92; font-size: 12px; font-weight: 600; line-height: 1.7; }
+.yearless-pill { color: #9b846b; background: #f6f2eb; border-radius: 4px; font-size: 10px; }
+.timeline-marker-action { display: block; min-height: 28px; color: #9aa7b1; font-size: 10px; font-weight: 400; }
+.timeline-event-content h2 { color: #314958; font-size: 15px; font-weight: 550; line-height: 1.75; margin-bottom: 5px; }
+.timeline-event-refs span { background: #f0f4f7; color: #8096a5; font-size: 11px; }
+.timeline-event-refs button { min-height: 30px; color: #6a899e; font-size: 11px; }
+.row-actions { gap: 2px; }
+.row-actions button { width: 34px; min-height: 36px; display: grid; place-items: center; border-radius: 8px; color: #9baab6; }
+.row-actions button:active { background: #edf3f7; color: #55788f; }
+.mobile-nav { background: #fffffffa; border-color: #e1e7ed; }
+.mobile-nav button { color: #99a5ae; font-weight: 500; }
+.mobile-nav button.active { color: #466879; }
+.mobile-nav button.active::before { background: #466879; }
+.board-toolbar { background: #fff; border-color: #e0e7ed; color: #6d879a; }
+.board-toolbar button { color: #6d879a; }
+.board-canvas { border-color: #e0e7ed; background-color: #fbfcfd; }
+@media (max-width: 600px) {
+  .timeline-list { padding-inline: 14px; }
+  .timeline-list::before { left: 21px; }
+  .timeline-event { grid-template-columns: 16px minmax(0,1fr) auto; gap: 6px 11px; padding-block: 18px; }
+  .timeline-event-date { grid-column: 2; }
+  .timeline-event-content { grid-column: 2; }
+  .timeline-event .row-actions { grid-column: 3; grid-row: 1 / span 2; }
+  .timeline-event-content h2 { font-size: 14px; }
+}

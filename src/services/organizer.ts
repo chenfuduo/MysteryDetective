@@ -3,6 +3,7 @@ import { reactive } from 'vue'
 import { SecureStorage } from '@aparajita/capacitor-secure-storage'
 import type { ClueRecord, OrganizationSnapshot } from './vault'
 import { resolveAiProvider, providerLabel, type AiProvider } from './aiProvider'
+import { chooseOrganizationModel, type OrganizationModelInput } from './openaiModelRouting'
 
 type RawPerson = { name?: unknown; aliases?: unknown; source?: unknown; quote?: unknown }
 type RawRelationship = { from?: unknown; to?: unknown; label?: unknown; source?: unknown; quote?: unknown }
@@ -64,7 +65,7 @@ function sourceQuote(sourceNo: number, quote: unknown, clues: ClueRecord[]): { c
   return { clue, quote: excerpt }
 }
 type RunPhase = 'idle' | 'extracting' | 'checking' | 'complete' | 'error' | 'local' | 'paused'
-export const organizationRun = reactive({ phase: 'idle' as RunPhase, provider: null as AiProvider | 'local' | null, message: '', lastError: '' })
+export const organizationRun = reactive({ phase: 'idle' as RunPhase, provider: null as AiProvider | 'local' | null, message: '', lastError: '', model: '', modelReason: '', models: [] as string[] })
 type DateToken = { index: number; end: number; year: string; month: number; day: number; value: string }
 type ClockToken = { index: number; end: number; hour: number; minute: number | null; approximate: boolean; value: string }
 type CheckedTime = { startsAt: string; precision: 'date' | 'hour' | 'minute'; approximate: boolean }
@@ -269,7 +270,7 @@ function localTimelineFallback(clues: ClueRecord[], reason: 'offline' | 'quota',
   }
   const snapshot: OrganizationSnapshot = { id: '', scriptId: '', updatedAt: new Date().toISOString(), people: [], relationships: [], cluePoints: [], ...previous, timeline: mergeTimeline(previous?.timeline || [], timeline), analysis: { provider: 'local', localReason: reason, reviewed: false } }
   snapshot.timelineAudit = auditTimeline(clues, snapshot.timeline, new Map(), false, `${reason === 'offline' ? '网络不可用' : 'API 额度不足'}，已使用本地时间扫描，请核对事件内容`)
-  organizationRun.phase = 'local'; organizationRun.provider = 'local'; organizationRun.message = reason === 'offline' ? '网络不可用，已保留 API 结果并使用本地扫描' : 'API 额度不足，已使用本地扫描'
+  organizationRun.model = ''; organizationRun.modelReason = ''; organizationRun.phase = 'local'; organizationRun.provider = 'local'; organizationRun.message = reason === 'offline' ? '网络不可用，已保留 API 结果并使用本地扫描' : 'API 额度不足，已使用本地扫描'
   return snapshot
 }
 function isNetworkUnavailable(error: unknown): boolean {
@@ -278,7 +279,7 @@ function isNetworkUnavailable(error: unknown): boolean {
   return /(network|internet|offline|connection|load failed|failed to fetch|could not connect|not connected)/i.test(message)
 }
 class OrganizationApiError extends Error {
-  constructor(message: string, readonly localReason?: 'offline' | 'quota') { super(message) }
+  constructor(message: string, readonly localReason?: 'offline' | 'quota', readonly invalidResult = false) { super(message) }
 }
 const organizationSystem = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
 时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分、十点二十七分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索必须从头扫描到最后一行，尤其检查后半部分和分项列表。
@@ -292,40 +293,61 @@ const organizationSystem = `你是剧本杀线索的文字整理工具。只整�
 输出纯 JSON：{"people":[{"name":"原文人名","aliases":[],"source":1,"quote":"原文连续摘录"}],"relationships":[{"from":"人物A","to":"人物B","label":"原文明说关系","source":1,"quote":"原文连续摘录"}],"timeline":[{"title":"原文明确动作","startsAt":"--06-16T22:27","precision":"minute","approximate":false,"people":[],"source":1,"quote":"原文连续摘录"}],"cluePoints":[{"source":1,"title":"简短主题","category":"通讯/财务/文书/影像/其他","tags":[],"quote":"原文连续摘录"}]}
 其他约束：人物姓名须逐字出现；关系须原文明说，不因共同出现推断。每项必须有 source 和逐字 quote。只归纳明确事实，不判断证词真假、不分析动机/因果、不预测凶手/身份、不揭示答案、不补全未知经过。`
 
-async function requestOrganization(provider: AiProvider, apiKey: string, user: string): Promise<RawResult> {
+async function requestOrganization(provider: AiProvider, apiKey: string, user: string, input: OrganizationModelInput, shouldPause?: () => boolean): Promise<RawResult> {
   const label = providerLabel(provider)
   const endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions'
-  const data = { model: provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek-chat', stream: false, ...(provider === 'openai' ? { reasoning_effort: 'none', max_completion_tokens: 12000 } : { temperature: 0.2, max_tokens: 6000 }), response_format: { type: 'json_object' }, messages: [{ role: 'system', content: organizationSystem }, { role: 'user', content: user }] }
-  let status: number, responseData: unknown
-  try {
-    if (Capacitor.isNativePlatform()) {
-      const response = await CapacitorHttp.post({ url: endpoint, connectTimeout: 15000, readTimeout: 90000, headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, data })
-      status = response.status; responseData = response.data
-    } else {
-      const response = await fetch(import.meta.env.DEV && provider === 'openai' ? '/__local-ai/openai/chat/completions' : endpoint, { method: 'POST', headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(90000), body: JSON.stringify(data) })
-      status = response.status; responseData = await response.json().catch(() => null)
+  // Only malformed/truncated Luna results can cause one extra paid request.
+  // Authentication, quota, network, and rate-limit errors never escalate models.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (shouldPause?.()) throw new OrganizationPausedError()
+    const plan = provider === 'openai' ? chooseOrganizationModel({ ...input, repairResult: attempt > 0 }) : null
+    const model = plan?.model || 'deepseek-chat'
+    organizationRun.model = model
+    organizationRun.modelReason = plan?.reason || '按出口 IP 选择 DeepSeek'
+    if (!organizationRun.models.includes(model)) organizationRun.models.push(model)
+    organizationRun.message = `${label} · ${model} 正在${input.task === 'extract' ? '提取 OCR 文字' : '核对时间'}${attempt ? '（格式补救）' : ''}`
+    const data = { model, stream: false, ...(plan ? { reasoning_effort: plan.reasoningEffort, max_completion_tokens: plan.maxCompletionTokens } : { temperature: 0.2, max_tokens: 6000 }), response_format: { type: 'json_object' }, messages: [{ role: 'system', content: organizationSystem }, { role: 'user', content: user }] }
+    try {
+      let status: number, responseData: unknown
+      try {
+        if (Capacitor.isNativePlatform()) {
+          const response = await CapacitorHttp.post({ url: endpoint, connectTimeout: 15000, readTimeout: 90000, headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, data })
+          status = response.status; responseData = response.data
+        } else {
+          const response = await fetch(import.meta.env.DEV && provider === 'openai' ? '/__local-ai/openai/chat/completions' : endpoint, { method: 'POST', headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(90000), body: JSON.stringify(data) })
+          status = response.status; responseData = await response.json().catch(() => null)
+        }
+      } catch (error) {
+        if (isNetworkUnavailable(error)) throw new OrganizationApiError('网络不可用', 'offline')
+        throw error
+      }
+      const apiError = (responseData as { error?: { code?: string; message?: string } } | null)?.error
+      if (status === 402 || (status === 429 && apiError?.code === 'insufficient_quota')) throw new OrganizationApiError(`${label} API 额度不足`, 'quota')
+      if (status < 200 || status >= 300) throw new OrganizationApiError(status === 401 ? `${label} API Key 无效，请在档案管理中更新` : `${label} ${model} 整理失败（HTTP ${status}），请稍后重试`)
+      const choice = (responseData as { choices?: { finish_reason?: string; message?: { content?: string | null } }[] } | null)?.choices?.[0]
+      if (choice?.finish_reason === 'length') throw new OrganizationApiError('整理结果过长，未能完整返回，请减少线索后重试', undefined, true)
+      const content = choice?.message?.content
+      if (!content) throw new OrganizationApiError(`${label} 没有返回整理结果，请重试`)
+      let result: RawResult
+      try { result = JSON.parse(content) as RawResult } catch { throw new OrganizationApiError(`${label} 返回内容格式异常，请重试`, undefined, true) }
+      if (provider === 'openai' && (!result || typeof result !== 'object' || !['people', 'relationships', 'timeline', 'cluePoints'].every(key => Array.isArray(result[key as keyof RawResult])))) throw new OrganizationApiError(`${model} 返回的整理字段不完整`, undefined, true)
+      return result
+    } catch (error) {
+      if (attempt === 0 && plan?.model === 'gpt-6-luna' && error instanceof OrganizationApiError && error.invalidResult) continue
+      throw error
     }
-  } catch (error) {
-    if (isNetworkUnavailable(error)) throw new OrganizationApiError('网络不可用', 'offline')
-    throw error
   }
-  const apiError = (responseData as { error?: { code?: string; message?: string } } | null)?.error
-  if (status === 402 || (status === 429 && apiError?.code === 'insufficient_quota')) throw new OrganizationApiError(`${label} API 额度不足`, 'quota')
-  if (status < 200 || status >= 300) throw new OrganizationApiError(status === 401 ? `${label} API Key 无效，请在档案管理中更新` : `${label} 整理失败（HTTP ${status}），请稍后重试`)
-  const choice = (responseData as { choices?: { finish_reason?: string; message?: { content?: string | null } }[] } | null)?.choices?.[0]
-  if (choice?.finish_reason === 'length') throw new OrganizationApiError('整理结果过长，未能完整返回，请减少线索后重试')
-  const content = choice?.message?.content
-  if (!content) throw new OrganizationApiError(`${label} 没有返回整理结果，请重试`)
-  try { return JSON.parse(content) as RawResult } catch { throw new OrganizationApiError(`${label} 返回内容格式异常，请重试`) }
+  throw new OrganizationApiError('模型整理未完成，请重试')
 }
 
 export async function organizeClues(clues: ClueRecord[], context: OrganizationContext = {}): Promise<OrganizationSnapshot> {
   organizationRun.lastError = ''; organizationRun.message = '正在准备 OCR 文字'; organizationRun.phase = 'extracting'; organizationRun.provider = null
+  organizationRun.model = ''; organizationRun.modelReason = ''; organizationRun.models = []
   let first: NormalizedResult | undefined
   const saved = context.checkpoint
   const fingerprint = context.fingerprint || JSON.stringify(clues.map(clue => [clue.id, clue.ocrText]))
   const resumed = saved && saved.version === 1 && saved.fingerprint === fingerprint && saved.clueIds.length === clues.length && clues.every(clue => saved.clueIds.includes(clue.id)) ? saved : null
-  if (resumed) { first = { snapshot: structuredClone(resumed.snapshot), rejected: new Map(resumed.rejected) }; organizationRun.phase = 'checking' }
+  if (resumed) { first = { snapshot: structuredClone(resumed.snapshot), rejected: new Map(resumed.rejected) }; organizationRun.phase = 'checking'; organizationRun.models = [...(resumed.snapshot.analysis?.models || [])]; organizationRun.model = organizationRun.models.at(-1) || '' }
   const saveStage = async (provider: AiProvider, stage: 'checking' | 'complete'): Promise<void> => {
     if (!first) return
     await context.onCheckpoint?.({ version: 1, fingerprint, clueIds: clues.map(clue => clue.id), provider, stage, snapshot: structuredClone(first.snapshot), rejected: [...first.rejected], updatedAt: new Date().toISOString() })
@@ -352,15 +374,16 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     organizationRun.provider = provider; organizationRun.message = first ? `${providerLabel(provider)} 正在恢复时间核对` : `${providerLabel(provider)} 正在整理 OCR 文字`
     const apiKey = await readApiKey(provider)
     const sources = JSON.stringify(sourceClues)
+    const modelInput: OrganizationModelInput = { task: 'extract', sourceChars: sourceClues.reduce((total, clue) => total + clue.text.length, 0), clockCount: clues.reduce((total, clue) => total + scanClocks(clue.ocrText).length, 0) }
     stopIfRequested()
     if (!first) {
-      try { first = normalize(await requestOrganization(provider, apiKey, `完整整理以下单个剧本的 OCR 线索。逐条从头到尾扫描，不能省略后半段时间。只返回规定 JSON。\n${sources}`), clues) }
+      try { first = normalize(await requestOrganization(provider, apiKey, `完整整理以下单个剧本的 OCR 线索。逐条从头到尾扫描，不能省略后半段时间。只返回规定 JSON。\n${sources}`, modelInput, context.shouldPause), clues) }
       catch (error) {
         if (context.shouldPause?.()) { organizationRun.lastError = error instanceof Error ? error.message : String(error); stopIfRequested() }
         if (error instanceof OrganizationApiError && error.localReason) { await context.onStage?.('failed', organizationRun.lastError || organizationRun.message); return localTimelineFallback(clues, error.localReason) }
         throw error
       }
-      first.snapshot.analysis = { provider, reviewed: false }
+      first.snapshot.analysis = { provider, reviewed: false, models: [...organizationRun.models] }
       first.snapshot.timelineAudit = auditTimeline(clues, first.snapshot.timeline, first.rejected, false)
       // Persist extraction before starting another request; a restart only repeats the audit.
       await saveStage(provider, 'checking')
@@ -371,9 +394,20 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
     let reviewed = false, reviewError = ''
     // This inventory only directs the API to literal OCR spans; it never creates events online.
     const clockAnchors = clues.map(clue => ({ source: clue.number, occurrences: scanClocks(clue.ocrText).map(clock => ({ offset: clock.index, text: clue.ocrText.slice(clock.index, clock.end), context: clue.ocrText.slice(Math.max(0, clock.index - 48), Math.min(clue.ocrText.length, clock.end + 96)) })) }))
+    // Count literal, dated clock anchors only. Unclear dates do not trigger a paid upgrade.
+    const clockCoverage = clues.flatMap(clue => {
+      const dates = scanDates(clue.ocrText)
+      return scanClocks(clue.ocrText).flatMap(clock => {
+        const date = dateForClock(dates, clock)
+        if (!date) return []
+        const covered = first!.snapshot.timeline.some(item => item.sourceNo === clue.number && item.startsAt === `${date.value}${clock.value}` && quoteOffsets(clue.ocrText, item.quote).some(offset => clock.index >= offset && clock.end <= offset + item.quote.length))
+        return [covered]
+      })
+    })
+    const auditModelInput: OrganizationModelInput = { ...modelInput, task: 'timeline-audit', clockCount: clockCoverage.length, missingClocks: clockCoverage.filter(covered => !covered).length }
     stopIfRequested()
     try {
-      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}`), clues)
+      const second = normalize(await requestOrganization(provider, apiKey, `这是独立的第二轮时间完整性核对。重新扫描下面每份 OCR 原文，从第一行到最后一行；先列出每一处日期及钟表时刻，再逐一对应事件。重点检查后半部分、仅写时刻的分项、同句多个时刻、跨段沿用最近日期、时段换算和约时。不要根据其他分析的数量提前结束。仅返回完整 timeline 数组，people、relationships、cluePoints 均为空数组，每条仍必须包含 source 和逐字 quote。附录的时刻锚点只是本地扫描找到的原文位置，用于逐项核对遗漏；它可能不完整，不代表正确日期、事件或最终答案，必须继续独立扫描全文。时刻锚点不能替代原文，不要把时长、房号和编号当成时刻。\nOCR 原文：${sources}\n待核对原文时刻锚点：${JSON.stringify(clockAnchors)}`, auditModelInput, context.shouldPause), clues)
       first.snapshot.timeline = mergeTimeline(first.snapshot.timeline, second.snapshot.timeline)
       for (const [sourceNo, count] of second.rejected) first.rejected.set(sourceNo, Math.max(first.rejected.get(sourceNo) || 0, count))
       reviewed = true
@@ -385,7 +419,7 @@ export async function organizeClues(clues: ClueRecord[], context: OrganizationCo
       reviewError = `第二轮核对未完成：${organizationRun.lastError}；已保留首轮整理结果，再次整理将仅重试核对`
     }
     // Keep the original extraction provider on resume, even if region routing changed.
-    first.snapshot.analysis = { provider: resumed ? resumed.provider : provider, reviewed }
+    first.snapshot.analysis = { provider: resumed ? resumed.provider : provider, reviewed, models: [...organizationRun.models] }
     first.snapshot.timelineAudit = auditTimeline(clues, first.snapshot.timeline, first.rejected, reviewed, reviewError)
     // A complete checkpoint closes the crash window between API success and workflow persistence.
     await saveStage(resumed ? resumed.provider : provider, reviewed ? 'complete' : 'checking')

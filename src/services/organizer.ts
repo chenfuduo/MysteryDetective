@@ -153,7 +153,7 @@ function dateForClock(dates: DateToken[], clock: ClockToken): DateToken | undefi
 }
 const timeOfDayTerms = ['凌晨', '清晨', '早晨', '早上', '上午', '中午', '下午', '午后', '傍晚', '晚上', '晚间', '夜里', '夜间', '深夜', '半夜']
 function scanPeriods(value: string): PeriodToken[] {
-  const pattern = new RegExp(timeOfDayTerms.slice(0, -1).join('|') + '|晚', 'g')
+  const pattern = new RegExp(timeOfDayTerms.join('|'), 'g')
   const clocks = scanClocks(value)
   return [...value.matchAll(pattern)].flatMap(match => {
     const index = match.index ?? 0, end = index + match[0].length
@@ -434,7 +434,7 @@ class OrganizationApiError extends Error {
   constructor(message: string, readonly localReason?: 'offline' | 'quota', readonly invalidResult = false) { super(message) }
 }
 const organizationSystem = `你是剧本杀线索的文字整理工具。只整理用户提供的 OCR 原文，不搜索外部资料，不推理剧情。
-时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记、钟表数字结构和时段词。没有具体时分但原文明确写出凌晨、清晨、早晨、早上、上午、中午、下午、午后、傍晚、晚上、晚间、夜里、夜间、深夜、半夜或晚时，也必须输出时间线事件，在 JSON 的 timeOfDay 字段逐字保留该时段；startsAt 只填写明确或沿用的日期，precision 为 date，不得换算、猜测具体时分。若没有明确日期，不得猜日期；仍应报告该时段并留待人工补日期。分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分、十点二十七分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索必须从头扫描到最后一行，尤其检查后半部分和分项列表。
+时间信息优先保证完整、精确。时间抽取必须独立于事件标题、人物、地点、分类等文字字段：分别扫描日期标记、钟表数字结构和时段词。没有具体时分但原文明确写出凌晨、清晨、早晨、早上、上午、中午、下午、午后、傍晚、晚上、晚间、夜里、夜间、深夜、半夜等时段，也必须输出时间线事件，在 JSON 的 timeOfDay 字段逐字保留该时段；startsAt 只填写明确或沿用的日期，precision 为 date，不得换算、猜测具体时分。若没有明确日期，不得猜日期；仍应报告该时段并留待人工补日期。分别扫描日期标记和钟表数字结构（例如 10:27、10点27分、10时27分、十点二十七分），再按原文位置关联。早晨、晚间等时段词只帮助换算 24 小时制，不是识别时刻的前提；日期与时刻之间即使夹着人物、地点、括号说明或其他描述，也要继续识别。每条线索必须从头扫描到最后一行，尤其检查后半部分和分项列表。
 时间线规则：
 1. 每个明确时刻单独对应事件：到达、离开、打电话等发生在不同时刻时必须分开。原文写了几点几分，startsAt 必须保留分钟；例如“6月16日晚10点27分进入，10点29分离开”必须输出 --06-16T22:27 和 --06-16T22:29。只写到小时就只保留小时，不能补 :00。
 2. 无年份使用 --MM-DD、--MM-DDTHH 或 --MM-DDTHH:mm；明确有年份使用 YYYY-MM-DD、YYYY-MM-DDTHH 或 YYYY-MM-DDTHH:mm。不得猜年份、日期、时刻或分钟。

@@ -165,10 +165,7 @@ function eventContent(event: TimelineRecord) {
   const title = document.createElement('span')
   title.className = 'timeline-node-title'
   title.textContent = eventTitle(event)
-  const precision = document.createElement('span')
-  precision.className = 'timeline-node-precision'
-  precision.textContent = `${event.approximate ? '约时 · ' : ''}${precisionLabel(event)}`
-  content.append(time, title, precision)
+  content.append(time, title)
   return content
 }
 function clusterLabel(group: DensityGroup) {
@@ -339,52 +336,6 @@ async function syncCharts() {
 }
 function fitAll() { applyWindow(fullWindow()) }
 function timelineSpatialState(ready: boolean) { spatialSceneReady.value = ready }
-const axisTicks = computed(() => {
-  const range = timeWindow.value
-  if (!range) return []
-  const start = range.start.getTime(), end = range.end.getTime(), span = end - start
-  if (layoutMode.value === 'sequence') {
-    let lastLeft = -Infinity
-    return orderedEvents.value.flatMap((event, index) => {
-      const position = (eventPosition(event) - start) / span * 100
-      const left = position * plotExtent.value / 100
-      if (position <= 2 || position >= 98 || left - lastLeft < 126) return []
-      lastLeft = left
-      return [{ id: event.id, left: `${position}%`, label: `第 ${index + 1} 个`, context: dateLabel(event.startsAt) }]
-    })
-  }
-  const target = span / Math.max(2, Math.floor(plotExtent.value / 126))
-  const intervals = [60_000, 5*60_000, 15*60_000, 30*60_000, 3600_000, 3*3600_000, 6*3600_000, 12*3600_000, 86400_000, 2*86400_000, 7*86400_000]
-  const interval = intervals.find(value => value >= target)
-  const cursor = new Date(start)
-  const monthStep = target > 365*86400_000 ? 12 * Math.ceil(target / (365*86400_000)) : target > 180*86400_000 ? 12 : target > 60*86400_000 ? 3 : 1
-  if (interval) {
-    cursor.setHours(0, 0, 0, 0)
-    cursor.setTime(cursor.getTime() + Math.ceil((start - cursor.getTime()) / interval) * interval)
-  } else {
-    cursor.setDate(1); cursor.setHours(0, 0, 0, 0)
-    cursor.setMonth(Math.floor(cursor.getMonth() / monthStep) * monthStep)
-    if (cursor.getTime() < start) cursor.setMonth(cursor.getMonth() + monthStep)
-  }
-  const ticks: { id: number; left: string; label: string; context: string }[] = []
-  const format = (date: Date, options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat('zh-CN-u-ca-gregory-nu-latn', options).format(date)
-  let previousDay = ''
-  while (cursor.getTime() <= end && ticks.length < 50) {
-    const position = (cursor.getTime() - start) / span * 100
-    const date = new Date(cursor)
-    const day = format(date, { month: 'numeric', day: 'numeric' })
-    const clock = interval !== undefined && interval < 86400_000
-    if (position > 2 && position < 98) ticks.push({
-      id: date.getTime(), left: `${position}%`,
-      label: clock ? format(date, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : format(date, { month: 'numeric', ...(interval ? { day: 'numeric' as const } : {}) }),
-      context: clock ? (day !== previousDay ? `${datedCount.value ? `${date.getFullYear()}年` : ''}${day}` : '') : (datedCount.value ? `${date.getFullYear()}年` : ''),
-    })
-    previousDay = day
-    if (interval) cursor.setTime(cursor.getTime() + interval)
-    else cursor.setMonth(cursor.getMonth() + monthStep)
-  }
-  return ticks
-})
 const axisEvents = computed(() => {
   const range = timeWindow.value
   if (!range) return []
@@ -609,15 +560,15 @@ onUnmounted(() => {
             <div ref="plotElement" class="unified-chart" :class="{ 'portrait-chart': isPortrait }">
               <TimelineSpatialScene v-if="dimensional" :container="plotElement" :events="allEvents" :axis-events="axisEvents" :selected-id="selectedId" @ready="timelineSpatialState" />
               <div v-if="isPortrait" class="portrait-timeline" @pointerdown.capture="beginPortraitPointer" @pointermove.capture="movePortraitPointer" @pointerup.capture="endPortraitPointer" @pointercancel.capture="endPortraitPointer" @click.capture="selectChartEvent">
-                <div class="shared-time-axis portrait-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="tick in axisTicks" :key="tick.id" class="shared-axis-tick portrait-axis-tick" :style="{ top: tick.left }"><span>{{ tick.label }}</span><small v-if="tick.context">{{ tick.context }}</small></i><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ top: `${item.position}%` }"></i></div>
+                <div class="shared-time-axis portrait-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ top: `${item.position}%` }"></i></div>
                 <button v-for="group in visibleDensityGroups" :key="group.id" class="portrait-event-card timeline-event-content" :class="[`half-${group.side}`, { 'timeline-node-yearless': group.visibleMembers.every(event => event.startsAt.startsWith('--')), 'timeline-node-mixed': group.visibleMembers.some(event => event.startsAt.startsWith('--')) && group.visibleMembers.some(event => !event.startsAt.startsWith('--')), 'is-selected': group.id === selectedClusterId || group.visibleMembers.some(event => event.id === selectedId) }]" :style="portraitCardStyle(group)" :data-event-id="group.members.length === 1 ? group.members[0]!.id : undefined" :data-cluster-id="group.members.length > 1 ? group.id : undefined" :aria-label="group.members.length > 1 ? `${clusterLabel(group)}，${group.visibleMembers.length} 个事件，展开逐条查看` : `${eventDateLabel(group.visibleMembers[0]!)}，${eventTitle(group.visibleMembers[0]!)}`">
                   <span class="timeline-node-time">{{ group.members.length > 1 ? clusterLabel(group) : `${group.visibleMembers[0]!.approximate ? '约 ' : ''}${eventDateLabel(group.visibleMembers[0]!)}` }}</span>
                   <span class="timeline-node-title">{{ group.members.length > 1 ? `${group.visibleMembers.length} 个事件` : eventTitle(group.visibleMembers[0]!) }}</span>
-                  <span class="timeline-node-precision">{{ group.members.length > 1 ? `${clusterKinds(group)} · 点击展开` : precisionLabel(group.visibleMembers[0]!) }}</span>
+                  <span v-if="group.members.length > 1" class="timeline-node-precision">{{ clusterKinds(group) }} · 点击展开</span>
                 </button>
               </div>
               <div v-for="side in sides" :key="side" v-show="!isPortrait" class="timeline-half" :class="`half-${side}`"><div class="lane-chart" @pointerdown.capture="beginChartPointer" @pointermove.capture="moveChartPointer" @click.capture="selectChartEvent"><div :ref="element => setChartElement(side, element)" class="explorer-vis-host"></div></div></div>
-              <div v-if="!isPortrait" class="shared-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="tick in axisTicks" :key="tick.id" class="shared-axis-tick" :style="{ left: tick.left }"><span>{{ tick.label }}</span><small v-if="tick.context">{{ tick.context }}</small></i><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ left: `${item.position}%` }"></i></div>
+              <div v-if="!isPortrait" class="shared-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ left: `${item.position}%` }"></i></div>
               <div v-if="!visibleEvents.length" class="lane-empty"><UiIcon name="filter" :size="24" /><span>没有该人物的时间事件</span><button @click="emit('update:personId', '')">查看全部人物</button></div>
             </div>
             <div class="lane-overview" aria-label="时间线全局导航" @pointerdown="navigateOverview"><span class="overview-window" :style="overviewWindow()"></span><i v-for="marker in overviewMarkers()" :key="marker.id" :style="overviewMarkerStyle(marker)" :class="{ 'is-hidden': !marker.visible, 'is-yearless': marker.yearless }"></i></div>

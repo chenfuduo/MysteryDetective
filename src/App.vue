@@ -1399,7 +1399,7 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
             <div class="page-header capture-header">
               <h1>线索库</h1>
               <div class="header-actions capture-actions">
-                <label class="capture-round-control"><select v-model="captureRound" :disabled="busy || !captureRoundReady" aria-label="当前搜证轮次"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select></label>
+                <label class="capture-round-control"><select v-model="captureRound" :disabled="busy || !captureRoundReady" aria-label="搜证轮次"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select></label>
                 <button class="secondary-button capture-import" :disabled="busy || !captureRoundReady" aria-label="选择照片录入线索" @click="importPhotos"><UiIcon name="image" :size="20" /><span>选照片</span></button>
                 <button class="primary-button capture-primary" :disabled="busy || !captureRoundReady" @click="capture"><UiIcon name="camera" :size="20" />拍照录入</button>
               </div>

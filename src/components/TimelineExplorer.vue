@@ -16,7 +16,7 @@ type PortraitPoint = { x: number; y: number; onCard: boolean }
 type PortraitGesture = { mode: 'pending' | 'pan' | 'pinch'; startY: number; startWindow: TimeWindow; startDistance: number; startPointTime: number; interactive: boolean }
 type DensityGroup = { id: string; side: Side; start: number; end: number; members: TimelineRecord[] }
 type VisibleDensityGroup = DensityGroup & { visibleMembers: TimelineRecord[] }
-const props = withDefaults(defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; readOnly?: boolean; sourceReviewEventIds?: string[] }>(), { sourceReviewEventIds: () => [] })
+const props = withDefaults(defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; displayMode?: 'axis' | 'list'; readOnly?: boolean; sourceReviewEventIds?: string[] }>(), { displayMode: 'axis', sourceReviewEventIds: () => [] })
 const emit = defineEmits<{
   'update:personId': [value: string]
   'edit-event': [event: TimelineRecord]
@@ -61,6 +61,7 @@ const visibleEvents = computed(() => allEvents.value.filter(event => !props.pers
 const datedCount = computed(() => allEvents.value.filter(event => !event.startsAt.startsWith('--')).length)
 const yearlessCount = computed(() => allEvents.value.length - datedCount.value)
 const orderedEvents = computed(() => [...allEvents.value].sort((a, b) => eventTime(a) - eventTime(b) || periodRank(a.timeOfDay) - periodRank(b.timeOfDay) || a.id.localeCompare(b.id)))
+const orderedVisibleEvents = computed(() => orderedEvents.value.filter(event => !props.personId || event.personIds.includes(props.personId)))
 // Coordinates always use every event in the script; filters only hide cards.
 const sequencePositions = computed(() => new Map(orderedEvents.value.map((event, index) => [event.id, sequenceOrigin + index * sequenceStep])))
 const eventSides = computed(() => new Map(orderedEvents.value.map((event, index) => [event.id, sides[index % 2]])))
@@ -486,6 +487,9 @@ watch(() => visibleDensityGroups.value.map(group => `${group.id}:${group.visible
 watch(layoutMode, value => {
   try { localStorage.setItem(`cluevault:timeline-layout:${encodeURIComponent(props.scriptId)}`, value) } catch {}
 })
+watch(() => props.displayMode, async mode => {
+  if (mode === 'axis') { await nextTick(); scheduleRedraw() }
+})
 watch(viewCacheKey, async () => {
   persistView()
   for (const side of sides) { instances[side]?.destroy(); instances[side] = null }
@@ -551,9 +555,9 @@ onUnmounted(() => {
       </header>
       <div v-if="allEvents.length" class="explorer-stage">
         <article class="timeline-lane unified-lane">
-          <div class="lane-heading"><strong>{{ layoutMode === 'sequence' ? '事件顺序' : '实际时间' }}</strong><span class="timeline-legend"><template v-if="datedCount"><i class="dated-swatch"></i>有年份</template><template v-if="yearlessCount"><i class="yearless-swatch"></i>无年份</template></span></div>
-          <div class="timeline-view-body" :class="{ 'is-portrait': isPortrait }">
-            <div ref="plotElement" class="unified-chart" :class="{ 'portrait-chart': isPortrait }">
+          <div class="lane-heading"><strong>{{ displayMode === 'list' ? '事件列' : layoutMode === 'sequence' ? '事件顺序' : '实际时间' }}</strong><span class="timeline-legend"><template v-if="datedCount"><i class="dated-swatch"></i>有年份</template><template v-if="yearlessCount"><i class="yearless-swatch"></i>无年份</template></span></div>
+          <div class="timeline-view-body" :class="{ 'is-portrait': isPortrait && displayMode === 'axis', 'is-event-list': displayMode === 'list' }">
+            <div v-show="displayMode === 'axis'" ref="plotElement" class="unified-chart" :class="{ 'portrait-chart': isPortrait }">
               <div v-if="isPortrait" class="portrait-timeline" @pointerdown.capture="beginPortraitPointer" @pointermove.capture="movePortraitPointer" @pointerup.capture="endPortraitPointer" @pointercancel.capture="endPortraitPointer" @click.capture="selectChartEvent">
                 <div class="shared-time-axis portrait-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ top: `${item.position}%` }"></i></div>
                 <button v-for="group in visibleDensityGroups" :key="group.id" class="portrait-event-card timeline-event-content" :class="[`half-${group.side}`, { 'timeline-node-yearless': group.visibleMembers.every(event => event.startsAt.startsWith('--')), 'timeline-node-mixed': group.visibleMembers.some(event => event.startsAt.startsWith('--')) && group.visibleMembers.some(event => !event.startsAt.startsWith('--')), 'is-selected': group.id === selectedClusterId || group.visibleMembers.some(event => event.id === selectedId) }]" :style="portraitCardStyle(group)" :data-event-id="group.members.length === 1 ? group.members[0]!.id : undefined" :data-cluster-id="group.members.length > 1 ? group.id : undefined" :aria-label="group.members.length > 1 ? `${clusterLabel(group)}，${group.visibleMembers.length} 个事件，展开逐条查看` : `${eventDateLabel(group.visibleMembers[0]!)}，${eventTitle(group.visibleMembers[0]!)}`">
@@ -566,7 +570,15 @@ onUnmounted(() => {
               <div v-if="!isPortrait" class="shared-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ left: `${item.position}%` }"></i></div>
               <div v-if="!visibleEvents.length" class="lane-empty"><UiIcon name="filter" :size="24" /><span>没有该人物的时间事件</span><button @click="emit('update:personId', '')">查看全部人物</button></div>
             </div>
-            <div class="lane-overview" aria-label="时间线全局导航" @pointerdown="navigateOverview"><span class="overview-window" :style="overviewWindow()"></span><i v-for="marker in overviewMarkers()" :key="marker.id" :style="overviewMarkerStyle(marker)" :class="{ 'is-hidden': !marker.visible, 'is-yearless': marker.yearless }"></i></div>
+            <div v-if="displayMode === 'list'" class="event-list-view" role="list" aria-label="事件列">
+              <button v-for="event in orderedVisibleEvents" :key="event.id" type="button" class="event-column-card" :class="{ 'timeline-node-yearless': event.startsAt.startsWith('--'), 'is-selected': event.id === selectedId }" :data-event-id="event.id" role="listitem" @click="selectEvent(event.id)">
+                <i class="event-column-marker" aria-hidden="true"></i>
+                <span class="event-column-main"><time class="event-column-time">{{ event.approximate ? '约 ' : '' }}{{ eventDateLabel(event) }}</time><strong class="event-column-title">{{ eventTitle(event) }}</strong><small v-if="memberPeople(event)" class="event-column-people">{{ memberPeople(event) }}</small></span>
+                <span v-if="sourceReviewIds.has(event.id)" class="event-column-review">来源待核对</span>
+              </button>
+              <div v-if="!orderedVisibleEvents.length" class="event-list-empty"><UiIcon name="filter" :size="24" /><span>没有该人物的时间事件</span><button type="button" @click="emit('update:personId', '')">查看全部人物</button></div>
+            </div>
+            <div v-show="displayMode === 'axis'" class="lane-overview" aria-label="时间线全局导航" @pointerdown="navigateOverview"><span class="overview-window" :style="overviewWindow()"></span><i v-for="marker in overviewMarkers()" :key="marker.id" :style="overviewMarkerStyle(marker)" :class="{ 'is-hidden': !marker.visible, 'is-yearless': marker.yearless }"></i></div>
           </div>
         </article>
       </div>
@@ -658,6 +670,20 @@ onUnmounted(() => {
 .overview-window { position: absolute; inset-block: 0; border: 1px solid #9db3c6; border-radius: 6px; background: #b8cbdc26; pointer-events: none; }
 .timeline-view-body { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .timeline-view-body.is-portrait { flex-direction: row; align-items: stretch; gap: 8px; }
+.event-list-view { display: flex; flex: 1; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; padding: 12px 14px; overflow-x: hidden; overflow-y: auto; border-radius: 8px; background: #fbfcfd; overscroll-behavior-y: contain; touch-action: pan-y; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; }
+.event-column-card { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; min-height: 64px; flex: 0 0 auto; padding: 12px 16px; border: 1px solid #c8d7e3; border-radius: 10px; background: #f5f8fb; box-shadow: 0 2px 6px #23394d08; color: #24313d; font: inherit; text-align: left; cursor: pointer; touch-action: manipulation; }
+.event-column-card.timeline-node-yearless { border-color: #dfd4c5; background: #faf7f2; }
+.event-column-card.is-selected { border-color: #6c91ae; background: #eef4f7; box-shadow: 0 0 0 2px #6c91ae17; }
+.event-column-marker { width: 8px; height: 8px; border: 2px solid #7895ad; border-radius: 50%; background: #fff; }
+.event-column-card.timeline-node-yearless .event-column-marker { border-color: #b9a68c; background: #fffdf9; }
+.event-column-main { display: grid; grid-template-columns: minmax(130px, 185px) minmax(0, 1fr); align-items: baseline; gap: 4px 16px; min-width: 0; }
+.event-column-time { color: #647f94; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.event-column-card.timeline-node-yearless .event-column-time { color: #9b846a; }
+.event-column-title { min-width: 0; color: #24313d; font-size: 13px; font-weight: 550; line-height: 1.5; overflow-wrap: anywhere; }
+.event-column-people { grid-column: 2; color: #8a99a5; font-size: 11px; }
+.event-column-review { flex: 0 0 auto; color: #9b846a; font-size: 11px; }
+.event-list-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 180px; color: #7e8d9a; font-size: 13px; }
+.event-list-empty button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 9px; background: #eef3f7; color: #486b86; font: inherit; touch-action: manipulation; }
 .timeline-view-body.is-portrait .unified-chart { display: block; flex: 1; }
 .timeline-view-body.is-portrait .lane-overview { width: 24px; height: auto; flex: 0 0 24px; margin: 0; }
 .timeline-view-body.is-portrait .lane-overview i { top: auto; left: 50%; width: 12px; height: 3px; transform: translate(-50%, -50%); }
@@ -757,6 +783,6 @@ onUnmounted(() => {
   .has-detail .detail-actions button { width: 100%; }
 }
 @media (orientation: portrait) { .event-detail { max-height: 35%; flex-wrap: wrap; gap: 12px; padding: 16px 52px 16px 18px; } .detail-main { flex-basis: 100%; } .detail-evidence { flex-basis: 100%; max-width: none; } .detail-actions { max-width: none; } .detail-main h3 { font-size: 15px; } .event-cluster-panel { flex-basis: 35%; max-height: 35%; } }
-@media (max-width: 650px) { .explorer-header-main { flex-wrap: wrap; gap: 8px; } .explorer-heading { flex: 1 1 auto; order: 1; } .explorer-page-actions { flex: 0 0 auto; order: 2; margin-left: auto; } .explorer-controls { flex: 1 1 100%; order: 3; justify-content: flex-start; flex-wrap: wrap; } .portrait-event-card { width: calc(50% - 25px); padding: 8px 9px; } .portrait-event-card.half-upper { left: 4px; } .portrait-event-card.half-lower { right: 4px; } .portrait-event-card.half-upper::after { right: -21px; width: 20px; } .portrait-event-card.half-lower::after { left: -21px; width: 20px; } .explorer-controls .person-filter { margin-left: 0; } .explorer-controls .fit-button { margin-left: 0; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
+@media (max-width: 650px) { .event-list-view { padding: 8px; } .event-column-card { gap: 9px; padding: 10px 12px; } .event-column-main { grid-template-columns: minmax(0, 1fr); gap: 4px; } .event-column-people { grid-column: 1; } .event-column-review { font-size: 10px; } .explorer-header-main { flex-wrap: wrap; gap: 8px; } .explorer-heading { flex: 1 1 auto; order: 1; } .explorer-page-actions { flex: 0 0 auto; order: 2; margin-left: auto; } .explorer-controls { flex: 1 1 100%; order: 3; justify-content: flex-start; flex-wrap: wrap; } .portrait-event-card { width: calc(50% - 25px); padding: 8px 9px; } .portrait-event-card.half-upper { left: 4px; } .portrait-event-card.half-lower { right: 4px; } .portrait-event-card.half-upper::after { right: -21px; width: 20px; } .portrait-event-card.half-lower::after { left: -21px; width: 20px; } .explorer-controls .person-filter { margin-left: 0; } .explorer-controls .fit-button { margin-left: 0; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button, .explorer-layout-toggle button { transition: none; } }
 </style>

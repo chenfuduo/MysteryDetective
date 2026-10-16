@@ -431,6 +431,7 @@ onBeforeUnmount(() => {
           <div class="graph-hud">
             <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
             <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '空间视图' : '空间预览' }}</button><button v-if="spatial && !readOnly" type="button" class="graph-mode" :class="{ active: depthMode }" :aria-pressed="depthMode" @click="depthMode = !depthMode">{{ depthMode ? '前后拖动中' : '调整前后' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button><button type="button" class="graph-mode" @click="fit"><UiIcon name="fullscreen" :size="16" />显示全部</button></div>
+            <div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button></div>
           </div>
       <div class="graph-layout">
         <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging, 'is-linking': linkSourceId, 'is-depth-mode': depthMode }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @lostpointercapture="pointerEnd" @contextmenu.prevent @wheel="wheel">
@@ -456,7 +457,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="linkSourceId" class="graph-connection-bar" role="status"><div><strong>连线模式 · {{ peopleById.get(linkSourceId)?.name }}</strong><span>{{ linkTargetId ? `连接到 ${peopleById.get(linkTargetId)?.name}` : '拖到目标人物，或松手后点选人物' }}</span></div><button type="button" @click="cancelConnection"><UiIcon name="close" :size="16" />取消连线</button></div>
           <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
-          <div class="graph-help"><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button></div></div>
+          
         </div>
         <aside v-if="selected && !linkSourceId" class="graph-inspector">
           <header><span>人物详情</span><button type="button" class="graph-icon-button" aria-label="关闭人物详情" @click="selectedId = ''"><UiIcon name="close" :size="18" /></button></header>
@@ -479,7 +480,7 @@ onBeforeUnmount(() => {
 .relationship-explorer, .relationship-explorer * { box-sizing: border-box; }
 .relationship-explorer { --graph-green: #466879; --graph-copper: #92765c; display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; width: 100%; height: 100%; overflow: hidden; color: #24313d; border: 1px solid #e1e7ec; border-radius: 18px; background: #fff; }
 .relationship-explorer.is-fullscreen { position: fixed; z-index: 1100; inset: 0; width: auto; height: auto; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); border: 0; border-radius: 0; background: #fff; }
-.graph-toolbar { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; min-height: 66px; padding: 10px 20px; }
+.graph-toolbar { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 20px; }
 .graph-heading { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .graph-heading strong { font-size: 15px; font-weight: 650; }
 .graph-heading > span { color: #788491; font-size: 12px; }
@@ -488,8 +489,8 @@ onBeforeUnmount(() => {
 .graph-text-button { border-color: #466879; background: #466879; color: #fff; font-weight: 600; }
 .graph-icon-button { padding: 0; }
 .graph-icon-button:disabled { opacity: .35; cursor: default; }
-.graph-hud { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; padding: 0 20px 14px; border-bottom: 1px solid #e8edf0; }
-.graph-search { position: relative; display: flex; align-items: center; gap: 8px; width: min(280px, 50%); min-height: 44px; padding: 0 12px; border: 1px solid #e1e7ec; border-radius: 10px; background: #f6f8fa; color: #788491; }
+.graph-hud { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 0 20px 12px; border-bottom: 1px solid #e8edf0; }
+.graph-search { position: relative; display: flex; flex: 1 1 210px; align-items: center; gap: 8px; width: min(240px, 35%); min-height: 44px; padding: 0 12px; border: 1px solid #e1e7ec; border-radius: 10px; background: #f6f8fa; color: #788491; }
 .graph-search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: none; background: transparent; color: #24313d; font: inherit; font-size: 13px; }
 .graph-search input::placeholder { color: #788491; }
 .graph-search > button { display: grid; place-items: center; min-width: 28px; height: 42px; border: 0; padding: 0; background: transparent; color: #788491; }
@@ -497,7 +498,7 @@ onBeforeUnmount(() => {
 .graph-search-results button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: #24313d; text-align: left; font: inherit; font-size: 14px; }
 .graph-search-results button:hover { background: #eef4f7; }
 .graph-search-results p { padding: 8px; color: #788491; font-size: 12px; }
-.graph-view-buttons { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; justify-content: flex-end; }
+.graph-view-buttons { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; justify-content: flex-end; }
 .graph-mode { display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border: 1px solid #e1e7ec; border-radius: 10px; background: #fff; color: #657786; font: inherit; font-size: 12px; cursor: pointer; }
 .graph-mode.active { color: #466879; border-color: #b8cbd5; background: #eef4f7; }
 .graph-mode:disabled { opacity: .4; cursor: default; }
@@ -548,7 +549,7 @@ onBeforeUnmount(() => {
 .graph-connection-bar strong { color: #36586a; font-size: 14px; }
 .graph-connection-bar span { color: #788491; font-size: 12px; }
 .graph-connection-bar button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 44px; padding: 0 12px; border: 1px solid #dfe6eb; border-radius: 9px; background: #fff; color: #466879; font: inherit; font-size: 12px; }
-.graph-help { position: absolute; z-index: 4; right: 16px; bottom: 14px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; pointer-events: none; }
+
 .graph-help > span { padding: 8px 10px; border-radius: 8px; background: #f6f8faf2; color: #788491; font-size: 11px; }
 .graph-zoom { display: flex; align-items: center; flex: 0 0 auto; min-height: 44px; padding: 0 4px; border: 1px solid #dfe6eb; border-radius: 10px; background: #fff; pointer-events: auto; }
 .graph-zoom button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 44px; min-height: 44px; padding: 0; border: 0; background: transparent; color: #466879; font: inherit; cursor: pointer; }
@@ -583,9 +584,9 @@ onBeforeUnmount(() => {
 .relation-delete { min-width: 44px; border: 0; color: #96a2ad; }
 .inspector-no-relations { color: #788491; font-size: 13px; line-height: 1.75; }
 button:focus-visible { outline: 3px solid #b8cfdc; outline-offset: 2px; }
-.is-readonly .graph-help { display: none; }
+
 .is-readonly .person-node { cursor: pointer; }
-@media (max-width: 900px) { .graph-inspector { flex-basis: 240px; } .graph-help { justify-content: flex-end; } }
-@media (max-width: 700px) { .graph-toolbar { padding: 10px 14px; gap: 8px; } .graph-heading { flex-direction: column; gap: 4px; } .graph-heading strong { font-size: 14px; } .graph-heading > span { font-size: 11px; } .graph-actions { gap: 5px; } .graph-text-button { padding: 0 10px; font-size: 12px; } .graph-hud { flex-wrap: wrap; padding: 0 14px 12px; gap: 8px; } .graph-mode { padding: 0 10px; font-size: 11px; } .graph-search { width: auto; flex: 1 1 100%; } .graph-view-buttons { flex: 1 1 100%; justify-content: flex-start; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 34%; max-height: 260px; border-left: 0; border-top: 1px solid #e1e7ec; } .graph-inspector > header { min-height: 48px; padding: 0 12px; } .inspector-content { padding: 14px; } .inspector-actions { margin: 12px 0; } }
+@media (max-width: 900px) { .graph-inspector { flex-basis: 240px; } }
+@media (max-width: 700px) { .graph-toolbar { padding: 10px 14px; gap: 8px; } .graph-heading { flex-direction: column; gap: 4px; } .graph-heading strong { font-size: 14px; } .graph-heading > span { font-size: 11px; } .graph-actions { gap: 5px; } .graph-text-button { padding: 0 10px; font-size: 12px; } .graph-hud { flex-wrap: wrap; padding: 0 14px 12px; gap: 8px; } .graph-mode { padding: 0 10px; font-size: 11px; } .graph-search { width: auto; flex: 1 1 100%; } .graph-view-buttons { flex: 1 1 auto; justify-content: flex-start; } .graph-zoom { margin-left: auto; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 34%; max-height: 260px; border-left: 0; border-top: 1px solid #e1e7ec; } .graph-inspector > header { min-height: 48px; padding: 0 12px; } .inspector-content { padding: 14px; } .inspector-actions { margin: 12px 0; } }
 @media (prefers-reduced-motion: reduce) { .graph-edges g, .person-node, .graph-person-card { transition: none; } }
 </style>

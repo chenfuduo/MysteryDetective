@@ -235,3 +235,74 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 .clue-collection.list .clue-card.clue-card-selected { border-color: #7e9caf; background: #f8fbfd; box-shadow: 0 0 0 2px #dfeaf2; }
+
+
+/* Settings and overlays follow the clue-vault design tokens. */
+.settings-layout { gap: var(--cv-space-6); }
+.script-library-item {
+  min-height: 108px;
+  border-color: var(--cv-border);
+  border-radius: var(--cv-radius-panel);
+  color: var(--cv-secondary);
+  transition: background var(--cv-motion-panel) var(--cv-ease), border-color var(--cv-motion-panel) var(--cv-ease);
+}
+.script-library-item.is-current { border-color: var(--cv-border-strong); background: var(--cv-accent-soft); }
+.script-library-item:active { background: var(--cv-surface-subtle); }
+.library-copy strong, .settings-card h2 { color: var(--cv-ink); }
+.library-copy small, .script-library-heading, .settings-card p { color: var(--cv-muted); }
+.library-cover { color: var(--cv-accent); background: var(--cv-surface-subtle); }
+.library-current { color: var(--cv-accent-strong); background: var(--cv-accent-soft); }
+.settings-card { border-color: var(--cv-border); border-radius: var(--cv-radius-panel); background: var(--cv-surface); }
+.settings-action { min-height: var(--cv-control); border-color: var(--cv-border); border-radius: var(--cv-radius-control); color: var(--cv-secondary); }
+.settings-action:hover { background: var(--cv-surface-subtle); color: var(--cv-accent-strong); }
+.ai-selected-provider, .ai-provider-heading { color: var(--cv-secondary); }
+.ai-provider-settings { border-top-color: var(--cv-border); }
+.ai-provider-heading small { color: var(--cv-muted); }
+.ai-key-label { color: var(--cv-secondary); }
+.ai-key-label input { min-height: var(--cv-control); border-color: var(--cv-border); border-radius: var(--cv-radius-control); background: var(--cv-surface); color: var(--cv-ink); font: inherit; }
+.ai-selected-provider .text-button, .ai-key-actions .text-button { min-height: var(--cv-control); color: var(--cv-accent); }
+.ai-key-actions .primary-button { min-height: var(--cv-control); border-color: var(--cv-accent); border-radius: var(--cv-radius-control); background: var(--cv-accent); box-shadow: none; }
+.auto-organize-toggle { border-color: var(--cv-border); color: var(--cv-secondary); }
+.auto-organize-toggle input { accent-color: var(--cv-accent); }
+.auto-organize-toggle small { color: var(--cv-muted); }
+.privacy-note { border-color: var(--cv-border); border-radius: var(--cv-radius-control); background: var(--cv-surface-subtle); color: var(--cv-secondary); }
+
+.modal-backdrop { background: rgb(36 49 61 / 48%); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+.modal, .annotation-modal, .crop-modal {
+  border-color: var(--cv-border);
+  border-radius: var(--cv-radius-panel);
+  background: var(--cv-surface);
+  color: var(--cv-ink);
+  font-family: var(--cv-font);
+  box-shadow: var(--cv-shadow-raised);
+}
+.modal-head h2 { color: var(--cv-ink); }
+.modal-head > button { width: var(--cv-control); min-width: var(--cv-control); height: var(--cv-control); min-height: var(--cv-control); border-radius: var(--cv-radius-control); color: var(--cv-secondary); background: var(--cv-surface-subtle); }
+.modal-head > button:hover { background: var(--cv-accent-soft); color: var(--cv-accent-strong); }
+.form-stack label, .clue-editor label { color: var(--cv-secondary); }
+.form-stack input, .form-stack textarea, .form-stack select, .clue-editor input, .clue-editor textarea {
+  border-color: var(--cv-border);
+  border-radius: var(--cv-radius-control);
+  background: var(--cv-canvas);
+  color: var(--cv-ink);
+}
+.form-stack input, .form-stack select, .clue-editor input { min-height: var(--cv-control); }
+.modal-actions .primary-button, .modal-actions .secondary-button { min-height: var(--cv-control); border-radius: var(--cv-radius-control); }
+.modal-backdrop .primary-button, .annotation-footer .primary-button { border-color: var(--cv-accent); background: var(--cv-accent); box-shadow: none; }
+.modal-backdrop .primary-button:hover, .annotation-footer .primary-button:hover { background: var(--cv-accent-strong); }
+.modal-backdrop .secondary-button, .annotation-footer .secondary-button { border-color: var(--cv-border); color: var(--cv-secondary); }
+.modal-backdrop button:focus-visible, .annotation-modal button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 3px; }
+.annotation-head, .annotation-toolbar, .annotation-footer { border-color: var(--cv-border); }
+.annotation-head span, .annotation-footer { color: var(--cv-muted); }
+.annotation-head button { width: var(--cv-control); height: var(--cv-control); border-radius: var(--cv-radius-control); color: var(--cv-secondary); background: var(--cv-surface-subtle); }
+.annotation-toolbar > button { min-height: var(--cv-control); padding: 0 10px; border-radius: var(--cv-radius-control); color: var(--cv-secondary); }
+.annotation-colors button { width: var(--cv-control); height: var(--cv-control); border: 12px solid transparent; background-clip: content-box; box-shadow: 0 0 0 1px var(--cv-border); }
+.annotation-colors button.active { box-shadow: 0 0 0 2px var(--cv-focus); }
+.annotation-width { color: var(--cv-secondary); }
+.annotation-width input { min-height: var(--cv-control); accent-color: var(--cv-accent); }
+.crop-modal .modal-head p { color: var(--cv-muted); }
+.crop-stage { background: var(--cv-surface-subtle); }
+.crop-selection { border-color: var(--cv-surface); box-shadow: 0 0 0 1px var(--cv-accent), 0 0 0 9999px rgb(36 49 61 / 35%); }
+@media (prefers-reduced-motion: reduce) {
+  .script-library-item, .modal, .annotation-modal, .primary-button, .secondary-button { transition: none; animation: none; }
+}

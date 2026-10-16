@@ -27,4 +27,12 @@ onBeforeUnmount(() => { request++ })
 </template>
 <style scoped>
 .person-merge-backdrop{z-index:1350}.person-merge-dialog{width:min(470px,calc(100vw - 32px));padding:22px}.person-merge-dialog .modal-head p{font-size:12px;line-height:1.7;color:#8a957f;margin:8px 0 0}.person-merge-preview{padding:15px;border:1px solid #e0e7d9;border-radius:11px;background:#f8faf4}.person-merge-preview h3{font-size:15px;color:#41623b;margin:0 0 8px}.person-merge-preview p{font-size:12px;line-height:1.8;color:#88967b;margin:7px 0}.person-merge-preview dl{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px}.person-merge-preview dt{color:#849276}.person-merge-preview dd{margin:0;text-align:right;color:#4f6a40}.merge-error{font-size:12px;color:#ad6b4a}.person-merge-dialog .modal-actions{flex-wrap:wrap}
+
+.person-merge-dialog .modal-head p { color: var(--cv-muted); }
+.person-merge-preview { border-color: var(--cv-border); background: var(--cv-surface-subtle); }
+.person-merge-preview h3 { color: var(--cv-accent-strong); }
+.person-merge-preview p { color: var(--cv-muted); }
+.person-merge-preview dt { color: var(--cv-secondary); }
+.person-merge-preview dd { color: var(--cv-ink); }
+.merge-error { color: var(--cv-danger); }
 </style>

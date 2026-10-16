@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Timeline } from 'vis-timeline/standalone'
 import UiIcon from './UiIcon.vue'
-const TimelineSpatialScene = defineAsyncComponent(() => import('./TimelineSpatialScene.vue'))
 import type { ClueRecord, PersonRecord, TimelineRecord } from '../services/vault'
 
 type Side = 'upper' | 'lower'
@@ -33,8 +32,6 @@ const elements: Record<Side, HTMLElement | null> = { upper: null, lower: null }
 const instances: Record<Side, Timeline | null> = { upper: null, lower: null }
 const fullscreen = ref(false)
 const isPortrait = ref(typeof window !== 'undefined' && window.matchMedia('(orientation: portrait)').matches)
-const dimensional = ref(false)
-const spatialSceneReady = ref(false)
 const layoutMode = ref<LayoutMode>(savedLayoutMode(props.scriptId))
 const densityEnabled = ref(true)
 const clusterPanel = ref<HTMLElement | null>(null)
@@ -114,11 +111,11 @@ const selectedEvidence = computed(() => {
 })
 function persistView() {
   if (!activeCacheKey) return
-  try { sessionStorage.setItem(activeCacheKey, JSON.stringify({ start: timeWindow.value?.start.getTime(), end: timeWindow.value?.end.getTime(), dimensional: dimensional.value, densityEnabled: densityEnabled.value })) } catch { /* Storage can be unavailable in private contexts. */ }
+  try { sessionStorage.setItem(activeCacheKey, JSON.stringify({ start: timeWindow.value?.start.getTime(), end: timeWindow.value?.end.getTime(), densityEnabled: densityEnabled.value })) } catch { /* Storage can be unavailable in private contexts. */ }
 }
 function restoreView() {
   activeCacheKey = viewCacheKey.value
-  timeWindow.value = null; dimensional.value = false; densityEnabled.value = true
+  timeWindow.value = null; densityEnabled.value = true
   try {
     const saved = JSON.parse(sessionStorage.getItem(activeCacheKey) || 'null')
     if (!saved || typeof saved !== 'object') return
@@ -335,7 +332,6 @@ async function syncCharts() {
   scheduleRedraw()
 }
 function fitAll() { applyWindow(fullWindow()) }
-function timelineSpatialState(ready: boolean) { spatialSceneReady.value = ready }
 const axisEvents = computed(() => {
   const range = timeWindow.value
   if (!range) return []
@@ -497,8 +493,8 @@ watch(viewCacheKey, async () => {
   restoreView()
   await syncCharts()
 })
-watch([dimensional, densityEnabled], persistView)
-watch([dimensional, selectedId, isPortrait], async () => { await nextTick(); scheduleRedraw() })
+watch(densityEnabled, persistView)
+watch([selectedId, isPortrait], async () => { await nextTick(); scheduleRedraw() })
 function updateOrientation() {
   if (!orientationMedia) return
   isPortrait.value = orientationMedia.matches
@@ -539,12 +535,11 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body" :disabled="!fullscreen">
-    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional, 'is-webgl': dimensional && spatialSceneReady, 'has-detail': Boolean(selectedEvent || selectedCluster) }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
+    <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'has-detail': Boolean(selectedEvent || selectedCluster) }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
       <header class="explorer-toolbar">
         <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>时间线</strong><span>{{ personId ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `${allEvents.length} 个事件` }}</span></div></div>
         <div v-if="fullscreen" class="explorer-view-toggle explorer-presentation-toggle" role="group" aria-label="时间线展示方式"><button class="active" :aria-pressed="true"><UiIcon name="timeline" :size="17" />时间轴</button><button :aria-pressed="false" @click="emit('show-event-list')"><UiIcon name="list" :size="17" />事件列</button></div>
         <label class="person-filter"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
-        <div class="explorer-view-toggle" aria-label="时间轴外观"><button :class="{ active: !dimensional }" :aria-pressed="!dimensional" @click="dimensional = false"><UiIcon name="list" :size="17" />平面</button><button :class="{ active: dimensional }" :aria-pressed="dimensional" @click="dimensional = true"><UiIcon name="cube" :size="17" />空间</button></div>
         <button class="explorer-button fit-button" @click="fitAll"><UiIcon name="restore" :size="17" />显示全部</button>
         <button class="explorer-button fullscreen-button" :aria-label="fullscreen ? '退出全屏时间线' : '全屏查看时间线'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'close' : 'fullscreen'" :size="19" /><span>{{ fullscreen ? '退出全屏' : '全屏' }}</span></button>
       </header>
@@ -558,7 +553,6 @@ onUnmounted(() => {
           <div class="lane-heading"><strong>{{ layoutMode === 'sequence' ? '按事件顺序' : '按实际时间' }}</strong><span class="timeline-legend"><template v-if="datedCount"><i class="dated-swatch"></i>有年份</template><template v-if="yearlessCount"><i class="yearless-swatch"></i>无年份</template></span></div>
           <div class="timeline-view-body" :class="{ 'is-portrait': isPortrait }">
             <div ref="plotElement" class="unified-chart" :class="{ 'portrait-chart': isPortrait }">
-              <TimelineSpatialScene v-if="dimensional" :container="plotElement" :events="allEvents" :axis-events="axisEvents" :selected-id="selectedId" @ready="timelineSpatialState" />
               <div v-if="isPortrait" class="portrait-timeline" @pointerdown.capture="beginPortraitPointer" @pointermove.capture="movePortraitPointer" @pointerup.capture="endPortraitPointer" @pointercancel.capture="endPortraitPointer" @click.capture="selectChartEvent">
                 <div class="shared-time-axis portrait-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ top: `${item.position}%` }"></i></div>
                 <button v-for="group in visibleDensityGroups" :key="group.id" class="portrait-event-card timeline-event-content" :class="[`half-${group.side}`, { 'timeline-node-yearless': group.visibleMembers.every(event => event.startsAt.startsWith('--')), 'timeline-node-mixed': group.visibleMembers.some(event => event.startsAt.startsWith('--')) && group.visibleMembers.some(event => !event.startsAt.startsWith('--')), 'is-selected': group.id === selectedClusterId || group.visibleMembers.some(event => event.id === selectedId) }]" :style="portraitCardStyle(group)" :data-event-id="group.members.length === 1 ? group.members[0]!.id : undefined" :data-cluster-id="group.members.length > 1 ? group.id : undefined" :aria-label="group.members.length > 1 ? `${clusterLabel(group)}，${group.visibleMembers.length} 个事件，展开逐条查看` : `${eventDateLabel(group.visibleMembers[0]!)}，${eventTitle(group.visibleMembers[0]!)}`">
@@ -674,7 +668,6 @@ onUnmounted(() => {
 .portrait-event-card.timeline-node-yearless .timeline-node-time { color: #9b846a; }
 .portrait-event-card .timeline-node-title { display: block; max-width: 100%; color: #24313d; font-size: 12px; font-weight: 550; line-height: 1.5; overflow-wrap: anywhere; }
 .portrait-event-card .timeline-node-precision { display: block; margin-top: 5px; color: #93a0ab; font-size: 10px; }
-.is-webgl .portrait-event-card, .is-webgl .portrait-event-card.timeline-node-yearless, .is-webgl .portrait-event-card.timeline-node-mixed, .is-webgl .portrait-event-card.is-selected { border-color: transparent; background: transparent; box-shadow: none; }
 .explorer-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 0; padding: 24px; color: #5d7283; }
 .explorer-empty > span { display: grid; place-items: center; width: 68px; height: 68px; margin-bottom: 6px; border-radius: 20px; background: #edf2f6; }
 .explorer-empty strong { font-size: 16px; }
@@ -734,11 +727,6 @@ onUnmounted(() => {
 .explorer-vis-host :deep(.vis-item.vis-line) { width: 0; border: 0; border-left: 1px solid #bacbd8 !important; border-radius: 0 !important; background: transparent !important; }
 .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-line) { border-left-color: #d4c5b1 !important; }
 .explorer-vis-host :deep(.vis-item.vis-dot) { display: none; }
-.is-webgl .timeline-spatial-canvas { z-index: 0; }
-.is-webgl .unified-chart { background: #f6f8fa; }
-.is-webgl .timeline-half, .is-webgl .lane-chart { z-index: 1; background: transparent; }
-.is-webgl .explorer-vis-host :deep(.vis-item.vis-box), .is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-yearless.vis-box), .is-webgl .explorer-vis-host :deep(.vis-item.timeline-node-mixed.vis-box), .is-webgl .explorer-vis-host :deep(.vis-item.vis-selected.vis-box) { border-color: transparent !important; background: transparent !important; box-shadow: none !important; }
-.is-webgl .explorer-vis-host :deep(.vis-item.vis-selected.vis-box) { border-color: #86a3ba !important; }
 @keyframes detail-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 950px) { .explorer-toolbar { gap: 8px; padding: 12px 14px 10px; } .explorer-heading strong { font-size: 15px; } .person-filter { min-width: 120px; } .explorer-button { padding: 0 11px; font-size: 12px; } .explorer-view-toggle button { padding: 0 9px; font-size: 12px; } .explorer-scale-row { padding: 0 14px 10px; } .explorer-hint { font-size: 11px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 2px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
 @media (orientation: landscape) and (min-width: 760px) {

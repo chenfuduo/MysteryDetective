@@ -13,6 +13,8 @@ function savedLayoutMode(scriptId: string): LayoutMode {
   try { return localStorage.getItem(`cluevault:timeline-layout:${encodeURIComponent(scriptId)}`) === 'sequence' ? 'sequence' : 'proportional' } catch { return 'proportional' }
 }
 type TimeWindow = { start: Date; end: Date }
+type PortraitPoint = { x: number; y: number; onCard: boolean }
+type PortraitGesture = { mode: 'pending' | 'pan' | 'pinch'; startY: number; startWindow: TimeWindow; startDistance: number; startPointTime: number; interactive: boolean }
 type DensityGroup = { id: string; side: Side; start: number; end: number; members: TimelineRecord[] }
 type VisibleDensityGroup = DensityGroup & { visibleMembers: TimelineRecord[] }
 const props = withDefaults(defineProps<{ events: TimelineRecord[]; people: PersonRecord[]; clues: ClueRecord[]; scriptId: string; personId: string; readOnly?: boolean; sourceReviewEventIds?: string[] }>(), { sourceReviewEventIds: () => [] })
@@ -30,6 +32,7 @@ const plotElement = ref<HTMLElement | null>(null)
 const elements: Record<Side, HTMLElement | null> = { upper: null, lower: null }
 const instances: Record<Side, Timeline | null> = { upper: null, lower: null }
 const fullscreen = ref(false)
+const isPortrait = ref(typeof window !== 'undefined' && window.matchMedia('(orientation: portrait)').matches)
 const dimensional = ref(false)
 const spatialSceneReady = ref(false)
 const layoutMode = ref<LayoutMode>(savedLayoutMode(props.scriptId))
@@ -38,7 +41,10 @@ const clusterPanel = ref<HTMLElement | null>(null)
 const selectedClusterId = ref('')
 const selectedId = ref('')
 const timeWindow = ref<TimeWindow | null>(null)
-const plotWidth = ref(800)
+const plotExtent = ref(800)
+const portraitPointers = new Map<number, PortraitPoint>()
+let portraitGesture: PortraitGesture | null = null
+let orientationMedia: MediaQueryList | null = null
 let resizeObserver: ResizeObserver | null = null
 let redrawFrame = 0
 let densityFrame = 0
@@ -65,7 +71,7 @@ function eventPosition(event: TimelineRecord) { return layoutMode.value === 'seq
 // Use the full script and a zoom bucket so person filters and panning never move group anchors.
 const densityTimePerPixel = computed(() => {
   const range = timeWindow.value ?? initialWindow()
-  const value = Math.max(1, (range.end.getTime() - range.start.getTime()) / Math.max(200, plotWidth.value))
+  const value = Math.max(1, (range.end.getTime() - range.start.getTime()) / Math.max(200, plotExtent.value))
   return Math.pow(1.12, Math.round(Math.log(value) / Math.log(1.12)))
 })
 const densityGroups = computed<DensityGroup[]>(() => {
@@ -206,7 +212,7 @@ function fullWindow(): TimeWindow {
 function initialWindow(): TimeWindow {
   if (layoutMode.value === 'proportional' || !orderedEvents.value.length) return fullWindow()
   const whole = fullWindow()
-  const span = Math.min(whole.end.getTime() - whole.start.getTime(), Math.max(3, plotWidth.value / 150) * sequenceStep)
+  const span = Math.min(whole.end.getTime() - whole.start.getTime(), Math.max(3, plotExtent.value / 150) * sequenceStep)
   const selected = selectedEvent.value
   const start = selected ? eventPosition(selected) - span / 2 : eventPosition(orderedEvents.value[0]!) - sequenceStep * .65
   return { start: new Date(start), end: new Date(start + span) }
@@ -272,7 +278,7 @@ function applyWindow(range: TimeWindow) {
 function scheduleRedraw() {
   if (redrawFrame) cancelAnimationFrame(redrawFrame)
   redrawFrame = requestAnimationFrame(() => {
-    if (plotElement.value) plotWidth.value = plotElement.value.clientWidth
+    if (plotElement.value) plotExtent.value = isPortrait.value ? plotElement.value.clientHeight : plotElement.value.clientWidth
     const range = timeWindow.value
     for (const side of sides) {
       const instance = instances[side]
@@ -341,13 +347,13 @@ const axisTicks = computed(() => {
     let lastLeft = -Infinity
     return orderedEvents.value.flatMap((event, index) => {
       const position = (eventPosition(event) - start) / span * 100
-      const left = position * plotWidth.value / 100
+      const left = position * plotExtent.value / 100
       if (position <= 2 || position >= 98 || left - lastLeft < 126) return []
       lastLeft = left
       return [{ id: event.id, left: `${position}%`, label: `第 ${index + 1} 个`, context: dateLabel(event.startsAt) }]
     })
   }
-  const target = span / Math.max(2, Math.floor(plotWidth.value / 126))
+  const target = span / Math.max(2, Math.floor(plotExtent.value / 126))
   const intervals = [60_000, 5*60_000, 15*60_000, 30*60_000, 3600_000, 3*3600_000, 6*3600_000, 12*3600_000, 86400_000, 2*86400_000, 7*86400_000]
   const interval = intervals.find(value => value >= target)
   const cursor = new Date(start)
@@ -385,6 +391,16 @@ const axisEvents = computed(() => {
   const start = range.start.getTime(), span = range.end.getTime() - start
   return visibleEvents.value.map(event => ({ event, position: (eventPosition(event) - start) / span * 100 })).filter(item => item.position >= 0 && item.position <= 100)
 })
+function portraitPosition(value: number) {
+  const range = timeWindow.value ?? initialWindow()
+  return (value - range.start.getTime()) / Math.max(1, range.end.getTime() - range.start.getTime()) * 100
+}
+function portraitCardStyle(group: VisibleDensityGroup) {
+  return { top: `${portraitPosition(group.start)}%` }
+}
+function overviewMarkerStyle(marker: { left: string }) {
+  return isPortrait.value ? { top: marker.left, left: '50%' } : { left: marker.left }
+}
 function overviewMarkers() {
   const range = fullWindow(), span = range.end.getTime() - range.start.getTime()
   return allEvents.value.map(event => ({ id: event.id, left: `${(eventPosition(event) - range.start.getTime()) / span * 100}%`, yearless: event.startsAt.startsWith('--'), visible: !props.personId || event.personIds.includes(props.personId) }))
@@ -392,16 +408,91 @@ function overviewMarkers() {
 function overviewWindow() {
   const whole = fullWindow(), current = timeWindow.value ?? whole
   const span = whole.end.getTime() - whole.start.getTime()
-  const left = Math.max(0, (current.start.getTime() - whole.start.getTime()) / span * 100)
-  const right = Math.min(100, (current.end.getTime() - whole.start.getTime()) / span * 100)
-  return { left: `${left}%`, width: `${Math.max(1, right - left)}%` }
+  const start = Math.max(0, (current.start.getTime() - whole.start.getTime()) / span * 100)
+  const end = Math.min(100, (current.end.getTime() - whole.start.getTime()) / span * 100)
+  return isPortrait.value
+    ? { top: `${start}%`, height: `${Math.max(1, end - start)}%`, left: '0', width: '100%' }
+    : { left: `${start}%`, width: `${Math.max(1, end - start)}%` }
 }
 function navigateOverview(event: PointerEvent) {
   const target = event.currentTarget as HTMLElement, rect = target.getBoundingClientRect()
-  const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
+  const fraction = Math.max(0, Math.min(1, isPortrait.value ? (event.clientY - rect.top) / rect.height : (event.clientX - rect.left) / rect.width))
   const whole = fullWindow(), current = timeWindow.value ?? whole, span = current.end.getTime() - current.start.getTime()
   const center = whole.start.getTime() + fraction * (whole.end.getTime() - whole.start.getTime())
   applyWindow({ start: new Date(center - span / 2), end: new Date(center + span / 2) })
+}
+function cloneWindow(range = timeWindow.value ?? initialWindow()): TimeWindow {
+  return { start: new Date(range.start), end: new Date(range.end) }
+}
+function constrainedPortraitWindow(start: number, requestedSpan: number): TimeWindow {
+  const limits = bounds()
+  const span = Math.max(limits.zoomMin, Math.min(limits.zoomMax, requestedSpan))
+  let nextStart = start
+  const min = limits.min.getTime(), max = limits.max.getTime()
+  if (nextStart < min) nextStart = min
+  if (nextStart + span > max) nextStart = max - span
+  return { start: new Date(nextStart), end: new Date(nextStart + span) }
+}
+function beginPortraitPointer(event: PointerEvent) {
+  if (!isPortrait.value) return
+  const target = event.target as HTMLElement
+  const current = event.currentTarget as HTMLElement
+  try { current.setPointerCapture(event.pointerId) } catch { /* Pointer capture can be unavailable in embedded browsers. */ }
+  portraitPointers.set(event.pointerId, { x: event.clientX, y: event.clientY, onCard: Boolean(target.closest('.portrait-event-card')) })
+  chartPointer = { x: event.clientX, y: event.clientY, moved: false }
+  if (portraitPointers.size === 1) {
+    portraitGesture = { mode: 'pending', startY: event.clientY, startWindow: cloneWindow(), startDistance: 0, startPointTime: 0, interactive: Boolean(target.closest('.portrait-event-card')) }
+  } else if (portraitPointers.size >= 2) {
+    const points = [...portraitPointers.values()].slice(0, 2)
+    const rect = current.getBoundingClientRect()
+    const centerY = (points[0]!.y + points[1]!.y) / 2 - rect.top
+    const range = cloneWindow()
+    const span = range.end.getTime() - range.start.getTime()
+    portraitGesture = {
+      mode: 'pinch', startY: centerY, startWindow: range,
+      startDistance: Math.hypot(points[1]!.x - points[0]!.x, points[1]!.y - points[0]!.y),
+      startPointTime: range.start.getTime() + centerY / Math.max(1, rect.height) * span,
+      interactive: false,
+    }
+  }
+}
+function movePortraitPointer(event: PointerEvent) {
+  const point = portraitPointers.get(event.pointerId)
+  if (!point || !isPortrait.value) return
+  point.x = event.clientX; point.y = event.clientY
+  const current = event.currentTarget as HTMLElement
+  const rect = current.getBoundingClientRect()
+  const points = [...portraitPointers.values()]
+  if (points.length >= 2) {
+    const gesture = portraitGesture
+    if (!gesture || gesture.mode !== 'pinch') return
+    const centerY = (points[0]!.y + points[1]!.y) / 2 - rect.top
+    const distance = Math.max(1, Math.hypot(points[1]!.x - points[0]!.x, points[1]!.y - points[0]!.y))
+    const initialSpan = gesture.startWindow.end.getTime() - gesture.startWindow.start.getTime()
+    const nextSpan = initialSpan * gesture.startDistance / distance
+    const nextStart = gesture.startPointTime - centerY / Math.max(1, rect.height) * nextSpan
+    applyWindow(constrainedPortraitWindow(nextStart, nextSpan))
+    if (chartPointer) chartPointer.moved = true
+    return
+  }
+  const gesture = portraitGesture
+  if (!gesture || gesture.mode === 'pinch' || gesture.interactive) return
+  const distance = event.clientY - gesture.startY
+  if (gesture.mode === 'pending' && Math.abs(distance) > 8) {
+    gesture.mode = 'pan'
+    if (chartPointer) chartPointer.moved = true
+  }
+  if (gesture.mode !== 'pan') return
+  const span = gesture.startWindow.end.getTime() - gesture.startWindow.start.getTime()
+  const nextStart = gesture.startWindow.start.getTime() - distance / Math.max(1, rect.height) * span
+  applyWindow(constrainedPortraitWindow(nextStart, span))
+}
+function endPortraitPointer(event: PointerEvent) {
+  portraitPointers.delete(event.pointerId)
+  if (portraitPointers.size === 1) {
+    const remaining = [...portraitPointers.values()][0]!
+    portraitGesture = { mode: 'pending', startY: remaining.y, startWindow: cloneWindow(), startDistance: 0, startPointTime: 0, interactive: false }
+  } else portraitGesture = null
 }
 function beginChartPointer(event: PointerEvent) { chartPointer = { x: event.clientX, y: event.clientY, moved: false } }
 function moveChartPointer(event: PointerEvent) {
@@ -456,7 +547,12 @@ watch(viewCacheKey, async () => {
   await syncCharts()
 })
 watch([dimensional, densityEnabled], persistView)
-watch([dimensional, selectedId], async () => { await nextTick(); scheduleRedraw() })
+watch([dimensional, selectedId, isPortrait], async () => { await nextTick(); scheduleRedraw() })
+function updateOrientation() {
+  if (!orientationMedia) return
+  isPortrait.value = orientationMedia.matches
+  void nextTick(scheduleRedraw)
+}
 watch(fullscreen, async active => {
   emit('fullscreen-change', active)
   if (active) {
@@ -467,6 +563,9 @@ watch(fullscreen, async active => {
   scheduleRedraw()
 })
 onMounted(async () => {
+  orientationMedia = window.matchMedia('(orientation: portrait)')
+  isPortrait.value = orientationMedia.matches
+  orientationMedia.addEventListener('change', updateOrientation)
   restoreView()
   await syncCharts()
   resizeObserver = new ResizeObserver(scheduleRedraw)
@@ -478,6 +577,8 @@ onUnmounted(() => {
   persistView()
   for (const side of sides) instances[side]?.destroy()
   resizeObserver?.disconnect()
+  orientationMedia?.removeEventListener('change', updateOrientation)
+  portraitPointers.clear()
   if (redrawFrame) cancelAnimationFrame(redrawFrame)
   if (densityFrame) cancelAnimationFrame(densityFrame)
   document.removeEventListener('keydown', onKeydown)
@@ -504,13 +605,23 @@ onUnmounted(() => {
       <div v-if="allEvents.length" class="explorer-stage">
         <article class="timeline-lane unified-lane">
           <div class="lane-heading"><strong>{{ layoutMode === 'sequence' ? '按事件顺序' : '按实际时间' }}</strong><span class="timeline-legend"><template v-if="datedCount"><i class="dated-swatch"></i>有年份</template><template v-if="yearlessCount"><i class="yearless-swatch"></i>无年份</template></span></div>
-          <div ref="plotElement" class="unified-chart">
-            <TimelineSpatialScene v-if="dimensional" :container="plotElement" :events="allEvents" :axis-events="axisEvents" :selected-id="selectedId" @ready="timelineSpatialState" />
-            <div v-for="side in sides" :key="side" class="timeline-half" :class="`half-${side}`"><div class="lane-chart" @pointerdown.capture="beginChartPointer" @pointermove.capture="moveChartPointer" @click.capture="selectChartEvent"><div :ref="element => setChartElement(side, element)" class="explorer-vis-host"></div></div></div>
-            <div class="shared-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="tick in axisTicks" :key="tick.id" class="shared-axis-tick" :style="{ left: tick.left }"><span>{{ tick.label }}</span><small v-if="tick.context">{{ tick.context }}</small></i><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ left: `${item.position}%` }"></i></div>
-            <div v-if="!visibleEvents.length" class="lane-empty"><UiIcon name="filter" :size="24" /><span>没有该人物的时间事件</span><button @click="emit('update:personId', '')">查看全部人物</button></div>
+          <div class="timeline-view-body" :class="{ 'is-portrait': isPortrait }">
+            <div ref="plotElement" class="unified-chart" :class="{ 'portrait-chart': isPortrait }">
+              <TimelineSpatialScene v-if="dimensional" :container="plotElement" :events="allEvents" :axis-events="axisEvents" :selected-id="selectedId" @ready="timelineSpatialState" />
+              <div v-if="isPortrait" class="portrait-timeline" @pointerdown.capture="beginPortraitPointer" @pointermove.capture="movePortraitPointer" @pointerup.capture="endPortraitPointer" @pointercancel.capture="endPortraitPointer" @click.capture="selectChartEvent">
+                <div class="shared-time-axis portrait-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="tick in axisTicks" :key="tick.id" class="shared-axis-tick portrait-axis-tick" :style="{ top: tick.left }"><span>{{ tick.label }}</span><small v-if="tick.context">{{ tick.context }}</small></i><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ top: `${item.position}%` }"></i></div>
+                <button v-for="group in visibleDensityGroups" :key="group.id" class="portrait-event-card timeline-event-content" :class="[`half-${group.side}`, { 'timeline-node-yearless': group.visibleMembers.every(event => event.startsAt.startsWith('--')), 'timeline-node-mixed': group.visibleMembers.some(event => event.startsAt.startsWith('--')) && group.visibleMembers.some(event => !event.startsAt.startsWith('--')), 'is-selected': group.id === selectedClusterId || group.visibleMembers.some(event => event.id === selectedId) }]" :style="portraitCardStyle(group)" :data-event-id="group.members.length === 1 ? group.members[0]!.id : undefined" :data-cluster-id="group.members.length > 1 ? group.id : undefined" :aria-label="group.members.length > 1 ? `${clusterLabel(group)}，${group.visibleMembers.length} 个事件，展开逐条查看` : `${eventDateLabel(group.visibleMembers[0]!)}，${eventTitle(group.visibleMembers[0]!)}`">
+                  <span class="timeline-node-time">{{ group.members.length > 1 ? clusterLabel(group) : `${group.visibleMembers[0]!.approximate ? '约 ' : ''}${eventDateLabel(group.visibleMembers[0]!)}` }}</span>
+                  <span class="timeline-node-title">{{ group.members.length > 1 ? `${group.visibleMembers.length} 个事件` : eventTitle(group.visibleMembers[0]!) }}</span>
+                  <span class="timeline-node-precision">{{ group.members.length > 1 ? `${clusterKinds(group)} · 点击展开` : precisionLabel(group.visibleMembers[0]!) }}</span>
+                </button>
+              </div>
+              <div v-for="side in sides" :key="side" v-show="!isPortrait" class="timeline-half" :class="`half-${side}`"><div class="lane-chart" @pointerdown.capture="beginChartPointer" @pointermove.capture="moveChartPointer" @click.capture="selectChartEvent"><div :ref="element => setChartElement(side, element)" class="explorer-vis-host"></div></div></div>
+              <div v-if="!isPortrait" class="shared-time-axis" aria-hidden="true"><div class="shared-axis-line"></div><i v-for="tick in axisTicks" :key="tick.id" class="shared-axis-tick" :style="{ left: tick.left }"><span>{{ tick.label }}</span><small v-if="tick.context">{{ tick.context }}</small></i><i v-for="item in axisEvents" :key="item.event.id" class="shared-axis-dot" :class="{ 'is-yearless': item.event.startsAt.startsWith('--'), 'is-dated': !item.event.startsAt.startsWith('--'), 'is-selected': item.event.id === selectedId }" :style="{ left: `${item.position}%` }"></i></div>
+              <div v-if="!visibleEvents.length" class="lane-empty"><UiIcon name="filter" :size="24" /><span>没有该人物的时间事件</span><button @click="emit('update:personId', '')">查看全部人物</button></div>
+            </div>
+            <div class="lane-overview" aria-label="时间线全局导航" @pointerdown="navigateOverview"><span class="overview-window" :style="overviewWindow()"></span><i v-for="marker in overviewMarkers()" :key="marker.id" :style="overviewMarkerStyle(marker)" :class="{ 'is-hidden': !marker.visible, 'is-yearless': marker.yearless }"></i></div>
           </div>
-          <div class="lane-overview" aria-label="时间线全局导航" @pointerdown="navigateOverview"><span class="overview-window" :style="overviewWindow()"></span><i v-for="marker in overviewMarkers()" :key="marker.id" :style="{ left: marker.left }" :class="{ 'is-hidden': !marker.visible, 'is-yearless': marker.yearless }"></i></div>
         </article>
       </div>
       <div v-else class="explorer-empty"><span><UiIcon name="timeline" :size="34" /></span><strong>还没有已确认的时间事件</strong><p>添加时间节点，或从整理建议中录入事件。</p></div>
@@ -586,6 +697,33 @@ onUnmounted(() => {
 .lane-overview i.is-yearless { background: #b7a38a; }
 .lane-overview i.is-hidden { opacity: .16; }
 .overview-window { position: absolute; inset-block: 0; border: 1px solid #9db3c6; border-radius: 6px; background: #b8cbdc26; pointer-events: none; }
+.timeline-view-body { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.timeline-view-body.is-portrait { flex-direction: row; align-items: stretch; gap: 8px; }
+.timeline-view-body.is-portrait .unified-chart { display: block; flex: 1; }
+.timeline-view-body.is-portrait .lane-overview { width: 24px; height: auto; flex: 0 0 24px; margin: 0; }
+.timeline-view-body.is-portrait .lane-overview i { top: auto; left: 50%; width: 12px; height: 3px; transform: translate(-50%, -50%); }
+.portrait-timeline { position: absolute; z-index: 2; inset: 0; overflow: hidden; touch-action: none; }
+.portrait-time-axis { top: 0; right: auto; bottom: 0; left: 50%; width: 0; height: auto; pointer-events: none; }
+.portrait-time-axis .shared-axis-line { top: 0; right: auto; bottom: 0; left: -1px; width: 2px; height: auto; border-radius: 2px; background: #bdcbd7; }
+.portrait-axis-tick { top: 0; left: 0; width: 0; height: 0; }
+.portrait-axis-tick::before { top: 0; left: -5px; width: 10px; height: 1px; }
+.portrait-axis-tick > span { top: 0; bottom: auto; left: 12px; transform: translateY(-50%); }
+.portrait-axis-tick > small { top: 0; right: 12px; left: auto; transform: translateY(-50%); }
+.portrait-time-axis .shared-axis-dot { top: 0; left: 0; transform: translate(-50%, -50%); }
+.portrait-event-card { position: absolute; z-index: 2; display: block; width: calc(50% - 34px); max-width: 340px; min-width: 0; min-height: 56px; margin: 0; padding: 10px 12px; transform: translateY(-50%); overflow: visible; border: 1px solid #c8d7e3; border-radius: 10px; background: #f5f8fb; box-shadow: 0 2px 6px #23394d08; color: #24313d; font: inherit; text-align: left; white-space: normal; cursor: pointer; touch-action: manipulation; }
+.portrait-event-card.half-upper { left: 8px; }
+.portrait-event-card.half-lower { right: 8px; }
+.portrait-event-card.half-upper::after, .portrait-event-card.half-lower::after { position: absolute; top: 50%; width: 26px; border-top: 1px solid #bacbd8; content: ''; }
+.portrait-event-card.half-upper::after { right: -27px; }
+.portrait-event-card.half-lower::after { left: -27px; }
+.portrait-event-card.timeline-node-yearless { border-color: #dfd4c5; background: #faf7f2; }
+.portrait-event-card.timeline-node-mixed { border-color: #cfd9e1; background: #f3f6f8; }
+.portrait-event-card.is-selected { border-color: #6c91ae; background: #eef4f7; box-shadow: 0 0 0 2px #6c91ae17; }
+.portrait-event-card .timeline-node-time { display: block; margin-bottom: 5px; color: #647f94; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.portrait-event-card.timeline-node-yearless .timeline-node-time { color: #9b846a; }
+.portrait-event-card .timeline-node-title { display: block; max-width: 100%; color: #24313d; font-size: 12px; font-weight: 550; line-height: 1.5; overflow-wrap: anywhere; }
+.portrait-event-card .timeline-node-precision { display: block; margin-top: 5px; color: #93a0ab; font-size: 10px; }
+.is-webgl .portrait-event-card, .is-webgl .portrait-event-card.timeline-node-yearless, .is-webgl .portrait-event-card.timeline-node-mixed, .is-webgl .portrait-event-card.is-selected { border-color: transparent; background: transparent; box-shadow: none; }
 .explorer-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 0; padding: 24px; color: #5d7283; }
 .explorer-empty > span { display: grid; place-items: center; width: 68px; height: 68px; margin-bottom: 6px; border-radius: 20px; background: #edf2f6; }
 .explorer-empty strong { font-size: 16px; }
@@ -665,6 +803,6 @@ onUnmounted(() => {
   .has-detail .detail-actions button { width: 100%; }
 }
 @media (orientation: portrait) { .event-detail { max-height: 35%; flex-wrap: wrap; gap: 12px; padding: 16px 52px 16px 18px; } .detail-main { flex-basis: 100%; } .detail-evidence { flex-basis: 100%; max-width: none; } .detail-actions { max-width: none; } .detail-main h3 { font-size: 15px; } .event-cluster-panel { flex-basis: 35%; max-height: 35%; } }
-@media (max-width: 650px) { .explorer-heading { width: calc(100% - 140px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .explorer-hint { display: none; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
+@media (max-width: 650px) { .portrait-event-card { width: calc(50% - 25px); padding: 8px 9px; } .portrait-event-card.half-upper { left: 4px; } .portrait-event-card.half-lower { right: 4px; } .portrait-event-card.half-upper::after { right: -21px; width: 20px; } .portrait-event-card.half-lower::after { left: -21px; width: 20px; } .explorer-heading { width: calc(100% - 140px); } .person-filter { margin-left: auto; } .fit-button { margin-left: auto; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .explorer-hint { display: none; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button, .explorer-layout-toggle button { transition: none; } }
 </style>

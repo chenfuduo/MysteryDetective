@@ -129,9 +129,9 @@ function cardType(element: HTMLElement, event: TimelineRecord | undefined) {
 
 function visibleItemElements() {
   if (!props.container) return []
-  return [...props.container.querySelectorAll<HTMLElement>('.vis-item')].filter(element => {
+  return [...props.container.querySelectorAll<HTMLElement>('.vis-item, .portrait-event-card')].filter(element => {
     if (element.classList.contains('vis-background') || element.classList.contains('vis-line') || element.classList.contains('vis-dot')) return false
-    return Boolean(element.querySelector('.timeline-event-content'))
+    return Boolean(element.matches('.timeline-event-content') || element.querySelector('.timeline-event-content'))
   })
 }
 
@@ -145,10 +145,12 @@ function syncObjects() {
   const eventById = new Map(props.events.map(event => [event.id, event]))
   const axisElement = props.container.querySelector<HTMLElement>('.shared-axis-line')
   const axisRect = axisElement?.getBoundingClientRect()
+  const verticalAxis = Boolean(axisRect && axisRect.height > axisRect.width)
+  const axisX = axisRect ? axisRect.left - containerRect.left + axisRect.width / 2 : width / 2
   const axisY = axisRect ? height - (axisRect.top - containerRect.top + axisRect.height / 2) : height / 2
   const seen = new Set<string>()
   for (const element of visibleItemElements()) {
-    const content = element.querySelector<HTMLElement>('.timeline-event-content')
+    const content = element.matches('.timeline-event-content') ? element : element.querySelector<HTMLElement>('.timeline-event-content')
     if (!content) continue
     const id = content.dataset.eventId || content.dataset.clusterId
     if (!id) continue
@@ -189,8 +191,9 @@ function syncObjects() {
       stems.set(id, stem)
     }
     stem.material = stemMaterials[type === 'mixed' ? 'dated' : type as 'dated' | 'yearless']
-    const stemLength = Math.max(0, Math.abs(axisY - card.position.y) - 10)
-    stem.position.set(centerX, (axisY + card.position.y) / 2, 12)
+    const stemLength = verticalAxis ? Math.max(0, Math.abs(axisX - centerX) - 10) : Math.max(0, Math.abs(axisY - card.position.y) - 10)
+    stem.rotation.z = verticalAxis ? Math.PI / 2 : 0
+    stem.position.set(verticalAxis ? (axisX + centerX) / 2 : centerX, verticalAxis ? card.position.y : (axisY + card.position.y) / 2, 12)
     stem.scale.set(0.55, stemLength, 0.55)
     stem.userData.targetDepth = 0
     stem.visible = stemLength > 4
@@ -200,9 +203,10 @@ function syncObjects() {
 
   if (axisElement && axisRect && axisRail) {
     const rect = axisRect
-    const axisWidth = Math.max(1, rect.width)
-    axisRail.position.set(rect.left - containerRect.left + axisWidth / 2, height - (rect.top - containerRect.top + rect.height / 2), 8)
-    axisRail.scale.y = axisWidth
+    const axisLength = Math.max(1, verticalAxis ? rect.height : rect.width)
+    axisRail.position.set(axisX, axisY, 8)
+    axisRail.rotation.z = verticalAxis ? 0 : Math.PI / 2
+    axisRail.scale.y = axisLength
     axisRail.visible = true
   } else if (axisRail) axisRail.visible = false
 
@@ -219,8 +223,8 @@ function syncObjects() {
       markers.set(id, marker)
     }
     marker.material = item.event.startsAt.startsWith('--') ? dotMaterials.yearless : dotMaterials.dated
-    marker.position.x = (item.position / 100) * width
-    marker.position.y = height / 2
+    marker.position.x = verticalAxis ? axisX : (item.position / 100) * width
+    marker.position.y = verticalAxis ? height - (item.position / 100) * height : height / 2
     marker.userData.targetDepth = id === props.selectedId ? 3 : 2
     marker.scale.setScalar(id === props.selectedId ? 4.5 : 3.4)
     marker.visible = true

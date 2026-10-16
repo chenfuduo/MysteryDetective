@@ -1419,9 +1419,9 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
               <div class="recent-capture-list"><article v-for="clue in recentClues" :key="clue.id"><button class="recent-clue-source" @click="openClue(clue)"><ClueThumbnail class="recent-clue-thumbnail" :path="clue.displayImagePath || clue.imagePath" :alt="clue.title" :rotation="clue.rotation" /><span><strong>#{{ String(clue.number).padStart(3, '0') }} {{ clue.title }}</strong><small>{{ clue.ocrStatus === 'failed' ? '识别失败' : clue.ocrStatus === 'pending' ? '等待识别' : clue.ocrText.trim() ? 'OCR 已保存' : '暂无识别文字' }}</small></span></button><select :value="clue.round" :disabled="busy" aria-label="调整线索轮次" @change="changeRecentRound(clue.id, ($event.target as HTMLSelectElement).value)"><option v-for="round in captureRoundOptions" :key="round" :value="round">第 {{ round }} 轮</option></select><button v-if="!clue.ocrText.trim()" class="text-button" :disabled="busy" @click="retryOcr(clue)">重试识别</button><button class="icon-button" aria-label="删除最近录入线索" :disabled="busy" @click="removeClue(clue)"><UiIcon name="trash" :size="20" /></button></article></div>
             </details>
             <div class="library-control-panel">
-              <div class="clue-toolbar">
-                <label class="search-field"><UiIcon name="search" :size="20" /><input v-model="query" placeholder="搜索线索文字" aria-label="搜索线索" /><button v-if="query" class="text-clear" aria-label="清除搜索文字" @click="query = ''"><UiIcon name="close" :size="18" /></button></label>
-                <details class="filter-disclosure" @keydown.esc.stop.prevent="($event.currentTarget as HTMLDetailsElement).open = false"><summary><UiIcon name="filter" :size="18" />筛选<span v-if="hasClueFilters" class="filter-active-dot" aria-label="已启用筛选"></span><UiIcon class="disclosure-chevron" name="chevron" :size="16" /></summary><div class="toolbar-selects">
+              <div class="clue-toolbar clue-library-query-row">
+                <label class="search-field clue-library-search"><UiIcon name="search" :size="20" /><input v-model="query" placeholder="搜索线索文字" aria-label="搜索线索" /><button v-if="query" class="text-clear" aria-label="清除搜索文字" @click="query = ''"><UiIcon name="close" :size="18" /></button></label>
+                <details class="filter-disclosure clue-library-filter" @keydown.esc.stop.prevent="($event.currentTarget as HTMLDetailsElement).open = false"><summary><UiIcon name="filter" :size="18" />筛选<span v-if="hasClueFilters" class="filter-active-dot" aria-label="已启用筛选"></span><UiIcon class="disclosure-chevron" name="chevron" :size="16" /></summary><div class="toolbar-selects">
                   <label><select v-model="filterRound" aria-label="筛选轮次"><option value="">全部轮次</option><option v-for="round in rounds" :key="round" :value="round">第 {{ round }} 轮</option></select></label>
                   <label><select v-model="filterCategory" aria-label="筛选分类"><option value="">全部分类</option><option v-for="category in categories" :key="category" :value="category">{{ category }}</option></select></label>
                   <label><select v-model="filterTag" aria-label="筛选标签"><option value="">全部标签</option><option v-for="tag in clueTags" :key="tag" :value="tag">{{ tag }}</option></select></label>
@@ -1429,7 +1429,7 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
                   <div class="filter-panel-footer"><button :class="['filter-favorite', { active: favoriteOnly }]" :aria-pressed="favoriteOnly" @click="favoriteOnly = !favoriteOnly"><UiIcon :name="favoriteOnly ? 'check' : 'heart'" :size="18" />仅看收藏</button><button class="filter-panel-done" @click="($event.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')">完成</button></div>
                 </div></details>
               </div>
-              <div class="result-bar">
+              <div class="result-bar clue-library-result-row">
                 <div class="library-result-summary"><div class="round-quick-filter" role="group" aria-label="快速筛选轮次"><button :class="{ active: filterRound === captureRound }" :aria-pressed="filterRound === captureRound" @click="filterRound = captureRound">本轮</button><button :class="{ active: !filterRound }" :aria-pressed="!filterRound" @click="filterRound = ''">全部轮次</button></div><span class="library-result-count" role="status" aria-live="polite" aria-atomic="true">{{ visibleClues.length }} 条线索<span v-if="visibleClues.length > displayedClues.length"> · 已显示 {{ displayedClues.length }} 条</span><span v-if="query"> · 搜索「{{ query }}」</span></span></div>
                 <div class="clue-result-actions"><label class="clue-sort-control"><select v-model="clueSort" aria-label="线索排序"><option value="newest">最新录入</option><option value="oldest">最早录入</option><option value="number">编号顺序</option><option value="title">标题顺序</option></select></label><button v-if="!clueSelectionMode" class="clue-select-trigger" :disabled="busy || !clues.length" @click="clueSelectionMode = true">多选</button><button v-else class="clue-select-trigger" :disabled="busy" @click="finishClueSelection">完成</button><div class="view-toggle" role="group" aria-label="线索展示方式"><button :class="{ active: layout === 'grid' }" aria-label="网格视图" title="网格视图" :aria-pressed="layout === 'grid'" @click="layout = 'grid'"><UiIcon name="grid" :size="20" /></button><button :class="{ active: layout === 'list' }" aria-label="列表视图" title="列表视图" :aria-pressed="layout === 'list'" @click="layout = 'list'"><UiIcon name="list" :size="20" /></button></div></div>
               </div>
@@ -1599,7 +1599,35 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
   .timeline-reading-list .row-actions { grid-column: 3; grid-row: 1 / 3; }
   .timeline-reading-list .row-actions button { min-width: 38px; }
 }
-.page-clues .library-control-panel { gap: 4px; }
+.page-clues .library-control-panel { gap: 8px; }
+.page-clues .library-control-panel .clue-library-query-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-width: 0; margin: 0; }
+.page-clues .library-control-panel .clue-library-search { display: flex; width: 100%; max-width: none; min-width: 0; min-height: 44px; justify-self: stretch; }
+.page-clues .library-control-panel .clue-library-filter { justify-self: end; margin: 0; }
+.page-clues .library-control-panel .clue-library-filter > summary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 88px; min-height: 44px; padding-inline: 10px; white-space: nowrap; }
+.page-clues .library-control-panel .clue-library-result-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; margin: 0; }
+.page-clues .library-control-panel .library-result-summary { flex-wrap: nowrap; gap: 8px; min-width: 0; }
+.page-clues .library-control-panel .library-result-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-clues .library-control-panel .round-quick-filter { flex: 0 0 auto; gap: 4px; margin: 0; }
+.page-clues .library-control-panel .round-quick-filter button { min-height: 40px; padding-inline: 10px; white-space: nowrap; }
+.page-clues .library-control-panel .clue-result-actions { display: flex; flex-wrap: nowrap; align-items: center; justify-self: end; gap: 6px; width: auto; margin: 0; }
+.page-clues .library-control-panel .clue-sort-control { width: 120px; }
+.page-clues .library-control-panel .clue-sort-control select, .page-clues .library-control-panel .clue-select-trigger { min-height: 44px; }
+.page-clues .library-control-panel .view-toggle button { min-width: 44px; min-height: 44px; }
+.page-clues .library-control-panel .library-result-count, .page-clues .library-control-panel .clue-card-body > p, .page-clues .library-control-panel .clue-card-foot > span, .page-clues .library-control-panel .recent-capture summary > span { color: var(--cv-secondary); }
+@media (max-width: 700px) {
+  .page-clues .library-control-panel .clue-library-query-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .page-clues .library-control-panel .clue-library-search { width: 100%; min-width: 0; }
+  .page-clues .library-control-panel .clue-library-result-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .page-clues .library-control-panel .library-result-summary { width: auto; min-width: 0; flex-wrap: nowrap; gap: 4px; }
+  .page-clues .library-control-panel .clue-result-actions { width: auto; justify-content: flex-end; gap: 4px; }
+  .page-clues .library-control-panel .clue-sort-control { width: 108px; }
+}
+@media (max-width: 520px) {
+  .page-clues .library-control-panel .clue-library-result-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .page-clues .library-control-panel .library-result-summary { justify-content: space-between; }
+  .page-clues .library-control-panel .clue-result-actions { justify-self: stretch; justify-content: flex-end; width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { .timeline-display-toggle button { transition: none; } }
 .page-clues .library-control-panel .clue-toolbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
 .page-clues .library-control-panel .clue-toolbar .search-field { flex: 1 1 0%; width: auto; max-width: none; min-width: 0; min-height: 44px; }
 .page-clues .library-control-panel .clue-toolbar .filter-disclosure { flex: 0 0 auto; }

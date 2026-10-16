@@ -201,7 +201,12 @@ function fullWindow(): TimeWindow {
   const times = allEvents.value.map(eventPosition)
   const first = times.length ? Math.min(...times) : Date.now()
   const last = times.length ? Math.max(...times) : first
-  const span = Math.max(last - first, layoutMode.value === 'sequence' ? sequenceStep * 2 : 3 * 60 * 60_000) * 1.18
+  const extent = Math.max(1, (isPortrait.value ? plotElement.value?.clientHeight : plotElement.value?.clientWidth) || plotExtent.value)
+  const cards = plotElement.value?.querySelectorAll<HTMLElement>(isPortrait.value ? '.portrait-event-card' : '.vis-item.vis-box')
+  const cardExtent = Math.max(isPortrait.value ? 96 : 290, ...Array.from(cards || [], card => isPortrait.value ? card.getBoundingClientRect().height : card.getBoundingClientRect().width))
+  // Reserve card half-width plus a reading gutter on each edge of the time axis.
+  const edgeRatio = Math.min(.45, Math.max(.08, (cardExtent / 2 + 20) / extent))
+  const span = Math.max(last - first, layoutMode.value === 'sequence' ? sequenceStep * 2 : 3 * 60 * 60_000) / (1 - edgeRatio * 2)
   const center = (first + last) / 2
   return { start: new Date(center - span / 2), end: new Date(center + span / 2) }
 }
@@ -333,7 +338,11 @@ async function syncCharts() {
   if (selectedEvent.value) selectEvent(selectedId.value)
   scheduleRedraw()
 }
-function fitAll() { applyWindow(fullWindow()) }
+function fitAll() {
+  const range = fullWindow()
+  for (const side of sides) instances[side]?.setOptions(bounds())
+  applyWindow(range)
+}
 const axisEvents = computed(() => {
   const range = timeWindow.value
   if (!range) return []

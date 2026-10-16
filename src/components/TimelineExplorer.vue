@@ -553,7 +553,7 @@ onUnmounted(() => {
       <header class="explorer-toolbar">
         <div class="explorer-header-main">
           <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>时间线</strong><span>{{ personId ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `${allEvents.length} 个事件` }}</span></div></div>
-          <div class="explorer-controls">
+          <div v-if="displayMode === 'axis'" class="explorer-controls">
             <label v-if="allEvents.length && layoutMode === 'proportional'" class="density-toggle" :title="densitySummary"><input v-model="densityEnabled" type="checkbox" />收拢密集事件</label>
             <label class="person-filter person-filter-icon" :class="{ 'is-filtered': Boolean(personId) }" :title="personId ? '已筛选人物，点此切换' : '筛选人物'"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
             <button type="button" class="explorer-button fit-button" title="显示全部" aria-label="显示全部" @click="fitAll"><UiIcon name="restore" :size="17" /><span>显示全部</span></button>

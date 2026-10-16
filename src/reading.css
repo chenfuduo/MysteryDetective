@@ -411,3 +411,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (prefers-reduced-motion: reduce) {
   .person-card, .note-card, .nav-item, .board-toolbar button, .board-inspector button, .note-card-bottom button, .person-card-actions button { transition: none; animation: none; }
 }
+
+.board-page .vue-flow__controls-button { position: relative; }
+.board-page .board-control-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

@@ -22,6 +22,7 @@ const emit = defineEmits<{
   'open-clue': [clueId: string, quote?: string]
   'toggle-marker': [event: TimelineRecord]
   'fullscreen-change': [active: boolean]
+  'show-event-list': []
 }>()
 const sides: Side[] = ['upper', 'lower']
 const rootElement = ref<HTMLElement | null>(null)
@@ -489,8 +490,9 @@ onUnmounted(() => {
     <section ref="rootElement" class="timeline-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-dimensional': dimensional, 'is-webgl': dimensional && spatialSceneReady, 'has-detail': Boolean(selectedEvent || selectedCluster) }" tabindex="-1" :role="fullscreen ? 'dialog' : 'region'" :aria-modal="fullscreen || undefined" aria-label="时间线查看" @contextmenu.prevent>
       <header class="explorer-toolbar">
         <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>时间线</strong><span>{{ personId ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `${allEvents.length} 个事件` }}</span></div></div>
+        <div v-if="fullscreen" class="explorer-view-toggle explorer-presentation-toggle" role="group" aria-label="时间线展示方式"><button class="active" :aria-pressed="true"><UiIcon name="timeline" :size="17" />时间轴</button><button :aria-pressed="false" @click="emit('show-event-list')"><UiIcon name="list" :size="17" />事件列</button></div>
         <label class="person-filter"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
-        <div class="explorer-view-toggle" aria-label="时间线显示方式"><button :class="{ active: !dimensional }" :aria-pressed="!dimensional" @click="dimensional = false"><UiIcon name="list" :size="17" />阅读</button><button :class="{ active: dimensional }" :aria-pressed="dimensional" @click="dimensional = true"><UiIcon name="cube" :size="17" />空间</button></div>
+        <div class="explorer-view-toggle" aria-label="时间轴外观"><button :class="{ active: !dimensional }" :aria-pressed="!dimensional" @click="dimensional = false"><UiIcon name="list" :size="17" />平面</button><button :class="{ active: dimensional }" :aria-pressed="dimensional" @click="dimensional = true"><UiIcon name="cube" :size="17" />空间</button></div>
         <button class="explorer-button fit-button" @click="fitAll"><UiIcon name="restore" :size="17" />显示全部</button>
         <button class="explorer-button fullscreen-button" :aria-label="fullscreen ? '退出全屏时间线' : '全屏查看时间线'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'close' : 'fullscreen'" :size="19" /><span>{{ fullscreen ? '退出全屏' : '全屏' }}</span></button>
       </header>

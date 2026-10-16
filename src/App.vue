@@ -195,10 +195,11 @@ const noteForm = reactive({ text: '', clueId: '', personId: '' })
 const boardForm = reactive({ kind: 'note' as BoardItemRecord['kind'], refId: '', text: '', color: '#f2cc88', group: '' })
 const boardLinkForm = reactive({ fromId: '', toId: '', label: '' })
 const timelinePersonFilter = ref('')
-const timelineOrientation = ref<'portrait' | 'landscape'>('landscape')
+const timelineDisplayMode = ref<'axis' | 'list'>((() => {
+  try { return localStorage.getItem('cluevault:timeline-display') === 'list' ? 'list' : 'axis' } catch { return 'axis' }
+})())
 const timelineImmersive = ref(false)
 const timelineExplorer = ref<{ enterFullscreen: () => void; focusEvent: (eventId: string) => void } | null>(null)
-let timelineOrientationQuery: MediaQueryList | null = null
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let searchSequence = 0
 let workspaceLocationHydrating = false
@@ -585,7 +586,22 @@ async function focusWorkspaceEvent(event: TimelineRecord) {
   if (timelineExplorer.value) timelineExplorer.value.focusEvent(event.id)
   else document.querySelector(`[data-event-id="${CSS.escape(event.id)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
-function openTimelineFullscreen() { timelineImmersive.value = true; nextTick(() => timelineExplorer.value?.enterFullscreen()) }
+function openTimelineFullscreen() {
+  timelineImmersive.value = true
+  nextTick(() => {
+    if (timelineDisplayMode.value === 'axis') timelineExplorer.value?.enterFullscreen()
+    else document.querySelector<HTMLElement>('.timeline-reading-list')?.focus({ preventScroll: true })
+  })
+}
+async function setTimelineDisplayMode(value: 'axis' | 'list') {
+  if (timelineDisplayMode.value === value) return
+  const stayFullscreen = timelineImmersive.value
+  timelineDisplayMode.value = value
+  try { localStorage.setItem('cluevault:timeline-display', value) } catch { /* The selected view still works without storage. */ }
+  await nextTick()
+  timelineImmersive.value = stayFullscreen
+  if (stayFullscreen && value === 'axis') timelineExplorer.value?.enterFullscreen()
+}
 function openRelationshipDialog(fromId = '', toId = '') {
   const from = people.value.find(person => person.id === fromId && person.scriptId === activeScriptId.value)
   const to = people.value.find(person => person.id === toId && person.scriptId === activeScriptId.value && person.id !== from?.id)
@@ -1329,9 +1345,6 @@ watch(() => JSON.stringify(noteForm), value => {
 }, { flush: 'sync' })
 watch(clueDialog, open => { if (!open) { ++clueDraftSequence; flushEditorDrafts() } }, { flush: 'sync' })
 watch(noteDialog, open => { if (!open) { ++noteDraftSequence; flushEditorDrafts() } }, { flush: 'sync' })
-function updateTimelineOrientation() {
-  timelineOrientation.value = timelineOrientationQuery?.matches ? 'portrait' : 'landscape'
-}
 watch(view, next => { mode.value = next === 'clues' ? 'capture' : 'organize'; if (next !== 'timeline') timelineImmersive.value = false })
 watch(activeScriptId, async () => { timelineImmersive.value = false; await loadWorkspace() })
 watch(() => [query.value, filterRound.value, filterCategory.value, filterTag.value, filterPerson.value, favoriteOnly.value, clueSort.value, activeScriptId.value], () => { cluePageSize.value = 60 })
@@ -1358,13 +1371,10 @@ onMounted(async () => {
   void initializeAiRouting()
   void refreshApiKeyConfiguration('deepseek')
   void refreshApiKeyConfiguration('openai')
-  timelineOrientationQuery = window.matchMedia('(orientation: portrait)')
-  updateTimelineOrientation()
-  timelineOrientationQuery.addEventListener('change', updateTimelineOrientation)
   await action(async () => { await vault.initVault(); await loadScripts(); await loadWorkspace() })
   void recoverLegacyBrowserOcr()
 })
-onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(importPreview.value.token); if (organizationElapsedTimer) clearInterval(organizationElapsedTimer); organizationPauseRequested.value = true; document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); timelineOrientationQuery?.removeEventListener('change', updateTimelineOrientation); if (toastTimer) clearTimeout(toastTimer) })
+onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(importPreview.value.token); if (organizationElapsedTimer) clearInterval(organizationElapsedTimer); organizationPauseRequested.value = true; document.removeEventListener('keydown', handleWorkspaceShortcut); flushEditorDrafts(); window.removeEventListener('pagehide', flushEditorDrafts); document.removeEventListener('visibilitychange', refreshAiRoutingOnVisibility); window.removeEventListener('online', refreshAiRoutingOnNetwork); window.removeEventListener('offline', refreshAiRoutingOnNetwork); if (toastTimer) clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -1401,8 +1411,17 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
             <section v-if="unfinishedTasks.length || pendingOcrClues.length" class="task-resume" data-pending-processing aria-label="待继续处理"><header><div><strong>待继续处理</strong><p>已完成阶段已保存。点击继续后才会调用 API。</p></div><button v-if="unfinishedTasks.length" class="secondary-button" :disabled="busy" @click="runOrganization">继续整理</button></header><ul><li v-for="task in unfinishedTasks" :key="task.clueId"><button class="text-button" @click="openTimelineClue(task.clueId)">原线索 #{{ String(task.sourceNo).padStart(3, '0') }}</button><span>{{ task.message || (task.stage === 'checking' ? '时间核对待继续' : task.stage === 'local' ? '本地结果已保存，可继续 API 整理' : '整理待继续') }}</span></li><li v-for="clue in pendingOcrClues" :key="`ocr:${clue.id}`"><button class="text-button" @click="openClue(clue)">原线索 #{{ String(clue.number).padStart(3, '0') }}</button><span>{{ clue.ocrError || (clue.ocrStatus === 'pending' ? 'OCR 识别尚未完成' : '暂无 OCR 文字') }}</span><button v-if="!clue.ocrText.trim()" class="secondary-button" :disabled="busy" @click="retryOcr(clue)">重试识别</button></li></ul></section>
           </template>
           <section v-else-if="view === 'people'" class="page people-page" :class="{ 'relationship-page': relationGraph }"><div class="page-header"><div><h1>{{ relationGraph ? '人物关系' : '人物档案' }}</h1><p>{{ relationGraph ? '查看你手动建立的人物关系。' : '名字匹配来自已保存线索；人物之间的关系由你亲自建立。' }}</p></div><div class="header-actions"><button v-if="!relationGraph" class="secondary-button" :disabled="people.length < 2" @click="openRelationshipDialog()"><UiIcon name="plus" :size="18" />添加关系</button><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div></div><div class="subtabs"><button :class="{ active: !relationGraph }" @click="relationGraph = false">人物列表</button><button :class="{ active: relationGraph }" @click="relationGraph = true">关系图</button></div><div v-if="!people.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="people" :size="31" /></div><h2>建立人物档案</h2><p>添加人物姓名后，可以自动找到提及姓名的线索。</p><button class="primary-button" @click="openPersonDialog()"><UiIcon name="plus" :size="18" />添加人物</button></div><RelationshipExplorer v-else-if="relationGraph" :key="activeScriptId" :people="people" :relationships="relationships" :image-urls="imageUrls" :clue-counts="personClueCounts" :script-id="activeScriptId" :relationship-dialog-open="relationshipDialog" @open-person="openGraphPerson" @view-person="openPersonWorkspace" @view-clues="viewPersonClues" @remove-relationship="removeRelationship" @add-relationship="openRelationshipDialog" /><div v-else class="people-grid"><article v-for="person in people" :key="person.id" class="person-card"><div class="person-avatar"><img v-if="person.photoPath && imageUrls[person.photoPath]" :src="imageUrls[person.photoPath]" :alt="person.name" /><span v-else>{{ person.name.slice(0, 1) }}</span></div><div class="person-card-main"><h2><button class="person-name-link" @click="openPersonWorkspace(person.id)">{{ person.name }}</button></h2><p v-if="person.aliases.length">又名 {{ person.aliases.join('、') }}</p><p v-else class="muted">暂无别名</p></div><div class="person-card-meta">{{ personClueCount(person) }} 条相关线索</div><p v-if="person.notes" class="person-card-notes">{{ shortText(person.notes, 82) }}</p><div class="person-card-actions"><button @click="openPersonWorkspace(person.id)">查看详情 <UiIcon name="chevron" :size="15" /></button><button title="编辑人物" @click="openPersonDialog(person)"><UiIcon name="edit" :size="17" /></button><button title="删除人物" @click="removePerson(person)"><UiIcon name="trash" :size="17" /></button></div></article></div></section>
-          <section v-else-if="view === 'timeline'" class="page timeline-page" :class="{ 'timeline-page-landscape': timelineOrientation === 'landscape' }">
-            <div class="page-header"><div><h1>时间线</h1><p>只展示你确认的事件，不补全未知经过。</p></div><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div>
+          <section v-else-if="view === 'timeline'" class="page timeline-page" :class="{ 'timeline-page-axis': timelineDisplayMode === 'axis', 'timeline-page-list': timelineDisplayMode === 'list', 'timeline-list-fullscreen': timelineDisplayMode === 'list' && timelineImmersive }">
+            <div class="page-header timeline-page-header">
+              <div><h1>时间线</h1><p>按时间探索，或逐条阅读事件。</p></div>
+              <div class="timeline-page-actions">
+                <div class="timeline-display-toggle" role="group" aria-label="时间线展示方式">
+                  <button :class="{ active: timelineDisplayMode === 'axis' }" :aria-pressed="timelineDisplayMode === 'axis'" @click="setTimelineDisplayMode('axis')"><UiIcon name="timeline" :size="17" />时间轴</button>
+                  <button :class="{ active: timelineDisplayMode === 'list' }" :aria-pressed="timelineDisplayMode === 'list'" @click="setTimelineDisplayMode('list')"><UiIcon name="list" :size="17" />事件列</button>
+                </div>
+                <button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加事件</button>
+              </div>
+            </div>
             <details v-if="organization?.timeline.length || candidateEvents.length" class="timeline-pending"><summary>待确认时间点 <span>{{ (organization?.timeline.length || 0) + candidateEvents.length }}</span><UiIcon name="chevron" :size="16" /></summary><div class="timeline-pending-content">
             <div v-if="organization?.timeline.length" class="candidate-list ai-timeline-list"><div class="section-label">待确认时间点</div><p>AI 和 OCR 原文扫描结果会显示在这里。无年份的时间也可以录入，保存后会标记；标记可单独忽略。</p><article v-for="suggestion in organization.timeline" :key="suggestion.id"><div class="ai-timeline-main"><strong>{{ suggestion.title }}</strong><span>{{ dateLabel(suggestion.startsAt) }}</span><em v-if="suggestion.startsAt.startsWith('--')" class="ai-timeline-yearless">无年份</em><small>“{{ suggestion.quote }}”</small></div><button @click="openSourceClue(suggestion.sourceNo)">原线索 #{{ String(suggestion.sourceNo).padStart(3, '0') }}</button><button class="primary-button" @click="acceptTimelineSuggestion(suggestion.id)">{{ suggestion.requiresTitle || suggestion.title === '待补充事件' ? '补充事件' : '直接录入' }}</button></article></div>
             <div v-if="candidateEvents.length" class="candidate-list"><div class="section-label">待确认的时间</div><p>以下日期来自照片文字识别。请核对原图并填写事件后再加入时间线。</p><article v-for="candidate in candidateEvents" :key="candidate.id"><span>{{ dateLabel(candidate.startsAt) }}</span><button v-if="candidate.clueId" @click="clues.find(clue => clue.id === candidate.clueId) && openClue(clues.find(clue => clue.id === candidate.clueId)!)">查看原图</button><button class="primary-button" @click="openEventDialog(candidate)">确认事件</button></article></div>
@@ -1410,10 +1429,33 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
             <div v-if="!confirmedEvents.length && !organization?.timeline.length" class="section-empty"><div class="section-empty-icon"><UiIcon name="timeline" :size="31" /></div><h2>等待第一条确认的事件</h2><p>从线索里找到明确的时间，再由你录入事件。</p><button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加时间节点</button></div>
             <template v-else-if="confirmedEvents.length">
               <button v-if="sourceReviewEventIds.length" class="source-review-banner" @click="openSourceReviews"><UiIcon name="file" :size="16" />{{ sourceReviewEventIds.length }} 个事件的来源已修改，前往核对<UiIcon name="chevron" :size="14" /></button>
-              <TimelineExplorer v-if="timelineOrientation === 'landscape' || timelineImmersive" ref="timelineExplorer" :key="activeScriptId" :events="confirmedEvents" :people="people" :clues="clues" :script-id="activeScriptId" :source-review-event-ids="sourceReviewEventIds" v-model:person-id="timelinePersonFilter" @edit-event="openEventDialog" @open-clue="openTimelineClue" @toggle-marker="toggleYearlessMarker" @fullscreen-change="timelineImmersive = $event" />
-              <div v-if="timelineOrientation === 'portrait'" class="timeline-controls"><label><span>人物筛选</span><select v-model="timelinePersonFilter" aria-label="按人物筛选时间线"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><span class="timeline-visible-count">{{ visibleTimelineEvents.length }} / {{ confirmedEvents.length }} 个事件</span><button class="secondary-button" @click="openTimelineFullscreen"><UiIcon name="fullscreen" :size="17" />全屏查看</button></div>
-              <div v-if="!visibleTimelineEvents.length && timelineOrientation === 'portrait'" class="timeline-filter-empty">没有与该人物关联的已确认事件。</div>
-              <div v-if="visibleTimelineEvents.length && timelineOrientation === 'portrait'" class="timeline-list"><article v-for="event in visibleTimelineEvents" :key="event.id" class="timeline-event" :data-event-id="event.id"><div class="timeline-event-marker"></div><div class="timeline-event-date">{{ timelineDateLabel(event.startsAt, event.timeOfDay) }}<span v-if="event.startsAt.startsWith('--') && !event.yearlessMarkerIgnored" class="yearless-pill">无年份</span><button v-if="event.startsAt.startsWith('--')" class="timeline-marker-action" @click.stop="toggleYearlessMarker(event)">{{ event.yearlessMarkerIgnored ? '显示标记' : '忽略标记' }}</button></div><div class="timeline-event-content"><h2>{{ timelineEventTitle(event) }} <button v-if="sourceReviewEventIds.includes(event.id)" class="source-review-event-tag" @click="openSourceReviews">来源已修改，待核对</button> <small v-if="event.approximate" class="event-approximate">约时</small></h2><div class="timeline-event-refs"><span v-for="id in event.personIds" :key="id">{{ people.find(person => person.id === id)?.name }}</span><button v-if="event.clueId" @click="clues.find(clue => clue.id === event.clueId) && openClue(clues.find(clue => clue.id === event.clueId)!)">查看原始线索 <UiIcon name="chevron" :size="13" /></button></div></div><div class="row-actions"><button title="编辑" @click="openEventDialog(event)"><UiIcon name="edit" :size="17" /></button><button title="删除" @click="removeEvent(event.id)"><UiIcon name="trash" :size="17" /></button></div></article></div>
+              <TimelineExplorer v-if="timelineDisplayMode === 'axis'" ref="timelineExplorer" :key="activeScriptId" :events="confirmedEvents" :people="people" :clues="clues" :script-id="activeScriptId" :source-review-event-ids="sourceReviewEventIds" v-model:person-id="timelinePersonFilter" @edit-event="openEventDialog" @open-clue="openTimelineClue" @toggle-marker="toggleYearlessMarker" @fullscreen-change="timelineImmersive = $event" @show-event-list="setTimelineDisplayMode('list')" />
+              <div v-if="timelineDisplayMode === 'list'" class="timeline-controls timeline-list-controls"><label><span>人物筛选</span><select v-model="timelinePersonFilter" aria-label="按人物筛选时间线"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label><span class="timeline-visible-count">{{ visibleTimelineEvents.length }} / {{ confirmedEvents.length }} 个事件</span><button class="secondary-button" @click="timelineImmersive ? timelineImmersive = false : openTimelineFullscreen()"><UiIcon :name="timelineImmersive ? 'close' : 'fullscreen'" :size="17" />{{ timelineImmersive ? '退出全屏' : '全屏阅读' }}</button></div>
+              <div v-if="!visibleTimelineEvents.length && timelineDisplayMode === 'list'" class="timeline-filter-empty">没有与该人物关联的已确认事件。</div>
+              <div v-if="visibleTimelineEvents.length && timelineDisplayMode === 'list'" class="timeline-list timeline-reading-list" tabindex="0" aria-label="已确认事件列表" @keydown.esc="timelineImmersive = false">
+                <article v-for="event in visibleTimelineEvents" :key="event.id" class="timeline-event" :data-event-id="event.id">
+                  <div class="timeline-event-marker" aria-hidden="true"></div>
+                  <div class="timeline-event-date">
+                    <time>{{ event.approximate ? '约 ' : '' }}{{ timelineDateLabel(event.startsAt, event.timeOfDay) }}</time>
+                    <div v-if="event.startsAt.startsWith('--')" class="timeline-event-meta">
+                      <span v-if="!event.yearlessMarkerIgnored" class="yearless-pill">无年份</span>
+                      <button class="timeline-marker-action" @click.stop="toggleYearlessMarker(event)">{{ event.yearlessMarkerIgnored ? '显示标记' : '忽略标记' }}</button>
+                    </div>
+                  </div>
+                  <div class="timeline-event-content">
+                    <h2>{{ timelineEventTitle(event) }}</h2>
+                    <button v-if="sourceReviewEventIds.includes(event.id)" class="source-review-event-tag" @click="openSourceReviews">来源已修改，待核对</button>
+                    <div class="timeline-event-refs">
+                      <span v-for="id in event.personIds" :key="id">{{ people.find(person => person.id === id)?.name }}</span>
+                      <button v-if="event.clueId" @click="clues.find(clue => clue.id === event.clueId) && openClue(clues.find(clue => clue.id === event.clueId)!)">查看原始线索 <UiIcon name="chevron" :size="13" /></button>
+                    </div>
+                  </div>
+                  <div class="row-actions">
+                    <button :aria-label="`编辑事件：${event.title}`" title="编辑事件" @click="openEventDialog(event)"><UiIcon name="edit" :size="17" /></button>
+                    <button :aria-label="`删除事件：${event.title}`" title="删除事件" @click="removeEvent(event.id)"><UiIcon name="trash" :size="17" /></button>
+                  </div>
+                </article>
+              </div>
             </template>
           </section>
           <section v-else-if="view === 'board'" class="page board-page"><div class="page-header"><div><h1>自由整理板</h1><p>拖动卡片，手动连接思路。布局自动保存在本机。</p></div><div class="header-actions"><button class="secondary-button" @click="boardLinkForm.fromId = ''; boardLinkForm.toId = ''; boardLinkForm.label = ''; boardLinkDialog = true"><UiIcon name="plus" :size="18" />连接卡片</button><button class="primary-button" @click="openBoardDialog('note')"><UiIcon name="plus" :size="18" />添加卡片</button></div></div><div class="board-toolbar"><button @click="openBoardDialog('clue')"><UiIcon name="archive" :size="17" />线索</button><button @click="openBoardDialog('person')"><UiIcon name="person" :size="17" />人物</button><button @click="openBoardDialog('note')"><UiIcon name="note" :size="17" />便签</button><div class="board-toolbar-spacer"></div><button @click="boardZoom = Math.max(.5, boardZoom - .15)"><UiIcon name="zoomOut" :size="17" /></button><span>{{ Math.round(boardZoom * 100) }}%</span><button @click="boardZoom = Math.min(2, boardZoom + .15)"><UiIcon name="zoomIn" :size="17" /></button></div><div class="board-canvas"><div v-if="!boardItems.length" class="board-empty"><div class="board-empty-symbol"><UiIcon name="board" :size="37" /></div><strong>你的线索空间</strong><span>添加人物、线索或便签，开始整理。</span><button class="primary-button" @click="openBoardDialog('note')"><UiIcon name="plus" :size="17" />添加第一张卡片</button></div><VueFlow v-else :nodes="boardNodes" :edges="boardEdges" :default-zoom="boardZoom" :min-zoom=".5" :max-zoom="2" :fit-view-on-init="false" @node-click="selectedBoardId = $event.node.id" @node-drag-stop="onBoardDragStop" @connect="onBoardConnect"><Background :gap="24" :size="1" pattern-color="#e2ddd5" /><Controls /></VueFlow><div v-if="selectedBoardItem" class="board-inspector"><div><strong>卡片详情</strong><button title="关闭" @click="selectedBoardId = ''"><UiIcon name="close" :size="16" /></button></div><p>{{ selectedBoardItem.text || (selectedBoardItem.kind === 'clue' ? clues.find(clue => clue.id === selectedBoardItem.refId)?.title : people.find(person => person.id === selectedBoardItem.refId)?.name) }}</p><span v-if="selectedBoardItem.group">分组：{{ selectedBoardItem.group }}</span><div><button @click="openBoardDialog(selectedBoardItem.kind, selectedBoardItem)"><UiIcon name="edit" :size="16" />编辑</button><button @click="removeBoardItem(selectedBoardItem.id)"><UiIcon name="trash" :size="16" />移除</button></div></div></div><div v-if="boardLinks.length" class="board-links-list"><span>已建立的连接</span><div v-for="link in boardLinks" :key="link.id"><span>{{ link.label || '未命名连接' }}</span><button title="删除连接" @click="removeBoardLink(link.id)"><UiIcon name="close" :size="15" /></button></div></div></section>
@@ -1451,3 +1493,68 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
     </div>
   </IonApp>
 </template>
+
+
+<style scoped>
+.timeline-page { display: flex; flex: 1; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow: hidden; padding-bottom: 20px; }
+.timeline-page > .page-header { flex: none; align-items: center; margin-bottom: 0; }
+.timeline-page > .timeline-explorer { flex: 1; min-height: 0; height: auto; }
+.timeline-page > .section-empty { flex: 1; }
+.timeline-page > .timeline-pending { flex: none; margin: 0; }
+.timeline-page > .source-review-banner { flex: none; }
+.timeline-page-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.timeline-display-toggle { display: inline-flex; gap: 3px; padding: 4px; border: 1px solid #dfe6ec; border-radius: 12px; background: #eef2f5; }
+.timeline-display-toggle button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 16px; border-radius: 9px; background: transparent; color: #7a8a97; font: inherit; font-size: 13px; white-space: nowrap; touch-action: manipulation; transition: background .18s, color .18s; }
+.timeline-display-toggle button.active { background: #fff; color: #36576e; font-weight: 650; box-shadow: 0 1px 4px #253f5210; }
+.timeline-display-toggle button:focus-visible { outline: 2px solid #7f9db4; outline-offset: 2px; }
+.timeline-list-controls { flex: none; align-items: center; gap: 14px; margin: 0; padding: 12px 16px; }
+.timeline-list-controls > label { flex-direction: row; align-items: center; gap: 12px; }
+.timeline-list-controls select { width: 180px; min-width: 0; }
+.timeline-list-controls .timeline-visible-count { margin-left: auto; padding-bottom: 0; font-variant-numeric: tabular-nums; }
+.timeline-reading-list { position: relative; flex: 1; min-width: 0; min-height: 0; margin: 0; padding: 0 24px; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; outline: none; }
+.timeline-reading-list::before { display: none; }
+.timeline-reading-list .timeline-event { display: grid; grid-template-columns: 12px 150px minmax(0, 1fr) auto; align-items: start; gap: 16px; padding: 24px 0; border-bottom: 1px solid #eaf0f4; }
+.timeline-reading-list .timeline-event:last-child { border-bottom: 0; }
+.timeline-reading-list .timeline-event-marker { width: 10px; height: 10px; margin: 7px 0 0; border: 2px solid #9eb4c5; background: #f8fafc; box-sizing: border-box; }
+.timeline-reading-list .timeline-event-date { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; color: #57758c; font-size: 13px; line-height: 1.7; font-weight: 600; font-variant-numeric: tabular-nums; }
+.timeline-event-meta { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.timeline-reading-list .timeline-marker-action { padding: 3px 5px; color: #8997a2; font-size: 11px; font-weight: 400; }
+.timeline-reading-list .timeline-event-content { min-width: 0; }
+.timeline-reading-list .timeline-event-content h2 { max-width: 75ch; margin: 0 0 9px; color: #2d4353; font-size: 16px; font-weight: 550; line-height: 1.75; overflow-wrap: anywhere; }
+.timeline-reading-list .timeline-event-refs { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.timeline-reading-list .timeline-event-refs > span { padding: 4px 8px; border-radius: 6px; font-size: 11px; }
+.timeline-reading-list .timeline-event-refs > button { padding: 3px 0; margin-left: 3px; font-size: 12px; }
+.timeline-reading-list .row-actions { display: flex; flex-direction: row; align-items: center; gap: 2px; }
+.timeline-reading-list .row-actions button { display: grid; place-items: center; min-width: 40px; min-height: 40px; padding: 0; border-radius: 10px; color: #8b9aa6; background: transparent; touch-action: manipulation; }
+.timeline-reading-list .row-actions button:active { color: #486b86; background: #edf3f7; }
+.timeline-list-fullscreen { position: fixed; inset: 0; z-index: 1100; width: 100%; height: 100dvh; box-sizing: border-box; padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); background: #f5f7fa; }
+@media (max-width: 900px) {
+  .timeline-page-header { flex-wrap: wrap; gap: 14px; }
+  .timeline-page-actions { margin-left: auto; }
+  .timeline-reading-list { padding-inline: 18px; }
+  .timeline-reading-list .timeline-event { grid-template-columns: 10px 132px minmax(0, 1fr) auto; gap: 12px; }
+  .timeline-reading-list .row-actions { flex-direction: column; }
+}
+@media (max-width: 620px) {
+  .timeline-page { gap: 12px; }
+  .timeline-page-actions { width: 100%; flex-wrap: nowrap; gap: 10px; }
+  .timeline-display-toggle { flex: 1; }
+  .timeline-display-toggle button { flex: 1; padding-inline: 10px; }
+  .timeline-page-actions > .primary-button { padding-inline: 12px; }
+  .timeline-list-controls { gap: 10px; padding: 12px; }
+  .timeline-list-controls > label { width: auto; flex: 1; }
+  .timeline-list-controls > label > span { display: none; }
+  .timeline-list-controls select { width: 100%; }
+  .timeline-list-controls .timeline-visible-count { margin: 0; font-size: 11px; }
+  .timeline-list-controls > button { padding-inline: 10px; font-size: 12px; }
+  .timeline-reading-list { padding-inline: 14px; }
+  .timeline-reading-list .timeline-event { grid-template-columns: 10px minmax(0, 1fr) 38px; gap: 6px 10px; padding-block: 20px; }
+  .timeline-reading-list .timeline-event-marker { grid-column: 1; grid-row: 1 / 3; }
+  .timeline-reading-list .timeline-event-date { grid-column: 2; grid-row: 1; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .timeline-reading-list .timeline-event-content { grid-column: 2; grid-row: 2; }
+  .timeline-reading-list .timeline-event-content h2 { font-size: 15px; }
+  .timeline-reading-list .row-actions { grid-column: 3; grid-row: 1 / 3; }
+  .timeline-reading-list .row-actions button { min-width: 38px; }
+}
+@media (prefers-reduced-motion: reduce) { .timeline-display-toggle button { transition: none; } }
+</style>

@@ -831,4 +831,5 @@ onUnmounted(() => {
 .event-detail :is(button, .detail-people > span), .event-cluster-panel button { -webkit-user-select: none; user-select: none; }
 @media (max-width: 950px) { .explorer-header-main { flex-wrap: wrap; } .explorer-controls { flex: 1 1 auto; flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { .timeline-explorer *, .timeline-explorer :deep(*) { animation: none !important; transition: none !important; } }
+.lane-heading, .timeline-legend, .event-column-people { color: var(--cv-secondary); }
 </style>

@@ -1599,5 +1599,22 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
   .timeline-reading-list .row-actions { grid-column: 3; grid-row: 1 / 3; }
   .timeline-reading-list .row-actions button { min-width: 38px; }
 }
+.library-control-panel .clue-toolbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 12px; }
+.library-control-panel .clue-toolbar .search-field { flex: 1 1 auto; width: auto; max-width: none; min-width: 0; min-height: 44px; }
+.library-control-panel .clue-toolbar .filter-disclosure { flex: 0 0 auto; }
+.library-control-panel .clue-toolbar .filter-disclosure > summary { display: inline-flex; align-items: center; justify-content: center; min-width: 104px; min-height: 44px; white-space: nowrap; }
+.library-control-panel .result-bar { display: flex; flex-wrap: nowrap; align-items: center; gap: 12px; }
+.library-control-panel .library-result-summary { flex: 1 1 auto; min-width: 0; }
+.library-control-panel .clue-result-actions { flex: 0 0 auto; flex-wrap: nowrap; align-items: center; gap: 8px; }
+.library-control-panel .clue-sort-control select, .library-control-panel .clue-select-trigger { min-height: 44px; }
+.library-control-panel .view-toggle button { min-width: 44px; min-height: 44px; }
+.library-control-panel .library-result-count, .library-control-panel .clue-card-body > p, .library-control-panel .clue-card-foot > span, .library-control-panel .recent-capture summary > span { color: var(--cv-secondary); }
+@media (max-width: 700px) {
+  .library-control-panel .clue-toolbar { flex-wrap: wrap; }
+  .library-control-panel .clue-toolbar .search-field { flex: 1 1 calc(100% - 116px); }
+  .library-control-panel .result-bar { flex-wrap: wrap; }
+  .library-control-panel .library-result-summary { flex: 1 1 100%; }
+  .library-control-panel .clue-result-actions { width: 100%; justify-content: space-between; }
+}
 @media (prefers-reduced-motion: reduce) { .timeline-display-toggle button { transition: none; } }
 </style>

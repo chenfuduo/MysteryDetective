@@ -104,7 +104,6 @@ function runNextAction() {
   else if (nextAction.value.id === 'configure') emit('navigate', 'settings')
   else if (nextAction.value.id === 'discuss') emit('discuss')
 }
-const cluePointCount = computed(() => new Set((props.organization?.cluePoints || []).map(item => item.sourceNo)).size)
 const reviewInfo = computed(() => new Map(allSuggestions.value.map(suggestion => [selectionKey(suggestion), classifyReview(suggestion, props.clues)])))
 const classification = (suggestion: Suggestion) => reviewInfo.value.get(selectionKey(suggestion))!
 const groupLabel = (group: ReviewGroup) => ({ ready: '可直接录入', 'needs-content': '需要补充', 'needs-review': '需要修正' })[group]
@@ -213,17 +212,7 @@ function accept(suggestion: Suggestion) {
       </div>
     </header>
 
-    <div v-if="clues.length" class="organize-summary">
-      <button @click="emit('navigate', 'clues')"><strong>{{ clues.length }}</strong><span>条线索</span></button>
-      <button class="pending-summary" @click="focusSuggestions"><strong>{{ pendingCount }}</strong><span>待确认建议</span></button>
-      <button @click="emit('navigate', 'people', 'profiles')"><strong>{{ people.length }}</strong><span>个人物</span></button>
-      <button @click="emit('navigate', 'people', 'relationships')"><strong>{{ relationships.length }}</strong><span>条关系</span></button>
-      <button @click="emit('navigate', 'timeline')"><strong>{{ events.filter(item => item.confirmed).length }}</strong><span>个时间节点</span></button>
-      <button @click="emit('navigate', 'clues')"><strong>{{ cluePointCount }}</strong><span>个线索点</span></button>
-    </div>
-
     <nav class="organize-shortcuts" aria-label="整理工具">
-      <div class="shortcut-heading"><strong>整理工具</strong><span>快速进入</span></div>
       <div class="shortcut-list">
         <button class="shortcut-button" @click="emit('navigate', 'people', 'profiles')">
           <span class="shortcut-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="6.2" r="3" /><path d="M4.5 16.5c.5-3 2.3-4.5 5.5-4.5s5 1.5 5.5 4.5" /></svg></span><span class="shortcut-label">人物档案</span><span class="shortcut-arrow">›</span>
@@ -301,7 +290,7 @@ function accept(suggestion: Suggestion) {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 24px;
+  gap: 18px;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -317,25 +306,17 @@ function accept(suggestion: Suggestion) {
 .organize-header-actions .secondary-button { min-height: 44px; padding: 0 16px; border: 1px solid var(--overview-line); border-radius: 11px; background: #fff; color: #536673; font-size: 13px; box-shadow: none; white-space: nowrap; }
 .organize-header .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; padding: 0 21px; border: 1px solid var(--overview-accent); border-radius: 11px; background: var(--overview-accent); color: #fff; font-size: 14px; font-weight: 600; white-space: nowrap; box-shadow: none; }
 .organize-spinner { width: 15px; height: 15px; border: 2px solid #ffffff59; border-top-color: #fff; border-radius: 50%; animation: organize-spin .8s linear infinite; }
-.organize-summary { display: grid; flex-shrink: 0; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; padding: 4px 0 20px; border-bottom: 1px solid var(--overview-line); }
-.organize-summary > button { display: flex; align-items: baseline; gap: 7px; min-width: 0; min-height: 40px; padding: 8px 0; border: 0; border-radius: 6px; background: transparent; text-align: left; }
-.organize-summary strong { color: var(--overview-ink); font-size: 26px; font-weight: 600; line-height: 1; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
-.organize-summary span { color: var(--overview-muted); font-size: 12px; white-space: nowrap; }
-.organize-summary .pending-summary strong { color: var(--overview-accent); }
 .organize-status { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-top: -13px; padding: 0; border: 0; background: transparent; color: var(--overview-muted); font-size: 12px; line-height: 1.6; }
 .status-dot { flex: 0 0 5px; width: 5px; height: 5px; border-radius: 50%; background: #a3adb6; }
 .organize-status.ready .status-dot { background: #709483; }
 .status-dot.processing { animation: organize-pulse 1.25s ease-in-out infinite; }
 .organize-status button { flex: 0 0 auto; min-width: 44px; min-height: 36px; margin-left: auto; padding: 4px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--overview-accent); font-size: 12px; }
-.organize-shortcuts { display: flex; flex-shrink: 0; flex-direction: column; gap: 12px; min-width: 0; }
-.shortcut-heading { display: flex; align-items: baseline; gap: 9px; }
-.shortcut-heading strong { color: #536673; font-size: 12px; font-weight: 600; letter-spacing: .04em; }
-.shortcut-heading span { display: none; }
-.shortcut-list { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; min-width: 0; padding: 5px; border: 1px solid var(--overview-line); border-radius: 13px; background: #fff; }
-.shortcut-button { display: flex; align-items: center; justify-content: center; gap: 9px; min-width: 0; min-height: 48px; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: #536673; text-align: left; transition: background .18s ease, color .18s ease; }
+.organize-shortcuts { display: flex; flex-shrink: 0; min-width: 0; }
+.shortcut-list { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; min-width: 0; width: 100%; padding: 3px; border: 1px solid var(--overview-line); border-radius: 13px; background: #fff; }
+.shortcut-button { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; min-height: 42px; padding: 4px 8px; border: 0; border-radius: 9px; background: transparent; color: #536673; text-align: left; transition: background .18s ease, color .18s ease; }
 .shortcut-button + .shortcut-button { position: relative; }
-.shortcut-button + .shortcut-button:before { position: absolute; left: -1px; top: 14px; bottom: 14px; width: 1px; background: #edf0f3; content: ''; }
-.shortcut-icon { display: grid; flex: 0 0 21px; place-items: center; width: 21px; height: 25px; color: #6b8594; }
+.shortcut-button + .shortcut-button:before { position: absolute; left: -1px; top: 10px; bottom: 10px; width: 1px; background: #edf0f3; content: ''; }
+.shortcut-icon { display: grid; flex: 0 0 21px; place-items: center; width: 21px; height: 21px; color: #6b8594; }
 .shortcut-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .shortcut-label { min-width: 0; color: inherit; font-size: 13px; font-weight: 550; line-height: 1.4; white-space: nowrap; }
 .shortcut-arrow { display: none; }
@@ -406,7 +387,7 @@ function accept(suggestion: Suggestion) {
 button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 button:disabled { cursor: default; opacity: .45; }
 button:focus-visible { outline: 2px solid #8aa8b8; outline-offset: 3px; }
-.organize-summary > button:active, .shortcut-button:active { background: #eef4f7; }
+.shortcut-button:active { background: #eef4f7; }
 .suggestion-action:active, .batch-actions button:active { background: #e1edf3; }
 @media (hover: hover) {
   .shortcut-button:hover { background: #f4f7f9; color: var(--overview-accent); }
@@ -420,22 +401,17 @@ button:focus-visible { outline: 2px solid #8aa8b8; outline-offset: 3px; }
 @media (max-width: 1100px) {
   .organize-header { align-items: flex-start; }
   .organize-header-actions { flex-shrink: 1; }
-  .organize-summary { gap: 8px; }
-  .organize-summary > button { flex-direction: column; gap: 7px; }
   .review-heading time { display: none; }
-  .shortcut-button { gap: 6px; padding: 8px 5px; }
+  .shortcut-button { gap: 6px; min-height: 40px; padding: 4px 5px; }
   .shortcut-label { font-size: 12px; }
 }
 @media (max-width: 760px) {
-  .organization-page { gap: 20px; }
+  .organization-page { gap: 16px; }
   .organize-header { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
   .organize-header h1 { font-size: 27px; }
   .organize-header-actions { flex: 0 1 auto; margin-left: auto; justify-content: flex-end; }
   .organize-header-actions .secondary-button { padding: 0 13px; }
   .organize-header .primary-button { margin-left: 0; padding: 0 17px; }
-  .organize-summary { padding-bottom: 16px; }
-  .organize-summary strong { font-size: 23px; }
-  .organize-summary span { font-size: 10px; }
   .organize-status { font-size: 11px; }
   .shortcut-list { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 4px; }
   .shortcut-button { justify-content: flex-start; padding-left: 13px; gap: 9px; }
@@ -458,8 +434,6 @@ button:focus-visible { outline: 2px solid #8aa8b8; outline-offset: 3px; }
 }
 @media (max-width: 480px) {
   .organize-header-actions { flex: 1 0 100%; margin-left: 0; justify-content: flex-start; }
-  .organize-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 15px; }
-  .organize-summary > button { flex-direction: row; }
   .review-heading { gap: 10px; }
   .review-heading-actions { flex-direction: column; align-items: flex-end; }
   .suggestion-row { flex-wrap: wrap; }

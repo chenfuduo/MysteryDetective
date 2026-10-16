@@ -11,6 +11,7 @@ const props = defineProps<{
   scriptId: string
   relationshipDialogOpen?: boolean
   readOnly?: boolean
+  hidePageToggle?: boolean
 }>()
 const emit = defineEmits<{
   'open-person': [personId: string]
@@ -376,7 +377,7 @@ onBeforeUnmount(() => {
     <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-readonly': readOnly }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>人物关系</strong><span>{{ people.length }} 位人物 · {{ relationships.length }} 条关系</span></div>
-        <nav v-if="!readOnly" class="graph-page-toggle" aria-label="人物关系页面">
+        <nav v-if="!readOnly && !hidePageToggle" class="graph-page-toggle" aria-label="人物关系页面">
           <button type="button" @click="emit('show-people-list')">人物列表</button>
           <button type="button" class="active" aria-current="page">关系图</button>
         </nav>

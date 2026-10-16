@@ -615,10 +615,10 @@ onUnmounted(() => {
 .explorer-toolbar { display: flex; flex-shrink: 0; padding: 14px 16px; border-bottom: 1px solid var(--cv-border); background: var(--cv-surface); }
 .explorer-header-main { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
 .explorer-controls { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; flex-wrap: nowrap; gap: 4px; min-width: 0; }
-.explorer-page-actions { flex: 0 0 auto; min-width: 0; margin-left: 0; }
+.explorer-page-actions { flex: 0 0 auto; min-width: 0; margin-left: auto; }
 .explorer-page-actions :deep(.timeline-page-actions) { gap: 4px; flex-wrap: nowrap; }
-.explorer-page-actions :deep(.timeline-display-toggle button) { flex: 0 0 40px; width: 40px; min-width: 40px; min-height: 40px; padding: 0; gap: 0; font-size: 12px; }
-.explorer-page-actions :deep(.timeline-add-event) { flex: 0 0 40px; width: 40px; min-width: 40px; min-height: 40px; padding: 0; font-size: 12px; white-space: nowrap; }
+.explorer-page-actions :deep(.timeline-display-toggle button) { flex: 0 0 40px; width: 40px; min-width: 40px; height: 40px; min-height: 40px; padding: 0; gap: 0; font-size: 12px; }
+.explorer-page-actions :deep(.timeline-add-event) { flex: 0 0 40px; width: 40px; min-width: 40px; height: 40px; min-height: 40px; padding: 0; font-size: 12px; white-space: nowrap; }
 .explorer-heading { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .explorer-heading-icon { display: grid; place-items: center; width: 40px; height: 40px; color: var(--cv-accent); background: var(--cv-accent-soft); border-radius: var(--cv-radius-control); }
 .explorer-heading strong { display: block; color: var(--cv-ink); font-size: 17px; line-height: 1.4; font-weight: 650; letter-spacing: -.02em; }

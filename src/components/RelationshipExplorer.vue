@@ -12,6 +12,7 @@ const props = defineProps<{
   relationshipDialogOpen?: boolean
   readOnly?: boolean
   hidePageToggle?: boolean
+  displayMode?: 'graph' | 'list'
 }>()
 const emit = defineEmits<{
   'open-person': [personId: string]
@@ -21,6 +22,7 @@ const emit = defineEmits<{
   'add-relationship': [fromId?: string, toId?: string]
   'add-person': []
   'show-people-list': []
+  'show-relationship-graph': []
   'fullscreen-change': [active: boolean]
 }>()
 
@@ -378,8 +380,8 @@ onBeforeUnmount(() => {
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>人物关系</strong><span>{{ people.length }} 位人物 · {{ relationships.length }} 条关系</span></div>
         <nav v-if="!readOnly && !hidePageToggle" class="graph-page-toggle" aria-label="人物关系页面">
-          <button type="button" @click="emit('show-people-list')">人物列表</button>
-          <button type="button" class="active" aria-current="page">关系图</button>
+          <button type="button" :class="{ active: props.displayMode === 'list' }" :aria-current="props.displayMode === 'list' ? 'page' : undefined" @click="emit('show-people-list')">人物列表</button>
+          <button type="button" :class="{ active: props.displayMode !== 'list' }" :aria-current="props.displayMode !== 'list' ? 'page' : undefined" @click="emit('show-relationship-graph')">关系图</button>
         </nav>
         <div class="graph-actions">
           <button v-if="!readOnly" type="button" class="graph-icon-button graph-undo" title="撤销人物移动" aria-label="撤销人物移动" :disabled="!moveHistory.length || Boolean(linkSourceId) || Boolean(relationshipDialogOpen)" @click="undoPersonMove"><UiIcon name="arrowLeft" :size="19" /></button>
@@ -388,6 +390,7 @@ onBeforeUnmount(() => {
           <button type="button" class="graph-icon-button" :title="fullscreen ? '退出全屏' : '全屏查看'" :aria-label="fullscreen ? '退出全屏' : '全屏查看'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'restore' : 'fullscreen'" /></button>
                   </div>
       </header>
+      <template v-if="props.displayMode !== 'list'">
           <div class="graph-hud">
             <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
             <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button><button type="button" class="graph-mode" @click="fit"><UiIcon name="fullscreen" :size="16" />显示全部</button></div>
@@ -430,6 +433,8 @@ onBeforeUnmount(() => {
           </div>
         </aside>
       </div>
+      </template>
+      <div v-else class="graph-people-list" aria-label="人物列表"><slot name="people-list" /></div>
     </section>
   </Teleport>
 </template>
@@ -468,6 +473,7 @@ onBeforeUnmount(() => {
 .graph-mode { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border: 1px solid var(--cv-border); border-radius: 10px; background: var(--cv-surface); color: var(--cv-secondary); font-size: 13px; line-height: 1.5; }
 .graph-mode.active { color: var(--cv-accent-strong); border-color: var(--cv-border-strong); background: var(--cv-accent-soft); font-weight: 600; }
 .graph-layout { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
+.graph-people-list { flex: 1 1 0; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 20px; background: var(--cv-canvas); overscroll-behavior-y: contain; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 .graph-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: var(--cv-canvas); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
 .graph-stage.is-dragging { cursor: grabbing; }
 .graph-stage.is-linking, .is-linking .person-node { cursor: crosshair; }

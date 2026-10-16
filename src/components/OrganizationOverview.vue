@@ -445,4 +445,16 @@ button:focus-visible { outline: 2px solid #8aa8b8; outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) {
   *, *:before, *:after { animation: none !important; transition: none !important; }
 }
+
+.organization-page {
+  --overview-ink: var(--cv-ink);
+  --overview-muted: var(--cv-muted);
+  --overview-accent: var(--cv-accent);
+  --overview-line: var(--cv-border);
+  font-family: var(--cv-font);
+}
+.organization-page button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 3px; }
+.shortcut-button, .review-groups button, .review-filters button, .batch-actions button,
+.suggestion-action, .workbench-entry, .clear-suggestions-button, .source-link,
+.quote-toggle, .organize-status button { min-height: var(--cv-control); }
 </style>

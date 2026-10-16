@@ -785,4 +785,27 @@ onUnmounted(() => {
 @media (orientation: portrait) { .event-detail { max-height: 35%; flex-wrap: wrap; gap: 12px; padding: 16px 52px 16px 18px; } .detail-main { flex-basis: 100%; } .detail-evidence { flex-basis: 100%; max-width: none; } .detail-actions { max-width: none; } .detail-main h3 { font-size: 15px; } .event-cluster-panel { flex-basis: 35%; max-height: 35%; } }
 @media (max-width: 650px) { .event-list-view { padding: 8px; } .event-column-card { gap: 9px; padding: 10px 12px; } .event-column-main { grid-template-columns: minmax(0, 1fr); gap: 4px; } .event-column-people { grid-column: 1; } .event-column-review { font-size: 10px; } .explorer-header-main { flex-wrap: wrap; gap: 8px; } .explorer-heading { flex: 1 1 auto; order: 1; } .explorer-page-actions { flex: 0 0 auto; order: 2; margin-left: auto; } .explorer-controls { flex: 1 1 100%; order: 3; justify-content: flex-start; flex-wrap: wrap; } .portrait-event-card { width: calc(50% - 25px); padding: 8px 9px; } .portrait-event-card.half-upper { left: 4px; } .portrait-event-card.half-lower { right: 4px; } .portrait-event-card.half-upper::after { right: -21px; width: 20px; } .portrait-event-card.half-lower::after { left: -21px; width: 20px; } .explorer-controls .person-filter { margin-left: 0; } .explorer-controls .fit-button { margin-left: 0; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button, .explorer-layout-toggle button { transition: none; } }
+
+.timeline-explorer {
+  --explorer-accent: var(--cv-accent);
+  border-color: var(--cv-border);
+  background: var(--cv-canvas);
+  color: var(--cv-ink);
+  font-family: var(--cv-font);
+}
+.explorer-toolbar { border-bottom-color: var(--cv-border); background: var(--cv-surface); }
+.explorer-page-actions :deep(.timeline-display-toggle button),
+.explorer-page-actions :deep(.timeline-add-event) {
+  flex-basis: var(--cv-control);
+  width: var(--cv-control);
+  min-width: var(--cv-control);
+  min-height: var(--cv-control);
+}
+.explorer-controls .person-filter { flex-basis: var(--cv-control); width: var(--cv-control); min-width: var(--cv-control); min-height: var(--cv-control); }
+.explorer-controls .explorer-button, .explorer-controls .fit-button,
+.explorer-controls .fullscreen-button, .explorer-controls .density-toggle { min-height: var(--cv-control); }
+.explorer-controls .fit-button, .explorer-controls .fullscreen-button { flex-basis: var(--cv-control); width: var(--cv-control); }
+.explorer-controls .explorer-layout-toggle button { min-height: var(--cv-control); }
+.explorer-view-toggle button, .event-list-empty button { min-height: var(--cv-control); }
+.timeline-explorer button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 3px; }
 </style>

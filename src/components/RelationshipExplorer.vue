@@ -600,4 +600,17 @@ button:focus-visible { outline: 3px solid #b8cfdc; outline-offset: 2px; }
 @media (max-width: 900px) { .graph-inspector { flex-basis: 240px; } }
 @media (max-width: 700px) { .graph-toolbar { padding: 10px 14px; gap: 8px; } .graph-heading { flex: 1 1 auto; flex-direction: column; gap: 4px; } .graph-heading strong { font-size: 14px; } .graph-heading > span { font-size: 11px; } .graph-page-toggle { order: 2; } .graph-page-toggle button { min-height: 36px; padding: 0 10px; } .graph-actions { flex: 1 1 100%; justify-content: flex-end; gap: 5px; } .graph-text-button { padding: 0 10px; font-size: 12px; } .graph-hud { flex-wrap: wrap; padding: 0 14px 12px; gap: 8px; } .graph-mode { padding: 0 10px; font-size: 11px; } .graph-search { width: auto; flex: 1 1 100%; } .graph-view-buttons { flex: 1 1 auto; justify-content: flex-start; } .graph-zoom { margin-left: auto; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 34%; max-height: 260px; border-left: 0; border-top: 1px solid #e1e7ec; } .graph-inspector > header { min-height: 48px; padding: 0 12px; } .inspector-content { padding: 14px; } .inspector-actions { margin: 12px 0; } }
 @media (prefers-reduced-motion: reduce) { .graph-edges g, .person-node, .graph-person-card { transition: none; } }
+
+.relationship-explorer {
+  --graph-green: var(--cv-accent);
+  border-color: var(--cv-border);
+  background: var(--cv-surface);
+  color: var(--cv-ink);
+  font-family: var(--cv-font);
+}
+.graph-toolbar, .graph-inspector { background: var(--cv-surface); }
+.graph-stage { background-color: var(--cv-canvas); }
+.graph-hud { border-bottom-color: var(--cv-border); }
+.graph-page-toggle button { min-height: var(--cv-control); }
+.relationship-explorer button:focus-visible { outline-color: var(--cv-focus); }
 </style>

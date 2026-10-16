@@ -330,17 +330,17 @@ function accept(suggestion: Suggestion) {
 .review-groups button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: 38px; padding: 0 0 4px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--overview-muted); font-size: 13px; }
 .review-groups button.active { border-bottom-color: var(--overview-accent); color: var(--overview-ink); font-weight: 600; }
 .review-groups button span { font-size: var(--cv-type-meta); font-variant-numeric: tabular-nums; color: var(--cv-muted); }
-.review-filters { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 15px 22px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.review-filters { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; padding: 4px 22px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .review-filters::-webkit-scrollbar, .review-groups::-webkit-scrollbar { display: none; }
-.review-filters button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border: 0; border-radius: var(--cv-radius-control); background: transparent; color: var(--overview-muted); font-size: 12px; white-space: nowrap; transition: background-color var(--cv-motion-press) var(--cv-ease), color var(--cv-motion-press) var(--cv-ease); }
+.review-filters button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; min-height: 34px; padding: 0 10px; border: 0; border-radius: var(--cv-radius-control); background: transparent; color: var(--overview-muted); font-size: 12px; white-space: nowrap; transition: background-color var(--cv-motion-press) var(--cv-ease), color var(--cv-motion-press) var(--cv-ease); }
 .review-filters button.active { background: var(--cv-accent-soft); color: var(--overview-accent); font-weight: 600; }
 .review-filters button.active:after { display: none; }
 .review-filters button span { color: var(--cv-muted); font-size: var(--cv-type-meta); font-variant-numeric: tabular-nums; }
-.review-batch { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 11px 26px; border-top: 1px solid var(--cv-border); border-bottom: 1px solid var(--cv-border); background: var(--cv-canvas); }
+.review-batch { display: flex; align-items: center; flex-wrap: nowrap; gap: 8px; padding: 4px 26px; border-top: 1px solid var(--cv-border); border-bottom: 1px solid var(--cv-border); background: var(--cv-canvas); }
 .batch-select { display: inline-flex; align-items: center; gap: 9px; min-height: 36px; color: var(--cv-secondary); font-size: 12px; cursor: pointer; }
 .batch-select input, .suggestion-select input { width: 18px; height: 18px; margin: 0; accent-color: var(--overview-accent); cursor: pointer; }
-.batch-count { color: var(--cv-muted); font-size: var(--cv-type-meta); }
-.batch-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.batch-count { color: var(--cv-muted); font-size: var(--cv-type-meta); white-space: nowrap; }
+.batch-actions { display: flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; margin-left: auto; }
 .batch-actions button { min-height: 36px; padding: 0 11px; border: 1px solid var(--overview-line); border-radius: var(--cv-radius-control); background: var(--cv-surface); color: var(--cv-secondary); font-size: 12px; }
 .batch-actions .batch-accept { border-color: var(--cv-border); background: var(--cv-accent-soft); color: var(--overview-accent); font-weight: 550; }
 .batch-incomplete { flex: 0 0 100%; margin: 0; color: var(--cv-warning); font-size: var(--cv-type-meta); line-height: 1.6; }
@@ -417,9 +417,9 @@ button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 3px; 
   .review-heading h2 { font-size: 19px; }
   .review-heading p { font-size: 12px; }
   .review-groups { gap: 14px; padding: 0; }
-  .review-filters { padding: 12px 15px; }
-  .review-batch { padding: 10px 20px; }
-  .batch-actions { width: 100%; margin-left: 27px; }
+  .review-filters { padding: 4px 15px; }
+  .review-batch { padding: 4px 20px; }
+  .batch-actions { width: auto; margin-left: auto; flex-wrap: nowrap; }
   .suggestion-list { padding: 0 20px; }
   .suggestion-row { gap: 11px; padding: 23px 0; }
   .suggestion-select { flex-basis: 20px; min-width: 20px; }
@@ -433,6 +433,8 @@ button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 3px; 
   .review-heading { gap: 10px; }
   .review-heading-actions { flex-direction: column; align-items: flex-end; }
   .suggestion-row { flex-wrap: wrap; }
+  .review-batch { flex-wrap: wrap; }
+  .batch-actions { width: 100%; margin-left: 27px; flex-wrap: wrap; }
   .suggestion-main { flex-basis: calc(100% - 55px); }
   .suggestion-actions { margin-left: 55px; }
   .suggestion-title strong { flex-basis: calc(100% - 56px); }

@@ -420,7 +420,7 @@ onBeforeUnmount(() => {
   <Teleport to="body" :disabled="!fullscreen">
     <section class="relationship-explorer" :class="{ 'is-fullscreen': fullscreen, 'is-spatial': spatial && spatialSceneReady, 'is-webgl': spatial && spatialSceneReady, 'is-readonly': readOnly, 'is-depth-mode': depthMode }" :aria-label="fullscreen ? '人物关系全屏视图' : '人物关系图'">
       <header class="graph-toolbar">
-        <div class="graph-heading"><strong>{{ people.length }} 位人物</strong><span>{{ relationships.length }} 条手动关系</span></div>
+        <div class="graph-heading"><strong>人物关系</strong><span>{{ people.length }} 位人物 · {{ relationships.length }} 条关系</span></div>
         <div class="graph-actions">
           <button v-if="!readOnly" type="button" class="graph-icon-button graph-undo" title="撤销人物移动" aria-label="撤销人物移动" :disabled="!moveHistory.length || Boolean(linkSourceId) || Boolean(relationshipDialogOpen)" @click="undoPersonMove"><UiIcon name="arrowLeft" :size="19" /></button>
           <button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" /><span>添加关系</span></button>
@@ -430,7 +430,7 @@ onBeforeUnmount(() => {
       </header>
           <div class="graph-hud">
             <div class="graph-search"><UiIcon name="search" :size="17" /><input v-model="search" placeholder="查找人物或别名" aria-label="查找人物或别名" @keydown.enter="searchMatches[0] && focusPerson(searchMatches[0].id)" /><button v-if="search" type="button" aria-label="清空搜索" @click="search = ''"><UiIcon name="close" :size="16" /></button><div v-if="search.trim()" class="graph-search-results"><button v-for="person in searchMatches" :key="person.id" type="button" @click="focusPerson(person.id)"><span>{{ person.name }}</span><UiIcon name="chevron" :size="16" /></button><p v-if="!searchMatches.length">没有匹配的人物</p></div></div>
-            <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '空间视图' : '空间预览' }}</button><button v-if="spatial && !readOnly" type="button" class="graph-mode" :class="{ active: depthMode }" :aria-pressed="depthMode" @click="depthMode = !depthMode">{{ depthMode ? '前后拖动中' : '调整前后' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button></div>
+            <div class="graph-view-buttons"><button type="button" class="graph-mode" :class="{ active: spatial }" :aria-pressed="spatial" @click="spatial = !spatial"><UiIcon name="cube" :size="17" />{{ spatial ? '空间视图' : '空间预览' }}</button><button v-if="spatial && !readOnly" type="button" class="graph-mode" :class="{ active: depthMode }" :aria-pressed="depthMode" @click="depthMode = !depthMode">{{ depthMode ? '前后拖动中' : '调整前后' }}</button><button type="button" class="graph-mode" :class="{ active: isolateRelated && selectedId }" :aria-pressed="Boolean(isolateRelated && selectedId)" :disabled="!selectedId" @click="isolateRelated = !isolateRelated"><UiIcon name="filter" :size="16" />只看关联</button><button type="button" class="graph-mode" @click="fit"><UiIcon name="fullscreen" :size="16" />显示全部</button></div>
           </div>
       <div class="graph-layout">
         <div ref="stage" class="graph-stage" :class="{ 'is-dragging': dragging, 'is-linking': linkSourceId, 'is-depth-mode': depthMode }" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerEnd" @pointercancel="pointerEnd" @lostpointercapture="pointerEnd" @contextmenu.prevent @wheel="wheel">
@@ -456,7 +456,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="linkSourceId" class="graph-connection-bar" role="status"><div><strong>连线模式 · {{ peopleById.get(linkSourceId)?.name }}</strong><span>{{ linkTargetId ? `连接到 ${peopleById.get(linkTargetId)?.name}` : '拖到目标人物，或松手后点选人物' }}</span></div><button type="button" @click="cancelConnection"><UiIcon name="close" :size="16" />取消连线</button></div>
           <div v-if="!people.length" class="graph-empty"><span><UiIcon name="people" :size="34" /></span><strong>建立你的人物关系图</strong><p>先创建人物，再手动连接他们的关系。</p><button v-if="!readOnly" type="button" class="graph-text-button" @click="openRelationshipPicker"><UiIcon name="plus" :size="18" />添加关系</button></div>
-          <div class="graph-help"><span>{{ linkSourceId ? '拖向人物建立关系 · 点击取消退出' : depthMode ? '上下拖动人物，调整它在空间中的前后位置 · 再次点按“调整前后”退出' : spatial ? '长按人物连线 · 拖动画布 · 双指缩放与旋转' : '长按人物连线 · 拖动画布 · 双指缩放' }}</span><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button><i></i><button type="button" class="graph-fit" @click="fit"><UiIcon name="fullscreen" :size="17" />显示全部</button></div></div>
+          <div class="graph-help"><div class="graph-zoom"><button type="button" aria-label="缩小关系图" @click="zoomAt(zoom / 1.2)"><UiIcon name="zoomOut" :size="19" /></button><span>{{ Math.round(zoom * 100) }}%</span><button type="button" aria-label="放大关系图" @click="zoomAt(zoom * 1.2)"><UiIcon name="zoomIn" :size="19" /></button></div></div>
         </div>
         <aside v-if="selected && !linkSourceId" class="graph-inspector">
           <header><span>人物详情</span><button type="button" class="graph-icon-button" aria-label="关闭人物详情" @click="selectedId = ''"><UiIcon name="close" :size="18" /></button></header>
@@ -497,7 +497,7 @@ onBeforeUnmount(() => {
 .graph-search-results button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: #24313d; text-align: left; font: inherit; font-size: 14px; }
 .graph-search-results button:hover { background: #eef4f7; }
 .graph-search-results p { padding: 8px; color: #788491; font-size: 12px; }
-.graph-view-buttons { display: flex; gap: 8px; }
+.graph-view-buttons { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; justify-content: flex-end; }
 .graph-mode { display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border: 1px solid #e1e7ec; border-radius: 10px; background: #fff; color: #657786; font: inherit; font-size: 12px; cursor: pointer; }
 .graph-mode.active { color: #466879; border-color: #b8cbd5; background: #eef4f7; }
 .graph-mode:disabled { opacity: .4; cursor: default; }
@@ -548,13 +548,13 @@ onBeforeUnmount(() => {
 .graph-connection-bar strong { color: #36586a; font-size: 14px; }
 .graph-connection-bar span { color: #788491; font-size: 12px; }
 .graph-connection-bar button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 44px; padding: 0 12px; border: 1px solid #dfe6eb; border-radius: 9px; background: #fff; color: #466879; font: inherit; font-size: 12px; }
-.graph-help { position: absolute; z-index: 4; right: 16px; left: 16px; bottom: 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; pointer-events: none; }
+.graph-help { position: absolute; z-index: 4; right: 16px; bottom: 14px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; pointer-events: none; }
 .graph-help > span { padding: 8px 10px; border-radius: 8px; background: #f6f8faf2; color: #788491; font-size: 11px; }
 .graph-zoom { display: flex; align-items: center; flex: 0 0 auto; min-height: 44px; padding: 0 4px; border: 1px solid #dfe6eb; border-radius: 10px; background: #fff; pointer-events: auto; }
 .graph-zoom button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 44px; min-height: 44px; padding: 0; border: 0; background: transparent; color: #466879; font: inherit; cursor: pointer; }
 .graph-zoom > span { min-width: 42px; color: #788491; font-size: 11px; text-align: center; }
-.graph-zoom > i { width: 1px; height: 18px; margin: 0 6px; background: #e1e7ec; }
-.graph-zoom button.graph-fit { padding: 0 10px; font-size: 12px; }
+
+
 .graph-empty { position: absolute; inset: 72px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; cursor: auto; }
 .graph-empty > span { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 18px; background: #eaf0f4; color: #638596; }
 .graph-empty strong { font-size: 18px; }
@@ -585,7 +585,7 @@ onBeforeUnmount(() => {
 button:focus-visible { outline: 3px solid #b8cfdc; outline-offset: 2px; }
 .is-readonly .graph-help { display: none; }
 .is-readonly .person-node { cursor: pointer; }
-@media (max-width: 900px) { .graph-inspector { flex-basis: 240px; } .graph-help > span { display: none; } .graph-help { justify-content: flex-end; } }
-@media (max-width: 700px) { .graph-toolbar { padding: 10px 14px; gap: 8px; } .graph-heading { flex-direction: column; gap: 4px; } .graph-heading strong { font-size: 14px; } .graph-heading > span { font-size: 11px; } .graph-actions { gap: 5px; } .graph-text-button { padding: 0 10px; font-size: 12px; } .graph-hud { padding: 0 14px 12px; gap: 8px; } .graph-mode { padding: 0 10px; font-size: 11px; } .graph-search { width: auto; flex: 1; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 34%; max-height: 260px; border-left: 0; border-top: 1px solid #e1e7ec; } .graph-inspector > header { min-height: 48px; padding: 0 12px; } .inspector-content { padding: 14px; } .inspector-actions { margin: 12px 0; } }
+@media (max-width: 900px) { .graph-inspector { flex-basis: 240px; } .graph-help { justify-content: flex-end; } }
+@media (max-width: 700px) { .graph-toolbar { padding: 10px 14px; gap: 8px; } .graph-heading { flex-direction: column; gap: 4px; } .graph-heading strong { font-size: 14px; } .graph-heading > span { font-size: 11px; } .graph-actions { gap: 5px; } .graph-text-button { padding: 0 10px; font-size: 12px; } .graph-hud { flex-wrap: wrap; padding: 0 14px 12px; gap: 8px; } .graph-mode { padding: 0 10px; font-size: 11px; } .graph-search { width: auto; flex: 1 1 100%; } .graph-view-buttons { flex: 1 1 100%; justify-content: flex-start; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 34%; max-height: 260px; border-left: 0; border-top: 1px solid #e1e7ec; } .graph-inspector > header { min-height: 48px; padding: 0 12px; } .inspector-content { padding: 14px; } .inspector-actions { margin: 12px 0; } }
 @media (prefers-reduced-motion: reduce) { .graph-edges g, .person-node, .graph-person-card { transition: none; } }
 </style>

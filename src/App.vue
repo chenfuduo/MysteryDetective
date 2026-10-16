@@ -1416,10 +1416,10 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
               <div><h1>时间线</h1></div>
               <div class="timeline-page-actions">
                 <div class="timeline-display-toggle" role="group" aria-label="时间线展示方式">
-                  <button :class="{ active: timelineDisplayMode === 'axis' }" :aria-pressed="timelineDisplayMode === 'axis'" @click="setTimelineDisplayMode('axis')"><UiIcon name="timeline" :size="17" />时间轴</button>
-                  <button :class="{ active: timelineDisplayMode === 'list' }" :aria-pressed="timelineDisplayMode === 'list'" @click="setTimelineDisplayMode('list')"><UiIcon name="list" :size="17" />事件列</button>
+                  <button type="button" :class="{ active: timelineDisplayMode === 'axis' }" aria-label="时间轴" title="时间轴" :aria-pressed="timelineDisplayMode === 'axis'" @click="setTimelineDisplayMode('axis')"><UiIcon name="timeline" :size="17" /></button>
+                  <button type="button" :class="{ active: timelineDisplayMode === 'list' }" aria-label="事件列" title="事件列" :aria-pressed="timelineDisplayMode === 'list'" @click="setTimelineDisplayMode('list')"><UiIcon name="list" :size="17" /></button>
                 </div>
-                <button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加事件</button>
+                <button type="button" class="primary-button timeline-add-event" aria-label="添加事件" title="添加事件" @click="openEventDialog()"><UiIcon name="plus" :size="18" /></button>
               </div>
             </div>
             <details v-if="organization?.timeline.length || candidateEvents.length" class="timeline-pending"><summary>待确认时间点 <span>{{ (organization?.timeline.length || 0) + candidateEvents.length }}</span><UiIcon name="chevron" :size="16" /></summary><div class="timeline-pending-content">
@@ -1433,10 +1433,10 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
                 <template #page-actions>
                   <div class="timeline-page-actions">
                     <div class="timeline-display-toggle" role="group" aria-label="时间线展示方式">
-                      <button :class="{ active: timelineDisplayMode === 'axis' }" :aria-pressed="timelineDisplayMode === 'axis'" @click="setTimelineDisplayMode('axis')"><UiIcon name="timeline" :size="17" />时间轴</button>
-                      <button :class="{ active: timelineDisplayMode === 'list' }" :aria-pressed="timelineDisplayMode === 'list'" @click="setTimelineDisplayMode('list')"><UiIcon name="list" :size="17" />事件列</button>
+                      <button type="button" :class="{ active: timelineDisplayMode === 'axis' }" aria-label="时间轴" title="时间轴" :aria-pressed="timelineDisplayMode === 'axis'" @click="setTimelineDisplayMode('axis')"><UiIcon name="timeline" :size="17" /></button>
+                      <button type="button" :class="{ active: timelineDisplayMode === 'list' }" aria-label="事件列" title="事件列" :aria-pressed="timelineDisplayMode === 'list'" @click="setTimelineDisplayMode('list')"><UiIcon name="list" :size="17" /></button>
                     </div>
-                    <button class="primary-button" @click="openEventDialog()"><UiIcon name="plus" :size="18" />添加事件</button>
+                    <button type="button" class="primary-button timeline-add-event" aria-label="添加事件" title="添加事件" @click="openEventDialog()"><UiIcon name="plus" :size="18" /></button>
                   </div>
                 </template>
               </TimelineExplorer>
@@ -1514,7 +1514,8 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
 .timeline-page > .source-review-banner { flex: none; }
 .timeline-page-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .timeline-display-toggle { display: inline-flex; gap: 3px; padding: 4px; border: 1px solid #dfe6ec; border-radius: 12px; background: #eef2f5; }
-.timeline-display-toggle button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 16px; border-radius: 9px; background: transparent; color: #7a8a97; font: inherit; font-size: 13px; white-space: nowrap; touch-action: manipulation; transition: background .18s, color .18s; }
+.timeline-display-toggle button { display: inline-flex; flex: 0 0 40px; align-items: center; justify-content: center; width: 40px; min-width: 40px; min-height: 40px; padding: 0; border-radius: 9px; background: transparent; color: #7a8a97; font: inherit; font-size: 13px; white-space: nowrap; touch-action: manipulation; transition: background .18s, color .18s; }
+.timeline-add-event { display: inline-flex; flex: 0 0 40px; align-items: center; justify-content: center; width: 40px; min-width: 40px; min-height: 40px; padding: 0; }
 .timeline-display-toggle button.active { background: #fff; color: #36576e; font-weight: 650; box-shadow: 0 1px 4px #253f5210; }
 .timeline-display-toggle button:focus-visible { outline: 2px solid #7f9db4; outline-offset: 2px; }
 .timeline-list-controls { flex: none; align-items: center; gap: 14px; margin: 0; padding: 12px 16px; }
@@ -1548,9 +1549,9 @@ onUnmounted(() => { if (importPreview.value) vault.discardScriptImportPreview(im
 @media (max-width: 620px) {
   .timeline-page { gap: 12px; }
   .timeline-page-actions { width: 100%; flex-wrap: nowrap; gap: 10px; }
-  .timeline-display-toggle { flex: 1; }
-  .timeline-display-toggle button { flex: 1; padding-inline: 10px; }
-  .timeline-page-actions > .primary-button { padding-inline: 12px; }
+  .timeline-display-toggle { flex: 0 0 auto; }
+  .timeline-display-toggle button { flex: 0 0 40px; padding: 0; }
+  .timeline-page-actions > .primary-button { flex: 0 0 40px; padding: 0; }
   .timeline-list-controls { gap: 10px; padding: 12px; }
   .timeline-list-controls > label { width: auto; flex: 1; }
   .timeline-list-controls > label > span { display: none; }

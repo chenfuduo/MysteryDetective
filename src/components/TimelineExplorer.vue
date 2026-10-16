@@ -540,10 +540,10 @@ onUnmounted(() => {
         <div class="explorer-header-main">
           <div class="explorer-heading"><span class="explorer-heading-icon"><UiIcon name="timeline" :size="20" /></span><div><strong>时间线</strong><span>{{ personId ? `${visibleEvents.length} / ${allEvents.length} 个事件` : `${allEvents.length} 个事件` }}</span></div></div>
           <div class="explorer-controls">
-            <label class="person-filter"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
-            <button class="explorer-button fit-button" title="显示全部" aria-label="显示全部" @click="fitAll"><UiIcon name="restore" :size="17" /><span>显示全部</span></button>
-            <button class="explorer-button fullscreen-button" :aria-label="fullscreen ? '退出全屏时间线' : '全屏查看时间线'" :title="fullscreen ? '退出全屏' : '全屏'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'close' : 'fullscreen'" :size="19" /><span>{{ fullscreen ? '退出全屏' : '全屏' }}</span></button>
-            <div class="explorer-layout-toggle" role="group" aria-label="时间线排列方式"><button :class="{ active: layoutMode === 'proportional' }" :aria-pressed="layoutMode === 'proportional'" @click="layoutMode = 'proportional'">按时间比例</button><button :class="{ active: layoutMode === 'sequence' }" :aria-pressed="layoutMode === 'sequence'" @click="layoutMode = 'sequence'">按事件顺序</button></div>
+            <label class="person-filter person-filter-icon" :class="{ 'is-filtered': Boolean(personId) }" :title="personId ? '已筛选人物，点此切换' : '筛选人物'"><UiIcon name="person" :size="17" /><select :value="personId" aria-label="按人物筛选时间线" @change="emit('update:personId', ($event.target as HTMLSelectElement).value)"><option value="">全部人物</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
+            <button type="button" class="explorer-button fit-button" title="显示全部" aria-label="显示全部" @click="fitAll"><UiIcon name="restore" :size="17" /><span>显示全部</span></button>
+            <button type="button" class="explorer-button fullscreen-button" :aria-label="fullscreen ? '退出全屏时间线' : '全屏查看时间线'" :title="fullscreen ? '退出全屏' : '全屏'" @click="fullscreen = !fullscreen"><UiIcon :name="fullscreen ? 'close' : 'fullscreen'" :size="19" /><span>{{ fullscreen ? '退出全屏' : '全屏' }}</span></button>
+            <div class="explorer-layout-toggle" role="group" aria-label="时间线排列方式"><button type="button" :class="{ active: layoutMode === 'proportional' }" aria-label="时间比例" title="时间比例" :aria-pressed="layoutMode === 'proportional'" @click="layoutMode = 'proportional'">时间比例</button><button type="button" :class="{ active: layoutMode === 'sequence' }" aria-label="事件顺序" title="事件顺序" :aria-pressed="layoutMode === 'sequence'" @click="layoutMode = 'sequence'">事件顺序</button></div>
             <label v-if="allEvents.length && layoutMode === 'proportional'" class="density-toggle" :title="densitySummary"><input v-model="densityEnabled" type="checkbox" />收拢密集事件</label>
           </div>
           <div class="explorer-page-actions"><slot name="page-actions" /></div>
@@ -551,7 +551,7 @@ onUnmounted(() => {
       </header>
       <div v-if="allEvents.length" class="explorer-stage">
         <article class="timeline-lane unified-lane">
-          <div class="lane-heading"><strong>{{ layoutMode === 'sequence' ? '按事件顺序' : '按实际时间' }}</strong><span class="timeline-legend"><template v-if="datedCount"><i class="dated-swatch"></i>有年份</template><template v-if="yearlessCount"><i class="yearless-swatch"></i>无年份</template></span></div>
+          <div class="lane-heading"><strong>{{ layoutMode === 'sequence' ? '事件顺序' : '实际时间' }}</strong><span class="timeline-legend"><template v-if="datedCount"><i class="dated-swatch"></i>有年份</template><template v-if="yearlessCount"><i class="yearless-swatch"></i>无年份</template></span></div>
           <div class="timeline-view-body" :class="{ 'is-portrait': isPortrait }">
             <div ref="plotElement" class="unified-chart" :class="{ 'portrait-chart': isPortrait }">
               <div v-if="isPortrait" class="portrait-timeline" @pointerdown.capture="beginPortraitPointer" @pointermove.capture="movePortraitPointer" @pointerup.capture="endPortraitPointer" @pointercancel.capture="endPortraitPointer" @click.capture="selectChartEvent">
@@ -592,19 +592,22 @@ onUnmounted(() => {
 .timeline-explorer { --explorer-accent: #486b86; position: relative; display: flex; flex: 1; flex-direction: column; width: 100%; min-width: 0; min-height: 0; height: 100%; overflow: hidden; border: 1px solid #dfe6ec; border-radius: 20px; background: #f6f8fa; color: #24313d; outline: none; }
 .timeline-explorer.is-fullscreen { position: fixed; inset: 0; z-index: 1100; width: 100%; height: 100dvh; border: 0; border-radius: 0; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); background: #f6f8fa; box-sizing: border-box; }
 .explorer-toolbar { display: flex; flex-shrink: 0; padding: 14px 16px; border-bottom: 1px solid #e5eaef; background: #fff; }
-.explorer-header-main { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; align-items: center; gap: 12px; width: 100%; min-width: 0; }
-.explorer-controls { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.explorer-page-actions { min-width: 0; justify-self: end; }
-.explorer-page-actions :deep(.timeline-page-actions) { gap: 8px; flex-wrap: nowrap; }
-.explorer-page-actions :deep(.timeline-display-toggle button) { min-height: 40px; padding-inline: 10px; gap: 5px; font-size: 12px; }
-.explorer-page-actions :deep(.primary-button) { min-height: 40px; padding-inline: 12px; font-size: 12px; white-space: nowrap; }
+.explorer-header-main { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.explorer-controls { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; flex-wrap: nowrap; gap: 4px; min-width: 0; }
+.explorer-page-actions { flex: 0 0 auto; min-width: 0; margin-left: 0; }
+.explorer-page-actions :deep(.timeline-page-actions) { gap: 4px; flex-wrap: nowrap; }
+.explorer-page-actions :deep(.timeline-display-toggle button) { flex: 0 0 40px; width: 40px; min-width: 40px; min-height: 40px; padding: 0; gap: 0; font-size: 12px; }
+.explorer-page-actions :deep(.timeline-add-event) { flex: 0 0 40px; width: 40px; min-width: 40px; min-height: 40px; padding: 0; font-size: 12px; white-space: nowrap; }
 .explorer-heading { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .explorer-heading-icon { display: grid; place-items: center; width: 40px; height: 40px; color: #486b86; background: #eef3f7; border-radius: 12px; }
 .explorer-heading strong { display: block; color: #24313d; font-size: 17px; line-height: 1.4; font-weight: 650; letter-spacing: -.02em; }
 .explorer-heading div > span { display: block; color: #778491; font-size: 12px; line-height: 1.6; }
 .person-filter { display: flex; align-items: center; gap: 7px; margin: 0; min-width: 140px; min-height: 44px; padding: 0 12px; border: 1px solid #dfe6ec; border-radius: 11px; color: #6b7c8b; background: #fff; }
-.explorer-controls .person-filter { flex: 0 1 148px; min-width: 120px; min-height: 40px; padding-inline: 8px; }
+.explorer-controls .person-filter { flex: 0 0 40px; width: 40px; min-width: 40px; min-height: 40px; justify-content: center; gap: 0; padding: 0; }
 .person-filter select { width: 100%; min-width: 0; min-height: 42px; margin: 0; padding: 4px 2px; border: 0; border-radius: 0; background: transparent; color: #344657; font: inherit; font-size: 13px; box-shadow: none; }
+.person-filter-icon { position: relative; }
+.person-filter-icon select { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; padding: 0; opacity: 0; cursor: pointer; }
+.person-filter-icon.is-filtered { border-color: #b8cbd5; background: #eef4f7; color: #466879; }
 .explorer-view-toggle { display: flex; padding: 3px; gap: 2px; border: 1px solid #e5eaef; border-radius: 12px; background: #f4f6f8; }
 .explorer-view-toggle button { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 44px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: #7b8894; font: inherit; font-size: 13px; cursor: pointer; transition: background .18s, color .18s; }
 .explorer-view-toggle button.active { color: #324e66; background: #fff; box-shadow: 0 1px 3px #24313d0c; }
@@ -740,7 +743,7 @@ onUnmounted(() => {
 .explorer-vis-host :deep(.vis-item.vis-dot) { display: none; }
 @keyframes detail-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 950px) { .explorer-toolbar { padding: 12px 14px; } .explorer-header-main { gap: 10px; } .explorer-controls { gap: 5px; } .explorer-heading strong { font-size: 15px; } .person-filter { min-width: 120px; } .explorer-button { padding: 0 11px; font-size: 12px; } .explorer-view-toggle button { padding: 0 9px; font-size: 12px; } .explorer-stage { padding: 10px; } .lane-heading { padding-inline: 2px; } .detail-actions { max-width: 145px; } .detail-actions button { width: 100%; } }
-@media (max-width: 1100px) { .explorer-header-main { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; } .explorer-heading { grid-column: 1; grid-row: 1; } .explorer-page-actions { grid-column: 2; grid-row: 1; } .explorer-controls { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; } }
+@media (max-width: 1100px) { .explorer-header-main { gap: 6px; } .explorer-controls { gap: 3px; } .explorer-page-actions :deep(.timeline-page-actions) { gap: 3px; } }
 @media (orientation: landscape) and (min-width: 760px) {
   .timeline-explorer.has-detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 300px); grid-template-rows: auto minmax(0, 1fr); }
   .has-detail .explorer-toolbar { grid-column: 1 / -1; }
@@ -754,6 +757,6 @@ onUnmounted(() => {
   .has-detail .detail-actions button { width: 100%; }
 }
 @media (orientation: portrait) { .event-detail { max-height: 35%; flex-wrap: wrap; gap: 12px; padding: 16px 52px 16px 18px; } .detail-main { flex-basis: 100%; } .detail-evidence { flex-basis: 100%; max-width: none; } .detail-actions { max-width: none; } .detail-main h3 { font-size: 15px; } .event-cluster-panel { flex-basis: 35%; max-height: 35%; } }
-@media (max-width: 650px) { .explorer-header-main { grid-template-columns: minmax(0, 1fr); } .explorer-heading { grid-column: 1; grid-row: 1; } .explorer-page-actions { grid-column: 1; grid-row: 2; justify-self: stretch; } .explorer-controls { grid-column: 1; grid-row: 3; } .portrait-event-card { width: calc(50% - 25px); padding: 8px 9px; } .portrait-event-card.half-upper { left: 4px; } .portrait-event-card.half-lower { right: 4px; } .portrait-event-card.half-upper::after { right: -21px; width: 20px; } .portrait-event-card.half-lower::after { left: -21px; width: 20px; } .explorer-header-main { grid-template-columns: minmax(0, 1fr) auto; } .explorer-heading { grid-column: 1; grid-row: 1; } .explorer-page-actions { grid-column: 2; grid-row: 1; } .explorer-controls { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; } .explorer-controls .person-filter { margin-left: 0; } .explorer-controls .fit-button { margin-left: 0; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
+@media (max-width: 650px) { .explorer-header-main { flex-wrap: wrap; gap: 8px; } .explorer-heading { flex: 1 1 auto; order: 1; } .explorer-page-actions { flex: 0 0 auto; order: 2; margin-left: auto; } .explorer-controls { flex: 1 1 100%; order: 3; justify-content: flex-start; flex-wrap: wrap; } .portrait-event-card { width: calc(50% - 25px); padding: 8px 9px; } .portrait-event-card.half-upper { left: 4px; } .portrait-event-card.half-lower { right: 4px; } .portrait-event-card.half-upper::after { right: -21px; width: 20px; } .portrait-event-card.half-lower::after { left: -21px; width: 20px; } .explorer-controls .person-filter { margin-left: 0; } .explorer-controls .fit-button { margin-left: 0; } .explorer-layout-toggle { max-width: 100%; } .explorer-layout-toggle button { padding-inline: 12px; } .lane-heading { gap: 7px 10px; } .timeline-legend { font-size: 10px; } .shared-axis-tick > span { font-size: 10px; } .shared-axis-tick > small { font-size: 9px; } .explorer-vis-host :deep(.timeline-node-title) { max-width: 220px; } .event-detail, .event-cluster-panel { margin: 0 10px 10px; } }
 @media (prefers-reduced-motion: reduce) { .event-detail { animation: none; } .explorer-button, .explorer-view-toggle button, .explorer-layout-toggle button { transition: none; } }
 </style>

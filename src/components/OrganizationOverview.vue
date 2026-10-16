@@ -64,7 +64,7 @@ const selectionKey = (suggestion: Suggestion) => `${suggestion.kind}:${suggestio
 function focusSuggestions() {
   activeFilter.value = 'all'
   activeGroup.value = null
-  reviewElement.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  reviewElement.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 const allSuggestions = computed<Suggestion[]>(() => {
   const result = props.organization
@@ -222,16 +222,6 @@ function accept(suggestion: Suggestion) {
       <button @click="emit('navigate', 'clues')"><strong>{{ cluePointCount }}</strong><span>个线索点</span></button>
     </div>
 
-    <div class="organize-status" :class="{ ready: apiConfigured }">
-      <span class="status-dot" :class="{ processing: busy }"></span>
-      <span v-if="progress || busy" role="status" aria-live="polite">{{ progress || '正在整理 OCR 文字，完成后建议会显示在下方。' }}</span>
-      <span v-else-if="analysisLabel">{{ analysisLabel }} · 只整理 OCR 文字，照片保存在本机。</span>
-      <span v-else-if="!apiConfigured">照片和 OCR 保存在本机；AI 整理尚未配置。</span>
-      <span v-else-if="autoOrganize">自动整理已开启 · OCR 文字发送到 {{ apiProvider }}，照片留在 iPad。</span>
-      <span v-else>手动整理 · OCR 文字发送到 {{ apiProvider }}，照片留在 iPad。</span>
-      <button @click="emit('navigate', 'settings')">设置</button>
-    </div>
-
     <nav class="organize-shortcuts" aria-label="整理工具">
       <div class="shortcut-heading"><strong>整理工具</strong><span>快速进入</span></div>
       <div class="shortcut-list">
@@ -265,14 +255,15 @@ function accept(suggestion: Suggestion) {
       <div v-if="canUndo" class="empty-undo"><button class="text-button" :disabled="busy" @click="emit('undo')">撤销上一步</button></div>
     </section>
 
-    <section v-else ref="reviewElement" class="review-section">
-      <header class="review-heading"><div><h2>整理建议 <span>{{ pendingCount }}</span></h2><p>选择需要保留的信息，直接加入档案。</p></div><div class="review-heading-actions"><button v-if="nextAction.id !== 'review'" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条录入 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
+    <section v-else class="review-section">
+      <header class="review-heading"><div><h2>整理建议 <span>{{ pendingCount }}</span></h2></div><div class="review-heading-actions"><button v-if="nextAction.id !== 'review'" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条录入 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
       <nav class="review-groups" aria-label="按处理步骤筛选">
         <button v-for="group in groups" :key="group.id" :class="{ active: effectiveGroup === group.id }" :aria-pressed="effectiveGroup === group.id" @click="activeGroup = group.id">{{ group.label }} <span>{{ group.count }}</span></button>
       </nav>
       <nav class="review-filters" aria-label="筛选整理建议">
         <button v-for="filter in filters" :key="filter.id" :class="{ active: activeFilter === filter.id }" :aria-pressed="activeFilter === filter.id" @click="activeFilter = filter.id">{{ filter.label }} <span>{{ filter.count }}</span></button>
       </nav>
+      <div ref="reviewElement" class="review-scroll-region">
       <div v-if="pendingCount || canUndo" class="review-batch">
         <label v-if="visibleSuggestions.length" class="batch-select"><input type="checkbox" :checked="allVisibleSelected" :disabled="busy" @change="selectVisible" /><span>全选当前 {{ visibleSuggestions.length }} 项</span></label>
         <span class="batch-count" role="status">共选 {{ selectedCount }} 项<span v-if="hiddenSelectedCount">（其中 {{ hiddenSelectedCount }} 项在其他筛选中）</span></span>
@@ -293,6 +284,7 @@ function accept(suggestion: Suggestion) {
         </article>
       </div>
       <footer class="review-footnote">录入后可以继续编辑或撤销。所有建议均保留原线索出处。</footer>
+      </div>
     </section>
   </section>
 </template>
@@ -307,14 +299,17 @@ function accept(suggestion: Suggestion) {
   user-select: none;
   -webkit-touch-callout: none;
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 24px;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   width: 100%;
   box-sizing: border-box;
   color: var(--overview-ink);
 }
-.organize-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.organize-header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 24px; }
 .organize-header h1 { margin: 0; color: var(--overview-ink); font-size: 29px; font-weight: 650; letter-spacing: -.035em; }
 .organize-header p { max-width: 560px; margin: 6px 0 0; color: var(--overview-muted); font-size: 14px; line-height: 1.7; }
 .organize-header-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
@@ -322,7 +317,7 @@ function accept(suggestion: Suggestion) {
 .organize-header-actions .secondary-button { min-height: 44px; padding: 0 16px; border: 1px solid var(--overview-line); border-radius: 11px; background: #fff; color: #536673; font-size: 13px; box-shadow: none; white-space: nowrap; }
 .organize-header .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; padding: 0 21px; border: 1px solid var(--overview-accent); border-radius: 11px; background: var(--overview-accent); color: #fff; font-size: 14px; font-weight: 600; white-space: nowrap; box-shadow: none; }
 .organize-spinner { width: 15px; height: 15px; border: 2px solid #ffffff59; border-top-color: #fff; border-radius: 50%; animation: organize-spin .8s linear infinite; }
-.organize-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; padding: 4px 0 20px; border-bottom: 1px solid var(--overview-line); }
+.organize-summary { display: grid; flex-shrink: 0; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; padding: 4px 0 20px; border-bottom: 1px solid var(--overview-line); }
 .organize-summary > button { display: flex; align-items: baseline; gap: 7px; min-width: 0; min-height: 40px; padding: 8px 0; border: 0; border-radius: 6px; background: transparent; text-align: left; }
 .organize-summary strong { color: var(--overview-ink); font-size: 26px; font-weight: 600; line-height: 1; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
 .organize-summary span { color: var(--overview-muted); font-size: 12px; white-space: nowrap; }
@@ -332,7 +327,7 @@ function accept(suggestion: Suggestion) {
 .organize-status.ready .status-dot { background: #709483; }
 .status-dot.processing { animation: organize-pulse 1.25s ease-in-out infinite; }
 .organize-status button { flex: 0 0 auto; min-width: 44px; min-height: 36px; margin-left: auto; padding: 4px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--overview-accent); font-size: 12px; }
-.organize-shortcuts { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.organize-shortcuts { display: flex; flex-shrink: 0; flex-direction: column; gap: 12px; min-width: 0; }
 .shortcut-heading { display: flex; align-items: baseline; gap: 9px; }
 .shortcut-heading strong { color: #536673; font-size: 12px; font-weight: 600; letter-spacing: .04em; }
 .shortcut-heading span { display: none; }
@@ -344,8 +339,9 @@ function accept(suggestion: Suggestion) {
 .shortcut-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .shortcut-label { min-width: 0; color: inherit; font-size: 13px; font-weight: 550; line-height: 1.4; white-space: nowrap; }
 .shortcut-arrow { display: none; }
-.review-section { display: flex; flex: 0 0 auto; flex-direction: column; min-width: 0; scroll-margin-top: 20px; border: 1px solid var(--overview-line); border-radius: 16px; background: #fff; overflow: hidden; box-shadow: none; }
-.review-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 26px 20px; }
+.review-section { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; scroll-margin-top: 20px; border: 1px solid var(--overview-line); border-radius: 16px; background: #fff; overflow: hidden; box-shadow: none; }
+.review-scroll-region { flex: 1 1 0; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
+.review-heading { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 26px 20px; }
 .review-heading h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; color: var(--overview-ink); font-size: 20px; font-weight: 620; letter-spacing: -.025em; }
 .review-heading h2 span { display: inline-grid; place-items: center; min-width: 23px; height: 23px; padding: 0 6px; border-radius: 7px; background: #eef4f7; color: var(--overview-accent); font-size: 11px; font-variant-numeric: tabular-nums; }
 .review-heading p { margin: 0; color: var(--overview-muted); font-size: 13px; line-height: 1.6; }

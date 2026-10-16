@@ -12,5 +12,6 @@ import '@vue-flow/controls/dist/style.css'
 import 'vis-timeline/styles/vis-timeline-graph2d.min.css'
 import './style.css'
 import './reading.css'
+import './design-tokens.css'
 
 createApp(App).use(IonicVue).use(VueKonva).mount('#app')

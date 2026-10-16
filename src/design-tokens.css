@@ -1,0 +1,47 @@
+/* Opt-in tokens: the clue library is the first consumer. */
+:root {
+  --cv-font: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --cv-canvas: #f5f7f9;
+  --cv-surface: #ffffff;
+  --cv-surface-subtle: #eef2f5;
+  --cv-image: #e8edf1;
+  --cv-ink: #24313d;
+  --cv-secondary: #526574;
+  --cv-muted: #5e6e7c;
+  --cv-accent: #466879;
+  --cv-accent-strong: #344f5e;
+  --cv-accent-soft: #e8f0f4;
+  --cv-border: #dde5eb;
+  --cv-border-strong: #8498a6;
+  --cv-focus: #315f78;
+  --cv-warning: #8a6030;
+  --cv-warning-soft: #fbf4ea;
+  --cv-danger: #a43f3a;
+  --cv-success: #356653;
+  --cv-on-accent: #ffffff;
+  --cv-type-page: 1.625rem;
+  --cv-type-title: 1rem;
+  --cv-type-body: .9375rem;
+  --cv-type-summary: .875rem;
+  --cv-type-label: .8125rem;
+  --cv-type-meta: .75rem;
+  --cv-type-input: 1rem;
+  --cv-leading-ui: 1.5;
+  --cv-leading-reading: 1.7;
+  --cv-space-1: 4px;
+  --cv-space-2: 8px;
+  --cv-space-3: 12px;
+  --cv-space-4: 16px;
+  --cv-space-6: 24px;
+  --cv-space-8: 32px;
+  --cv-radius-tag: 6px;
+  --cv-radius-control: 10px;
+  --cv-radius-panel: 14px;
+  --cv-control: 44px;
+  --cv-icon: 20px;
+  --cv-shadow-raised: 0 8px 28px rgb(36 49 61 / 10%);
+  --cv-motion-press: 120ms;
+  --cv-motion-panel: 180ms;
+  --cv-ease: cubic-bezier(.2, .7, .2, 1);
+  --cv-layer-popover: 30;
+}

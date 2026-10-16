@@ -32,4 +32,16 @@ function dateLabel(value: string) { const date = new Date(value); return Number.
 .recovery-list span, .recovery-empty { color: var(--cv-muted); }
 .recovery-empty strong { color: var(--cv-secondary); }
 .recovery-error { background: var(--cv-warning-soft); color: var(--cv-warning); }
+
+.recovery-dialog { display: flex; flex-direction: column; max-height: calc(100dvh - 40px); font-family: var(--cv-font); }
+.recovery-dialog .modal-head, .recovery-dialog footer { flex-shrink: 0; }
+.recovery-dialog .modal-head > div { min-width: 0; }
+.recovery-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.recovery-list span { font-size: var(--cv-type-meta); line-height: var(--cv-leading-ui); }
+.recovery-dialog button { min-height: var(--cv-control); transition: background-color var(--cv-motion-press) var(--cv-ease); touch-action: manipulation; }
+.recovery-dialog .modal-head > button { min-width: var(--cv-control); }
+.recovery-dialog button:not(:disabled):active { filter: brightness(.94); }
+.recovery-dialog button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .recovery-dialog, .recovery-dialog * { animation: none !important; transition: none !important; } }
+
 </style>

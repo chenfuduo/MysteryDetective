@@ -35,4 +35,17 @@ onBeforeUnmount(() => { request++ })
 .person-merge-preview dt { color: var(--cv-secondary); }
 .person-merge-preview dd { color: var(--cv-ink); }
 .merge-error { color: var(--cv-danger); }
+
+.person-merge-dialog { display: flex; flex-direction: column; max-height: calc(100dvh - 40px); font-family: var(--cv-font); }
+.person-merge-dialog .modal-head, .person-merge-dialog .modal-actions { flex-shrink: 0; }
+.person-merge-dialog .modal-head > div, .person-merge-preview { min-width: 0; overflow-wrap: anywhere; }
+.person-merge-dialog .form-stack { min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.person-merge-dialog button, .person-merge-dialog select { min-height: var(--cv-control); }
+.person-merge-dialog select { font-size: var(--cv-type-input); }
+.person-merge-dialog .modal-head > button { min-width: var(--cv-control); }
+.person-merge-dialog button { transition: background-color var(--cv-motion-press) var(--cv-ease); touch-action: manipulation; }
+.person-merge-dialog button:not(:disabled):active { filter: brightness(.94); }
+.person-merge-dialog button:focus-visible, .person-merge-dialog select:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .person-merge-dialog, .person-merge-dialog * { animation: none !important; transition: none !important; } }
+
 </style>

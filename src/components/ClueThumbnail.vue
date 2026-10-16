@@ -61,5 +61,13 @@ onBeforeUnmount(() => { sequence += 1; observer?.disconnect(); resizeObserver?.d
 </template>
 
 <style scoped>
-.clue-thumbnail{position:relative;display:block;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:#edf2e8;color:#93a187;border-radius:inherit;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}.clue-thumbnail img{display:block;width:100%;height:100%;object-fit:var(--thumbnail-fit,cover);pointer-events:none}.thumbnail-placeholder{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:5px;width:100%;height:100%;min-height:32px;font-size:10px;text-align:center}.thumbnail-placeholder button{min-height:32px;padding:3px 10px;border:1px solid #d3dfca;border-radius:7px;background:#fff;color:#496c40;font:inherit;cursor:pointer;touch-action:manipulation}.thumbnail-placeholder button:focus-visible{outline:2px solid #719d61;outline-offset:2px}
+.clue-thumbnail { position: relative; display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: var(--cv-image); color: var(--cv-muted); border-radius: inherit; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.clue-thumbnail img { display: block; width: 100%; height: 100%; object-fit: var(--thumbnail-fit, cover); pointer-events: none; }
+.thumbnail-placeholder { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; width: 100%; height: 100%; min-height: 44px; padding: 4px; box-sizing: border-box; font-size: 12px; line-height: 1.5; text-align: center; }
+.thumbnail-placeholder:has(button) { gap: 4px; }
+.thumbnail-placeholder:has(button) > svg { display: none; }
+.thumbnail-placeholder button { min-width: 44px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--cv-border); border-radius: 10px; background: var(--cv-surface); color: var(--cv-accent); font: inherit; cursor: pointer; touch-action: manipulation; transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease; }
+.thumbnail-placeholder button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 2px; }
+.thumbnail-placeholder button:active { background: var(--cv-accent-soft); color: var(--cv-accent-strong); border-color: var(--cv-border-strong); }
+@media (prefers-reduced-motion: reduce) { .thumbnail-placeholder button { transition: none; } }
 </style>

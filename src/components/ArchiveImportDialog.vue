@@ -55,4 +55,14 @@ onBeforeUnmount(() => { previousFocus?.focus() })
 .archive-import-issues { border-color: color-mix(in srgb, var(--cv-danger) 22%, white); background: color-mix(in srgb, var(--cv-danger) 7%, white); color: var(--cv-danger); }
 .archive-import-warnings { border-color: color-mix(in srgb, var(--cv-warning) 20%, white); background: var(--cv-warning-soft); color: var(--cv-warning); }
 .archive-import-dialog .modal-actions { border-color: var(--cv-border); }
+
+.archive-import-eyebrow, .archive-import-counts dt { font-size: var(--cv-type-meta); }
+.archive-import-dialog { font-family: var(--cv-font); }
+.archive-import-dialog .modal-head > div { min-width: 0; }
+.archive-import-dialog button { min-height: var(--cv-control); transition: background-color var(--cv-motion-press) var(--cv-ease); touch-action: manipulation; }
+.archive-import-dialog .modal-head > button { min-width: var(--cv-control); }
+.archive-import-dialog button:not(:disabled):active { filter: brightness(.94); }
+.archive-import-dialog button:focus-visible { outline: 2px solid var(--cv-focus); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .archive-import-dialog, .archive-import-dialog * { animation: none !important; transition: none !important; } }
+
 </style>

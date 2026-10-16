@@ -245,10 +245,10 @@ function accept(suggestion: Suggestion) {
     </section>
 
     <section v-else class="review-section">
-      <header class="review-heading"><div><h2>整理建议 <span>{{ pendingCount }}</span></h2></div><div class="review-heading-actions"><button v-if="nextAction.id !== 'review'" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条录入 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
-      <nav class="review-groups" aria-label="按处理步骤筛选">
+      <header class="review-heading"><div><h2><span>{{ pendingCount }}</span></h2></div><nav class="review-groups" aria-label="按处理步骤筛选">
         <button v-for="group in groups" :key="group.id" :class="{ active: effectiveGroup === group.id }" :aria-pressed="effectiveGroup === group.id" @click="activeGroup = group.id">{{ group.label }} <span>{{ group.count }}</span></button>
-      </nav>
+      </nav><div class="review-heading-actions"><button v-if="nextAction.id !== 'review'" class="workbench-entry" :disabled="busy" @click="emit('openWorkbench')">逐条录入 <span aria-hidden="true">↗</span></button><time v-if="organization">更新于 {{ dateLabel(organization.updatedAt) }}</time><button v-if="pendingCount" class="clear-suggestions-button" :disabled="busy" @click="emit('clearSuggestions')">清除全部</button></div></header>
+      
       <nav class="review-filters" aria-label="筛选整理建议">
         <button v-for="filter in filters" :key="filter.id" :class="{ active: activeFilter === filter.id }" :aria-pressed="activeFilter === filter.id" @click="activeFilter = filter.id">{{ filter.label }} <span>{{ filter.count }}</span></button>
       </nav>
@@ -322,16 +322,16 @@ function accept(suggestion: Suggestion) {
 .shortcut-arrow { display: none; }
 .review-section { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; scroll-margin-top: 20px; border: 1px solid var(--overview-line); border-radius: 16px; background: #fff; overflow: hidden; box-shadow: none; }
 .review-scroll-region { flex: 1 1 0; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
-.review-heading { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 26px 20px; }
-.review-heading h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; color: var(--overview-ink); font-size: 20px; font-weight: 620; letter-spacing: -.025em; }
+.review-heading { display: flex; flex: 0 0 auto; align-items: center; gap: 14px; padding: 18px 26px 14px; }
+.review-heading h2 { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; margin: 0; color: var(--overview-ink); font-size: 20px; font-weight: 620; letter-spacing: -.025em; }
 .review-heading h2 span { display: inline-grid; place-items: center; min-width: 23px; height: 23px; padding: 0 6px; border-radius: 7px; background: #eef4f7; color: var(--overview-accent); font-size: 11px; font-variant-numeric: tabular-nums; }
 .review-heading p { margin: 0; color: var(--overview-muted); font-size: 13px; line-height: 1.6; }
 .review-heading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; }
 .review-heading time { color: #96a0aa; font-size: 11px; white-space: nowrap; }
 .workbench-entry { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 13px; border: 1px solid var(--overview-line); border-radius: 9px; color: var(--overview-accent); background: #fff; font-size: 12px; font-weight: 550; white-space: nowrap; }
 .clear-suggestions-button { min-height: 38px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #8e7771; font-size: 12px; white-space: nowrap; }
-.review-groups { display: flex; flex: 0 0 auto; gap: 22px; padding: 0 26px; border-bottom: 1px solid var(--overview-line); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
-.review-groups button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: 45px; padding: 0 0 11px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--overview-muted); font-size: 13px; }
+.review-groups { display: flex; flex: 1 1 auto; min-width: 0; gap: 18px; padding: 0; border-bottom: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.review-groups button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: 38px; padding: 0 0 4px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--overview-muted); font-size: 13px; }
 .review-groups button.active { border-bottom-color: var(--overview-accent); color: var(--overview-ink); font-weight: 600; }
 .review-groups button span { font-size: 11px; font-variant-numeric: tabular-nums; color: #97a1ab; }
 .review-filters { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 15px 22px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
@@ -416,11 +416,11 @@ button:focus-visible { outline: 2px solid #8aa8b8; outline-offset: 3px; }
   .shortcut-list { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 4px; }
   .shortcut-button { justify-content: flex-start; padding-left: 13px; gap: 9px; }
   .shortcut-button:nth-child(4):before { display: none; }
-  .review-heading { align-items: flex-start; padding: 21px 20px 18px; }
+  .review-heading { align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 20px; }
   .review-heading-actions { gap: 7px; }
   .review-heading h2 { font-size: 19px; }
   .review-heading p { font-size: 12px; }
-  .review-groups { gap: 20px; padding: 0 20px; }
+  .review-groups { gap: 14px; padding: 0; }
   .review-filters { padding: 12px 15px; }
   .review-batch { padding: 10px 20px; }
   .batch-actions { width: 100%; margin-left: 27px; }

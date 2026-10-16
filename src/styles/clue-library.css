@@ -99,7 +99,7 @@
 .page-clues .clue-card:hover { transform: none; border-color: var(--cv-border-strong); box-shadow: none; }
 .page-clues .clue-card:active { background: var(--cv-surface-subtle); }
 .page-clues .clue-image { position: relative; flex: none; width: 100%; height: 220px; margin: 0; padding: var(--cv-space-2); overflow: hidden; border-radius: 0; background: var(--cv-image); }
-.page-clues .clue-image :deep(.clue-thumbnail) { background: var(--cv-image); border-radius: var(--cv-radius-tag); color: var(--cv-muted); }
+.page-clues .clue-image .clue-thumbnail { background: var(--cv-image); border-radius: var(--cv-radius-tag); color: var(--cv-muted); }
 .page-clues .clue-image :deep(.thumbnail-placeholder) { color: var(--cv-secondary); font-size: var(--cv-type-meta); }
 .page-clues .clue-number { top: var(--cv-space-2); left: var(--cv-space-2); padding: var(--cv-space-1) var(--cv-space-2); border-radius: var(--cv-radius-tag); color: var(--cv-on-accent); background: var(--cv-accent-strong); font-size: var(--cv-type-meta); font-weight: 600; line-height: var(--cv-leading-ui); font-variant-numeric: tabular-nums; }
 .page-clues .favorite-button { top: var(--cv-space-2); right: var(--cv-space-2); width: var(--cv-control); height: var(--cv-control); border: 1px solid var(--cv-border); border-radius: var(--cv-radius-control); color: var(--cv-secondary); background: var(--cv-surface); box-shadow: none; }
@@ -135,7 +135,7 @@
 .page-clues .clue-collection.list .clue-card { display: grid; grid-template-columns: clamp(160px, 18vw, 192px) minmax(0, 1fr); gap: 0; min-height: 184px; border: 0; border-bottom: 1px solid var(--cv-border); border-radius: 0; background: transparent; }
 .page-clues .clue-collection.list .clue-card:last-child { border-bottom: 0; }
 .page-clues .clue-collection.list .clue-image { align-self: stretch; width: 100%; height: auto; min-height: 184px; flex: none; }
-.page-clues .clue-collection.list .clue-image :deep(.clue-thumbnail) { position: absolute; inset: var(--cv-space-2); width: auto; height: auto; }
+.page-clues .clue-collection.list .clue-image .clue-thumbnail { position: absolute; inset: var(--cv-space-2); width: auto; height: auto; }
 .page-clues .clue-collection.list .clue-card-body { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title meta" "excerpt excerpt" "bottom bottom"; align-content: center; align-items: center; gap: var(--cv-space-1) var(--cv-space-3); min-width: 0; padding: var(--cv-space-3) var(--cv-space-6); }
 .page-clues .clue-collection.list .clue-card-meta { grid-area: meta; justify-content: flex-end; max-width: 168px; gap: var(--cv-space-2); }
 .page-clues .clue-collection.list .clue-card-meta > span { padding: 0; background: transparent; }

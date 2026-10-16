@@ -75,14 +75,26 @@ const searchMatches = computed(() => {
 })
 const worldStyle = computed(() => ({ transform: `translate(${pan.value.x}px, ${pan.value.y}px) scale(${zoom.value})` }))
 const edges = computed(() => {
-  const placed: { x: number; y: number; width: number }[] = []
-  return relationships.value.map(relationship => {
+  const grouped = new Map<string, RelationshipRecord[]>()
+  for (const relationship of relationships.value) {
+    const key = [relationship.fromId, relationship.toId].sort().join('\u0000')
+    const pair = grouped.get(key) || []
+    pair.push(relationship)
+    grouped.set(key, pair)
+  }
+  const placed: { x: number; y: number; width: number; height: number }[] = []
+  return [...grouped.entries()].map(([id, pair]) => {
+    const relationship = pair[0]!
     const from = positions.value[relationship.fromId]
     const to = positions.value[relationship.toId]
     if (!from || !to) return null
     const active = !linkSourceId.value && (!selectedId.value || relationship.fromId === selectedId.value || relationship.toId === selectedId.value)
-    const label = relationship.label || '关联'
-    const labelWidth = Math.min(180, Math.max(44, label.length * 12 + 20))
+    const labels = pair.map(item => {
+      const text = item.label || '关联'
+      return { id: item.id, text, width: Math.min(180, Math.max(44, text.length * 12 + 20)) }
+    })
+    const width = Math.max(...labels.map(label => label.width))
+    const height = (labels.length - 1) * 30 + 26
     const length = Math.max(1, Math.hypot(to.x - from.x, to.y - from.y))
     const normal = { x: -(to.y - from.y) / length, y: (to.x - from.x) / length }
     let point = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 }
@@ -90,14 +102,14 @@ const edges = computed(() => {
     for (const offset of [0, 28, -28, 56, -56, 84, -84]) {
       for (const fraction of [0.5, 0.38, 0.62]) {
         const candidate = { x: from.x + (to.x - from.x) * fraction + normal.x * offset, y: from.y + (to.y - from.y) * fraction + normal.y * offset }
-        const hitsLabel = placed.some(previous => Math.abs(candidate.x - previous.x) < (labelWidth + previous.width) / 2 + 9 && Math.abs(candidate.y - previous.y) < 32)
-        const hitsPerson = Object.values(positions.value).some(position => Math.abs(candidate.x - position.x) < 94 + labelWidth / 2 && Math.abs(candidate.y - position.y) < 60)
+        const hitsLabel = placed.some(previous => Math.abs(candidate.x - previous.x) < (width + previous.width) / 2 + 9 && Math.abs(candidate.y - previous.y) < (height + previous.height) / 2 + 9)
+        const hitsPerson = Object.values(positions.value).some(position => Math.abs(candidate.x - position.x) < 94 + width / 2 && Math.abs(candidate.y - position.y) < 45 + height / 2)
         if (!hitsLabel && !hitsPerson) { point = candidate; found = true; break }
       }
       if (found) break
     }
-    placed.push({ ...point, width: labelWidth })
-    return { relationship, from, to, x: point.x, y: point.y, active, label, labelWidth }
+    placed.push({ ...point, width, height })
+    return { id, from, to, x: point.x, y: point.y, active, labels }
   }).filter((edge): edge is NonNullable<typeof edge> => edge !== null)
 })
 
@@ -380,8 +392,8 @@ onBeforeUnmount(() => {
       <header class="graph-toolbar">
         <div class="graph-heading"><strong>人物关系</strong><span>{{ people.length }} 位人物 · {{ relationships.length }} 条关系</span></div>
         <nav v-if="!readOnly && !hidePageToggle" class="graph-page-toggle" aria-label="人物关系页面">
-          <button type="button" :class="{ active: props.displayMode === 'list' }" :aria-current="props.displayMode === 'list' ? 'page' : undefined" @click="emit('show-people-list')">人物列表</button>
-          <button type="button" :class="{ active: props.displayMode !== 'list' }" :aria-current="props.displayMode !== 'list' ? 'page' : undefined" @click="emit('show-relationship-graph')">关系图</button>
+          <button type="button" :class="{ active: props.displayMode === 'list' }" aria-label="人物列表" title="人物列表" :aria-current="props.displayMode === 'list' ? 'page' : undefined" @click="emit('show-people-list')"><UiIcon name="people" :size="18" /></button>
+          <button type="button" :class="{ active: props.displayMode !== 'list' }" aria-label="关系图" title="关系图" :aria-current="props.displayMode !== 'list' ? 'page' : undefined" @click="emit('show-relationship-graph')"><UiIcon name="relationship" :size="18" /></button>
         </nav>
         <div class="graph-actions">
           <button v-if="!readOnly" type="button" class="graph-icon-button graph-undo" title="撤销人物移动" aria-label="撤销人物移动" :disabled="!moveHistory.length || Boolean(linkSourceId) || Boolean(relationshipDialogOpen)" @click="undoPersonMove"><UiIcon name="arrowLeft" :size="19" /></button>
@@ -401,10 +413,10 @@ onBeforeUnmount(() => {
           <div class="graph-ground" aria-hidden="true"></div>
           <div class="graph-world" :style="worldStyle">
             <svg class="graph-edges" width="1" height="1" aria-hidden="true">
-              <g v-for="edge in edges" :key="edge.relationship.id" :class="{ 'is-muted': !edge.active, 'is-connected': edge.active && selectedId }">
+              <g v-for="edge in edges" :key="edge.id" :class="{ 'is-muted': !edge.active, 'is-connected': edge.active && selectedId }">
                 <line class="edge-shadow" :x1="edge.from.x" :y1="edge.from.y + 8" :x2="edge.to.x" :y2="edge.to.y + 8" />
                 <line class="edge-line" :x1="edge.from.x" :y1="edge.from.y" :x2="edge.to.x" :y2="edge.to.y" />
-                <g :transform="`translate(${edge.x},${edge.y})`"><rect :x="-edge.labelWidth / 2" y="-13" :width="edge.labelWidth" height="26" rx="13" /><text text-anchor="middle" dominant-baseline="central">{{ edge.label.length > 14 ? `${edge.label.slice(0, 14)}…` : edge.label }}</text></g>
+                <g v-for="(label, index) in edge.labels" :key="label.id" :transform="`translate(${edge.x},${edge.y + (index - (edge.labels.length - 1) / 2) * 30})`"><rect :x="-label.width / 2" y="-13" :width="label.width" height="26" rx="13" /><text text-anchor="middle" dominant-baseline="central">{{ label.text.length > 14 ? `${label.text.slice(0, 14)}…` : label.text }}</text></g>
               </g>
               <g v-if="linkingLine" class="connection-preview"><line class="connection-preview-shadow" :x1="linkingLine.from.x" :y1="linkingLine.from.y + 6" :x2="linkingLine.to.x" :y2="linkingLine.to.y + 6" /><line :class="{ 'has-target': linkTargetId }" :x1="linkingLine.from.x" :y1="linkingLine.from.y" :x2="linkingLine.to.x" :y2="linkingLine.to.y" /></g>
             </svg>
@@ -550,5 +562,13 @@ onBeforeUnmount(() => {
 @media (hover: hover) { .graph-search-results button:hover, .relation-person:hover { background: var(--cv-canvas); } .graph-icon-button:enabled:hover, .graph-mode:enabled:hover, .graph-zoom button:hover, .inspector-actions button:hover { background: var(--cv-accent-soft); } }
 @media (max-width: 900px) { .graph-inspector { flex-basis: 240px; } .graph-toolbar { padding-inline: 16px; } .graph-hud { padding-inline: 16px; } }
 @media (max-width: 700px) { .graph-toolbar { padding: 12px 14px; gap: 8px; } .graph-heading { flex: 1 1 auto; flex-direction: column; gap: 4px; } .graph-heading strong { font-size: 16px; } .graph-actions { flex: 1 1 auto; justify-content: flex-end; } .graph-text-button { padding-inline: 10px; } .graph-page-toggle { order: 2; } .graph-hud { padding: 0 14px 12px; gap: 8px; } .graph-search { max-width: none; flex: 1 1 100%; } .graph-view-buttons { flex: 1 1 auto; justify-content: flex-start; } .graph-mode { padding-inline: 10px; } .graph-zoom { margin-left: auto; } .graph-layout { flex-direction: column; } .graph-inspector { flex: 0 0 38%; max-height: 300px; border-left: 0; border-top: 1px solid var(--cv-border); } .graph-inspector > header { min-height: 48px; padding: 0 12px; } .inspector-content { padding: 14px; } .inspector-actions { margin: 12px 0; } .graph-connection-bar { flex-wrap: wrap; right: 12px; left: 12px; } }
+@media (min-width: 901px) {
+  .graph-toolbar { flex-wrap: nowrap; gap: 12px; }
+  .graph-heading { flex: 1 1 auto; }
+  .graph-page-toggle button { display: grid; place-items: center; width: 44px; min-width: 44px; height: 44px; padding: 0; }
+  .graph-actions { flex-wrap: nowrap; gap: 8px; }
+}
+.graph-heading > span, .graph-person-card-copy > span, .person-clue-count, .inspector-no-relations { color: var(--cv-secondary); }
+.graph-edges text { font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { .relationship-explorer button, .graph-edges g, .person-node, .graph-person-card { transition: none; } }
 </style>
